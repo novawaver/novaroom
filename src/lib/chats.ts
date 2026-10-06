@@ -1,0 +1,682 @@
+import type { RealtimeChannel } from "@supabase/supabase-js"
+import { emptyProfile, type Profile, type Session } from "../types"
+import { supabase } from "./supabase"
+import { PREVIEW_CHATS_KEY, PREVIEW_PROFILES_KEY, previewUserId, normalizeEmail } from "./preview"
+import {
+  messagingLock,
+  messagingLockMessage,
+  previewBlockedIds,
+  previewEitherBlocked,
+  publishChatEvent,
+} from "./safety"
+import { ensurePreviewRooms } from "./rooms"
+
+const FILE_LIMIT = 25 * 1024 * 1024
+const PREVIEW_FILE_LIMIT = 8 * 1024 * 1024
+
+export type ChatSummary = {
+  id: string
+  kind: "direct" | "group" | "room"
+  title: string
+  detail: string
+  avatarUrl: string | null
+  otherUserId: string | null
+  memberCount: number
+  lastBody: string
+  lastAt: string | null
+}
+
+export type ChatMessage = {
+  id: string
+  conversationId: string
+  senderId: string
+  senderName: string
+  body: string
+  createdAt: string
+  deleted: boolean
+  attachmentUrl: string | null
+  attachmentName: string | null
+  attachmentMime: string | null
+  attachmentSize: number | null
+}
+
+type LocalConversation = {
+  id: string
+  memberIds: string[]
+  createdAt: string
+  kind?: "direct" | "group" | "room"
+  title?: string | null
+  description?: string | null
+}
+
+type LocalDb = {
+  conversations: LocalConversation[]
+  messages: ChatMessage[]
+}
+
+type MessageRow = {
+  id: string
+  conversation_id: string
+  sender_id: string | null
+  body: string | null
+  created_at: string
+  deleted_at?: string | null
+  attachment_path?: string | null
+  attachment_name?: string | null
+  attachment_mime?: string | null
+  attachment_size?: number | null
+}
+
+const MESSAGE_COLUMNS =
+  "id, conversation_id, sender_id, body, created_at, attachment_path, attachment_name, attachment_mime, attachment_size"
+
+export function messageLabel(message: Pick<ChatMessage, "body" | "attachmentName" | "deleted">) {
+  if (message.deleted) return "Message deleted"
+  const text = message.body.trim()
+  if (text) return text
+  return message.attachmentName || "Attachment"
+}
+
+function readDb(): LocalDb {
+  const raw = localStorage.getItem(PREVIEW_CHATS_KEY)
+  if (!raw) return { conversations: [], messages: [] }
+  try {
+    const parsed = JSON.parse(raw) as LocalDb
+    return {
+      conversations: parsed.conversations ?? [],
+      messages: parsed.messages ?? [],
+    }
+  } catch {
+    return { conversations: [], messages: [] }
+  }
+}
+
+function writeDb(db: LocalDb) {
+  localStorage.setItem(PREVIEW_CHATS_KEY, JSON.stringify(db))
+}
+
+function readProfiles(): Record<string, Profile> {
+  const raw = localStorage.getItem(PREVIEW_PROFILES_KEY)
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw) as Record<string, Profile>
+  } catch {
+    return {}
+  }
+}
+
+function byRecent(a: ChatSummary, b: ChatSummary) {
+  return (b.lastAt ?? "").localeCompare(a.lastAt ?? "")
+}
+
+function emailFor(userId: string) {
+  const raw = localStorage.getItem("novaroom.preview.emails")
+  if (!raw) return ""
+  try {
+    const map = JSON.parse(raw) as Record<string, string>
+    return map[userId] ?? ""
+  } catch {
+    return ""
+  }
+}
+
+function rememberEmail(userId: string, email: string) {
+  const raw = localStorage.getItem("novaroom.preview.emails")
+  let map: Record<string, string> = {}
+  if (raw) {
+    try {
+      map = JSON.parse(raw) as Record<string, string>
+    } catch {
+      map = {}
+    }
+  }
+  map[userId] = email
+  localStorage.setItem("novaroom.preview.emails", JSON.stringify(map))
+}
+
+function ensurePreviewPerson(email: string) {
+  const userId = previewUserId(email)
+  const profiles = readProfiles()
+  if (!profiles[userId]) {
+    profiles[userId] = emptyProfile(email)
+    localStorage.setItem(PREVIEW_PROFILES_KEY, JSON.stringify(profiles))
+  }
+  rememberEmail(userId, email)
+  return userId
+}
+
+function senderName(userId: string) {
+  return readProfiles()[userId]?.displayName || "Trainer"
+}
+
+function summaryFor(
+  conversation: LocalConversation,
+  session: Session,
+  messages: ChatMessage[],
+): ChatSummary {
+  const kind = conversation.kind ?? "direct"
+  const blocked = previewBlockedIds(session.userId)
+  const thread = messages
+    .filter(
+      (message) =>
+        message.conversationId === conversation.id &&
+        (message.senderId === session.userId || !blocked.has(message.senderId)),
+    )
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const latest = thread[thread.length - 1]
+  const lastBody = latest ? messageLabel({ ...latest, deleted: Boolean(latest.deleted) }) : ""
+  const lastAt = latest?.createdAt ?? conversation.createdAt
+
+  if (kind === "group" || kind === "room") {
+    return {
+      id: conversation.id,
+      kind,
+      title: conversation.title?.trim() || (kind === "room" ? "Room" : "Group"),
+      detail:
+        kind === "room"
+          ? conversation.description?.trim() || "Topic room"
+          : `${conversation.memberIds.length} people`,
+      avatarUrl: null,
+      otherUserId: null,
+      memberCount: conversation.memberIds.length,
+      lastBody,
+      lastAt,
+    }
+  }
+
+  const otherId = conversation.memberIds.find((id) => id !== session.userId) ?? ""
+  const other = otherId ? readProfiles()[otherId] : undefined
+  return {
+    id: conversation.id,
+    kind: "direct",
+    title: otherId ? other?.displayName || "Trainer" : conversation.title?.trim() || "Deleted account",
+    detail: otherId ? emailFor(otherId) : "Account deleted",
+    avatarUrl: other?.avatarUrl ?? null,
+    otherUserId: otherId || null,
+    memberCount: conversation.memberIds.length,
+    lastBody,
+    lastAt,
+  }
+}
+
+function parseEmails(value: string) {
+  const parts = value.split(/[\s,;]+/).map((part) => part.trim()).filter(Boolean)
+  const unique: string[] = []
+  for (const part of parts) {
+    const email = normalizeEmail(part)
+    if (!unique.includes(email)) unique.push(email)
+  }
+  return unique
+}
+
+function safeFileName(name: string) {
+  const base = name.split(/[/\\]/).pop() ?? "file"
+  const cleaned = base.replace(/[^\w.\- ()]/g, "_").slice(0, 120)
+  return cleaned || "file"
+}
+
+function readAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error("Could not read that file."))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function previewFileUrl(file: File) {
+  if (file.type.startsWith("image/") && file.type !== "image/svg+xml") {
+    return readAsDataUrl(file)
+  }
+  if (file.size > PREVIEW_FILE_LIMIT) {
+    throw new Error("This preview keeps files up to 8 MB. Connected projects allow 25 MB.")
+  }
+  return readAsDataUrl(file)
+}
+
+function assertFileSize(file: File) {
+  if (file.size > FILE_LIMIT) {
+    throw new Error("Files must be 25 MB or smaller.")
+  }
+}
+
+async function namesFor(userIds: Array<string | null | undefined>) {
+  const ids = [...new Set(userIds.filter((id): id is string => Boolean(id)))]
+  const names = new Map<string, string>()
+  if (!supabase || ids.length === 0) {
+    for (const id of ids) names.set(id, senderName(id))
+    return names
+  }
+  const { data, error } = await supabase.from("profiles").select("id, display_name").in("id", ids)
+  if (error) throw error
+  for (const profile of data ?? []) {
+    names.set(profile.id as string, (profile.display_name as string) || "Trainer")
+  }
+  return names
+}
+
+async function signedUrls(paths: string[]) {
+  const urls = new Map<string, string>()
+  if (!supabase || paths.length === 0) return urls
+  const { data, error } = await supabase.storage.from("chat-files").createSignedUrls(paths, 60 * 60)
+  if (error) throw error
+  for (const item of data ?? []) {
+    if (item.path && item.signedUrl) urls.set(item.path, item.signedUrl)
+  }
+  return urls
+}
+
+function rowToMessage(
+  row: MessageRow,
+  names: Map<string, string>,
+  urls: Map<string, string>,
+): ChatMessage {
+  const deleted = Boolean(row.deleted_at)
+  const path = deleted ? null : (row.attachment_path ?? null)
+  const senderId = row.sender_id ?? ""
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    senderId,
+    senderName: senderId ? names.get(senderId) || "Trainer" : "Deleted account",
+    body: deleted ? "" : (row.body ?? ""),
+    createdAt: row.created_at,
+    deleted,
+    attachmentUrl: path ? urls.get(path) ?? null : null,
+    attachmentName: deleted ? null : (row.attachment_name ?? null),
+    attachmentMime: deleted ? null : (row.attachment_mime ?? null),
+    attachmentSize: deleted ? null : (row.attachment_size ?? null),
+  }
+}
+
+function withDeleted(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    deleted: Boolean(message.deleted),
+    attachmentUrl: message.attachmentUrl ?? null,
+    attachmentName: message.attachmentName ?? null,
+    attachmentMime: message.attachmentMime ?? null,
+    attachmentSize: message.attachmentSize ?? null,
+  }
+}
+
+async function latestMessage(conversationId: string) {
+  if (!supabase) return null
+  const first = await supabase
+    .from("messages")
+    .select("body, created_at, attachment_name, deleted_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (first.error && /deleted_at/.test(first.error.message)) {
+    const second = await supabase
+      .from("messages")
+      .select("body, created_at, attachment_name")
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (second.error) throw second.error
+    return second.data
+  }
+  if (first.error) throw first.error
+  return first.data
+}
+
+async function loadConversationRows(ids: string[]) {
+  if (!supabase) return { data: [], error: null }
+  const first = await supabase.from("conversations").select("id, kind, title, description").in("id", ids)
+  if (first.error && /description/.test(first.error.message)) {
+    return supabase.from("conversations").select("id, kind, title").in("id", ids)
+  }
+  return first
+}
+
+export async function listChats(session: Session): Promise<ChatSummary[]> {
+  if (!supabase) {
+    ensurePreviewRooms()
+    const db = readDb()
+    return db.conversations
+      .filter((conversation) => conversation.memberIds.includes(session.userId))
+      .map((conversation) => summaryFor(conversation, session, db.messages))
+      .sort(byRecent)
+  }
+
+  const { data: mine, error } = await supabase
+    .from("conversation_members")
+    .select("conversation_id")
+    .eq("user_id", session.userId)
+  if (error) throw error
+  const ids = (mine ?? []).map((row) => row.conversation_id as string)
+  if (ids.length === 0) return []
+
+  const { data: conversations, error: conversationError } = await loadConversationRows(ids)
+  if (conversationError) throw conversationError
+
+  const { data: members, error: membersError } = await supabase
+    .from("conversation_members")
+    .select("conversation_id, user_id")
+    .in("conversation_id", ids)
+  if (membersError) throw membersError
+
+  const membersByChat = new Map<string, string[]>()
+  for (const member of members ?? []) {
+    const conversationId = member.conversation_id as string
+    const userId = member.user_id as string
+    const list = membersByChat.get(conversationId) ?? []
+    list.push(userId)
+    membersByChat.set(conversationId, list)
+  }
+
+  const otherIds = [
+    ...new Set(
+      [...membersByChat.values()].flat().filter((userId) => userId !== session.userId),
+    ),
+  ]
+  const { data: profiles, error: profileError } = otherIds.length
+    ? await supabase.from("profiles").select("id, display_name, avatar_url").in("id", otherIds)
+    : { data: [], error: null }
+  if (profileError) throw profileError
+  const profileById = new Map(
+    (profiles ?? []).map((profile) => [profile.id as string, profile]),
+  )
+
+  const summaries = await Promise.all(
+    (conversations ?? []).map(async (conversation) => {
+      const id = conversation.id as string
+      const kind = (conversation.kind as "direct" | "group" | "room") || "direct"
+      const memberIds = membersByChat.get(id) ?? []
+      const latest = await latestMessage(id)
+      const lastBody = latest
+        ? messageLabel({
+            body: (latest.body as string | null) ?? "",
+            attachmentName: (latest.attachment_name as string | null) ?? null,
+            deleted: Boolean("deleted_at" in latest && latest.deleted_at),
+          })
+        : ""
+      if (kind === "group" || kind === "room") {
+        return {
+          id,
+          kind,
+          title: ((conversation.title as string | null) ?? "").trim() || (kind === "room" ? "Room" : "Group"),
+          detail:
+            kind === "room"
+              ? ((conversation as { description?: string | null }).description ?? "").trim() || "Topic room"
+              : `${memberIds.length} people`,
+          avatarUrl: null,
+          otherUserId: null,
+          memberCount: memberIds.length,
+          lastBody,
+          lastAt: (latest?.created_at as string) ?? null,
+        } satisfies ChatSummary
+      }
+      const otherId = memberIds.find((userId) => userId !== session.userId) ?? ""
+      const profile = profileById.get(otherId)
+      const title = !otherId
+        ? ((conversation.title as string | null) ?? "").trim() || "Deleted account"
+        : (profile?.display_name as string) || "Trainer"
+      return {
+        id,
+        kind: "direct" as const,
+        title,
+        detail: otherId ? "" : "Account deleted",
+        avatarUrl: (profile?.avatar_url as string | null) ?? null,
+        otherUserId: otherId || null,
+        memberCount: memberIds.length,
+        lastBody,
+        lastAt: (latest?.created_at as string) ?? null,
+      } satisfies ChatSummary
+    }),
+  )
+  return summaries.sort(byRecent)
+}
+
+export async function startDirectChat(session: Session, email: string): Promise<string> {
+  const normalized = normalizeEmail(email)
+  if (normalized === session.email) {
+    throw new Error("You cannot start a chat with yourself.")
+  }
+
+  if (!supabase) {
+    rememberEmail(session.userId, session.email)
+    const otherId = ensurePreviewPerson(normalized)
+    const db = readDb()
+    const existing = db.conversations.find((conversation) => {
+      const kind = conversation.kind ?? "direct"
+      return (
+        kind === "direct" &&
+        conversation.memberIds.includes(session.userId) &&
+        conversation.memberIds.includes(otherId)
+      )
+    })
+    if (previewEitherBlocked(session.userId, otherId)) {
+      if (existing) return existing.id
+      throw new Error("You cannot message this person.")
+    }
+    if (existing) return existing.id
+    const created: LocalConversation = {
+      id: crypto.randomUUID(),
+      memberIds: [session.userId, otherId],
+      createdAt: new Date().toISOString(),
+      kind: "direct",
+      title: null,
+    }
+    db.conversations.push(created)
+    writeDb(db)
+    return created.id
+  }
+
+  const { data, error } = await supabase.rpc("start_direct_chat", {
+    other_email: normalized,
+  })
+  if (error) throw new Error(error.message)
+  if (!data) throw new Error("Could not start that chat.")
+  return data as string
+}
+
+export async function startGroupChat(session: Session, title: string, emails: string): Promise<string> {
+  const cleanTitle = title.trim()
+  if (!cleanTitle || cleanTitle.length > 80) {
+    throw new Error("Give the group a name up to 80 characters.")
+  }
+  const people = parseEmails(emails).filter((email) => email !== session.email)
+  if (people.length === 0) {
+    throw new Error("Add at least one other person.")
+  }
+  if (people.length + 1 > 50) {
+    throw new Error("Groups can include up to 50 people.")
+  }
+
+  if (!supabase) {
+    rememberEmail(session.userId, session.email)
+    const memberIds = [session.userId, ...people.map((email) => ensurePreviewPerson(email))]
+    if (memberIds.some((id) => id !== session.userId && previewEitherBlocked(session.userId, id))) {
+      throw new Error("You cannot add someone you cannot message.")
+    }
+    const created: LocalConversation = {
+      id: crypto.randomUUID(),
+      memberIds,
+      createdAt: new Date().toISOString(),
+      kind: "group",
+      title: cleanTitle,
+    }
+    const db = readDb()
+    db.conversations.push(created)
+    writeDb(db)
+    return created.id
+  }
+
+  const { data, error } = await supabase.rpc("start_group_chat", {
+    group_title: cleanTitle,
+    member_emails: people,
+  })
+  if (error) throw new Error(error.message)
+  if (!data) throw new Error("Could not create that group.")
+  return data as string
+}
+
+export async function loadMessages(conversationId: string): Promise<ChatMessage[]> {
+  if (!supabase) {
+    return readDb()
+      .messages.filter((message) => message.conversationId === conversationId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map((message) =>
+        withDeleted({
+          ...message,
+          deleted: Boolean(message.deleted),
+          senderName: message.senderName || senderName(message.senderId),
+        }),
+      )
+  }
+
+  const first = await supabase
+    .from("messages")
+    .select(`${MESSAGE_COLUMNS}, deleted_at`)
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: true })
+    .limit(500)
+  const result =
+    first.error && /deleted_at/.test(first.error.message)
+      ? await supabase
+          .from("messages")
+          .select(MESSAGE_COLUMNS)
+          .eq("conversation_id", conversationId)
+          .order("created_at", { ascending: true })
+          .limit(500)
+      : first
+  if (result.error) throw result.error
+  const rows = (result.data ?? []) as MessageRow[]
+  const names = await namesFor([...new Set(rows.map((row) => row.sender_id))])
+  const urls = await signedUrls(
+    rows.map((row) => row.attachment_path).filter((path): path is string => Boolean(path)),
+  )
+  return rows.map((row) => rowToMessage(row, names, urls))
+}
+
+export async function sendMessage(
+  session: Session,
+  conversationId: string,
+  body: string,
+  file?: File | null,
+): Promise<ChatMessage> {
+  const text = body.trim()
+  if (!text && !file) throw new Error("Write a message or choose a file.")
+  if (text.length > 4000) throw new Error("Messages are limited to 4000 characters.")
+  if (file) assertFileSize(file)
+  const lock = await messagingLock(session, conversationId)
+  if (lock !== "open") throw new Error(messagingLockMessage(lock))
+
+  if (!supabase) {
+    const message: ChatMessage = {
+      id: crypto.randomUUID(),
+      conversationId,
+      senderId: session.userId,
+      senderName: senderName(session.userId),
+      body: text,
+      createdAt: new Date().toISOString(),
+      deleted: false,
+      attachmentUrl: file ? await previewFileUrl(file) : null,
+      attachmentName: file?.name ?? null,
+      attachmentMime: file?.type || null,
+      attachmentSize: file?.size ?? null,
+    }
+    const db = readDb()
+    db.messages.push(message)
+    writeDb(db)
+    publishChatEvent({ type: "insert", message })
+    return message
+  }
+
+  let attachmentPath: string | null = null
+  if (file) {
+    attachmentPath = `${conversationId}/${crypto.randomUUID()}/${safeFileName(file.name)}`
+    const { error: uploadError } = await supabase.storage.from("chat-files").upload(attachmentPath, file, {
+      contentType: file.type || "application/octet-stream",
+      upsert: false,
+    })
+    if (uploadError) throw new Error(uploadError.message)
+  }
+
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({
+      conversation_id: conversationId,
+      sender_id: session.userId,
+      body: text || null,
+      attachment_path: attachmentPath,
+      attachment_name: file?.name ?? null,
+      attachment_mime: file?.type || null,
+      attachment_size: file?.size ?? null,
+    })
+    .select(
+      "id, conversation_id, sender_id, body, created_at, attachment_path, attachment_name, attachment_mime, attachment_size",
+    )
+    .single()
+  if (error) {
+    if (attachmentPath) {
+      await supabase.storage.from("chat-files").remove([attachmentPath])
+    }
+    throw new Error(error.message)
+  }
+
+  const row = data as MessageRow
+  const names = await namesFor([row.sender_id])
+  const urls = await signedUrls(row.attachment_path ? [row.attachment_path] : [])
+  return rowToMessage(row, names, urls)
+}
+
+async function messageFromRow(row: MessageRow) {
+  const names = await namesFor([row.sender_id])
+  const urls = await signedUrls(row.attachment_path ? [row.attachment_path] : [])
+  return rowToMessage(row, names, urls)
+}
+
+export function subscribeToMessages(handlers: {
+  onInsert: (message: ChatMessage) => void
+  onUpdate: (message: ChatMessage) => void
+  onRefresh: () => void
+}) {
+  if (!supabase) {
+    const channel = new BroadcastChannel("novaroom-messages")
+    channel.onmessage = (event) => {
+      const data = event.data as { type?: string; message?: ChatMessage }
+      if (data?.type === "refresh") {
+        handlers.onRefresh()
+        return
+      }
+      const message = data?.message ?? (event.data as ChatMessage)
+      if (!message?.id) return
+      const next = withDeleted({
+        ...message,
+        senderName: message.senderName || senderName(message.senderId),
+      })
+      if (data?.type === "update") handlers.onUpdate(next)
+      else handlers.onInsert(next)
+    }
+    return () => channel.close()
+  }
+
+  const client = supabase
+  const channel: RealtimeChannel = client
+    .channel("novaroom-messages")
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "messages" },
+      (payload) => {
+        void messageFromRow(payload.new as MessageRow).then(handlers.onInsert)
+      },
+    )
+    .on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "messages" },
+      (payload) => {
+        void messageFromRow(payload.new as MessageRow).then(handlers.onUpdate)
+      },
+    )
+    .subscribe()
+
+  return () => {
+    void client.removeChannel(channel)
+  }
+}
