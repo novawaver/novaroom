@@ -1,0 +1,55 @@
+# Builds the Windows installer and publishes it as a GitHub Release whenever a version tag is pushed,
+# for example: git tag v0.2.0 && git push origin v0.2.0
+# The release includes latest.json and signatures, which installed apps check to update themselves.
+# Installed apps read releases without signing in, so this repository must stay public.
+# The update address is set in src-tauri/tauri.conf.json under plugins.updater.
+#
+# Repository secrets (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           contents of the private key file from `tauri signer generate`
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
+#   VITE_SUPABASE_URL                   the same values as in your local .env, which is not committed;
+#   VITE_SUPABASE_ANON_KEY              without them the built app runs in offline preview mode
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Novaroom ${{ github.ref_name }}
+          releaseBody: See the commits since the last release for what changed.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

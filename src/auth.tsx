@@ -31,6 +31,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 
 type ProfileRow = {
   display_name: string | null
+  role: string | null
   status: string | null
   avatar_url: string | null
   skills: string[] | null
@@ -54,7 +55,10 @@ function readPreviewProfiles(): Record<string, Profile> {
   const raw = localStorage.getItem(PROFILES_KEY)
   if (!raw) return {}
   try {
-    return JSON.parse(raw) as Record<string, Profile>
+    const parsed = JSON.parse(raw) as Record<string, Profile>
+    // Profiles saved before roles existed have no role field.
+    for (const profile of Object.values(parsed)) profile.role ??= ""
+    return parsed
   } catch {
     return {}
   }
@@ -63,6 +67,7 @@ function readPreviewProfiles(): Record<string, Profile> {
 function rowToProfile(row: ProfileRow): Profile {
   return {
     displayName: row.display_name ?? "",
+    role: row.role ?? "",
     status: row.status ?? "",
     avatarUrl: row.avatar_url,
     skills: row.skills ?? [],
@@ -75,7 +80,7 @@ async function loadRemoteProfile(userId: string, email: string): Promise<Profile
   if (!supabase) return emptyProfile(email)
   const { data, error } = await supabase
     .from("profiles")
-    .select("display_name, status, avatar_url, skills, languages, domains")
+    .select("display_name, role, status, avatar_url, skills, languages, domains")
     .eq("id", userId)
     .maybeSingle()
   if (error) throw error
@@ -211,6 +216,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const { error } = await supabase.from("profiles").upsert({
           id: session.userId,
           display_name: saved.displayName,
+          role: saved.role,
           status: saved.status,
           avatar_url: saved.avatarUrl,
           skills: saved.skills,

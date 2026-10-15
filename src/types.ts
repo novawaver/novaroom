@@ -1,5 +1,8 @@
+export const ROLES = ["Leadership", "AI trainer", "Reviewer", "Engineer", "Designer", "Operations"]
+
 export type Profile = {
   displayName: string
+  role: string
   status: string
   avatarUrl: string | null
   skills: string[]
@@ -21,6 +24,7 @@ export function emptyProfile(email: string): Profile {
     .join(" ")
   return {
     displayName,
+    role: "",
     status: "",
     avatarUrl: null,
     skills: [],

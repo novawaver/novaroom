@@ -12,11 +12,40 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
+/// Seconds since the last keyboard or mouse input anywhere on the computer, for the Timer.
+/// Returns None where the system cannot tell us, and the app falls back to its own window.
+#[tauri::command]
+fn idle_seconds() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::GetTickCount;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        // SAFETY: info is a correctly sized LASTINPUTINFO that lives for the whole call.
+        if unsafe { GetLastInputInfo(&mut info) } == 0 {
+            return None;
+        }
+        // Both values are milliseconds since boot; wrapping_sub copes with the 49-day rollover.
+        let idle_ms = unsafe { GetTickCount() }.wrapping_sub(info.dwTime);
+        Some(u64::from(idle_ms) / 1000)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .invoke_handler(tauri::generate_handler![idle_seconds])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();

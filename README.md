@@ -67,7 +67,7 @@ Leave `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` unset. The sign-in screen
 1. Enter any email address and choose **Send code**.
 2. Enter `000000`.
 3. Open **Profile** from the chip at the bottom of the sidebar. Set your name, photo, status, and tags, then save.
-4. Start a chat by typing another email and choosing **Start chat**. In preview, that person does not need an account yet.
+4. Choose **New chat**, type another email, and choose **Start chat**. **New group** asks for a group name and the members’ emails. In preview, those people do not need an account yet.
 5. Write a message and choose **Send**. Enter searches the open chat. Shift+Enter adds a line.
 6. Sign out. Sign in as the other email with `000000`. The same conversation is there, with the message history.
 
@@ -87,7 +87,7 @@ Open **SQL Editor** and run the files in this order. Paste the whole file, then 
 2. `supabase/migrations/20261006130000_messages.sql` creates one-to-one chats, message security rules, and turns on live message delivery.
 3. `supabase/migrations/20261006140000_groups_and_files.sql` adds group chats of up to 50 people and a private bucket for images and files up to 25 MB.
 4. `supabase/migrations/20261006150000_safety.sql` adds block, report, delete message, and delete account.
-5. `supabase/migrations/20261006160000_rooms.sql` adds the Coding, Writing, Math, and Rating rooms, plus pinned links.
+5. `supabase/migrations/20261006160000_rooms.sql` adds the Coding, Writing, Math, and Rating rooms.
 
 If the second script reports that `public.messages` is already in the realtime publication, the messages table is already live and you can continue. If you already ran the earlier scripts, run only the ones you have not run yet. Run the rooms script before testers join a topic room.
 
@@ -158,7 +158,7 @@ In local preview, the same actions work on this computer. Preview reports stay i
 
 Coding, Writing, Math, and Rating are open rooms. A signed-in trainer chooses **Join** and can talk with everyone else in that room. They do not need each other's email addresses.
 
-Each room starts with one pinned link. Members can add an `https://` link and remove links they added. **Leave** drops you from the room. You can join again later.
+**Leave** drops you from the room. You can join again later.
 
 For a private beta, ask 10 to 20 trainers to install Novaroom, sign in with the email code, and join the room that matches their work. Direct chats and groups are still there for people who already know each other.
 

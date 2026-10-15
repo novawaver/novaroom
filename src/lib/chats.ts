@@ -31,6 +31,7 @@ export type ChatMessage = {
   conversationId: string
   senderId: string
   senderName: string
+  senderAvatarUrl?: string | null
   body: string
   createdAt: string
   deleted: boolean
@@ -149,6 +150,10 @@ function senderName(userId: string) {
   return readProfiles()[userId]?.displayName || "Trainer"
 }
 
+function senderAvatar(userId: string) {
+  return readProfiles()[userId]?.avatarUrl ?? null
+}
+
 function summaryFor(
   conversation: LocalConversation,
   session: Session,
@@ -240,19 +245,24 @@ function assertFileSize(file: File) {
   }
 }
 
-async function namesFor(userIds: Array<string | null | undefined>) {
+type Sender = { name: string; avatarUrl: string | null }
+
+async function sendersFor(userIds: Array<string | null | undefined>) {
   const ids = [...new Set(userIds.filter((id): id is string => Boolean(id)))]
-  const names = new Map<string, string>()
+  const senders = new Map<string, Sender>()
   if (!supabase || ids.length === 0) {
-    for (const id of ids) names.set(id, senderName(id))
-    return names
+    for (const id of ids) senders.set(id, { name: senderName(id), avatarUrl: senderAvatar(id) })
+    return senders
   }
-  const { data, error } = await supabase.from("profiles").select("id, display_name").in("id", ids)
+  const { data, error } = await supabase.from("profiles").select("id, display_name, avatar_url").in("id", ids)
   if (error) throw error
   for (const profile of data ?? []) {
-    names.set(profile.id as string, (profile.display_name as string) || "Trainer")
+    senders.set(profile.id as string, {
+      name: (profile.display_name as string) || "Trainer",
+      avatarUrl: (profile.avatar_url as string | null) ?? null,
+    })
   }
-  return names
+  return senders
 }
 
 async function signedUrls(paths: string[]) {
@@ -268,7 +278,7 @@ async function signedUrls(paths: string[]) {
 
 function rowToMessage(
   row: MessageRow,
-  names: Map<string, string>,
+  senders: Map<string, Sender>,
   urls: Map<string, string>,
 ): ChatMessage {
   const deleted = Boolean(row.deleted_at)
@@ -278,7 +288,8 @@ function rowToMessage(
     id: row.id,
     conversationId: row.conversation_id,
     senderId,
-    senderName: senderId ? names.get(senderId) || "Trainer" : "Deleted account",
+    senderName: senderId ? senders.get(senderId)?.name || "Trainer" : "Deleted account",
+    senderAvatarUrl: senderId ? (senders.get(senderId)?.avatarUrl ?? null) : null,
     body: deleted ? "" : (row.body ?? ""),
     createdAt: row.created_at,
     deleted,
@@ -432,6 +443,34 @@ export async function listChats(session: Session): Promise<ChatSummary[]> {
   return summaries.sort(byRecent)
 }
 
+// Finds or creates the preview direct chat between the signed-in person and otherId.
+function previewDirectChat(session: Session, otherId: string): string {
+  const db = readDb()
+  const existing = db.conversations.find((conversation) => {
+    const kind = conversation.kind ?? "direct"
+    return (
+      kind === "direct" &&
+      conversation.memberIds.includes(session.userId) &&
+      conversation.memberIds.includes(otherId)
+    )
+  })
+  if (previewEitherBlocked(session.userId, otherId)) {
+    if (existing) return existing.id
+    throw new Error("You cannot message this person.")
+  }
+  if (existing) return existing.id
+  const created: LocalConversation = {
+    id: crypto.randomUUID(),
+    memberIds: [session.userId, otherId],
+    createdAt: new Date().toISOString(),
+    kind: "direct",
+    title: null,
+  }
+  db.conversations.push(created)
+  writeDb(db)
+  return created.id
+}
+
 export async function startDirectChat(session: Session, email: string): Promise<string> {
   const normalized = normalizeEmail(email)
   if (normalized === session.email) {
@@ -440,36 +479,23 @@ export async function startDirectChat(session: Session, email: string): Promise<
 
   if (!supabase) {
     rememberEmail(session.userId, session.email)
-    const otherId = ensurePreviewPerson(normalized)
-    const db = readDb()
-    const existing = db.conversations.find((conversation) => {
-      const kind = conversation.kind ?? "direct"
-      return (
-        kind === "direct" &&
-        conversation.memberIds.includes(session.userId) &&
-        conversation.memberIds.includes(otherId)
-      )
-    })
-    if (previewEitherBlocked(session.userId, otherId)) {
-      if (existing) return existing.id
-      throw new Error("You cannot message this person.")
-    }
-    if (existing) return existing.id
-    const created: LocalConversation = {
-      id: crypto.randomUUID(),
-      memberIds: [session.userId, otherId],
-      createdAt: new Date().toISOString(),
-      kind: "direct",
-      title: null,
-    }
-    db.conversations.push(created)
-    writeDb(db)
-    return created.id
+    return previewDirectChat(session, ensurePreviewPerson(normalized))
   }
 
   const { data, error } = await supabase.rpc("start_direct_chat", {
     other_email: normalized,
   })
+  if (error) throw new Error(error.message)
+  if (!data) throw new Error("Could not start that chat.")
+  return data as string
+}
+
+// Leadership members start a direct chat with another leader by user id (no email needed).
+// The database refuses unless both people have the Leadership role.
+export async function startLeaderChat(session: Session, otherId: string): Promise<string> {
+  if (otherId === session.userId) throw new Error("You cannot start a chat with yourself.")
+  if (!supabase) return previewDirectChat(session, otherId)
+  const { data, error } = await supabase.rpc("start_leader_chat", { other: otherId })
   if (error) throw new Error(error.message)
   if (!data) throw new Error("Could not start that chat.")
   return data as string
@@ -526,6 +552,7 @@ export async function loadMessages(conversationId: string): Promise<ChatMessage[
           ...message,
           deleted: Boolean(message.deleted),
           senderName: message.senderName || senderName(message.senderId),
+          senderAvatarUrl: senderAvatar(message.senderId),
         }),
       )
   }
@@ -547,11 +574,11 @@ export async function loadMessages(conversationId: string): Promise<ChatMessage[
       : first
   if (result.error) throw result.error
   const rows = (result.data ?? []) as MessageRow[]
-  const names = await namesFor([...new Set(rows.map((row) => row.sender_id))])
+  const senders = await sendersFor([...new Set(rows.map((row) => row.sender_id))])
   const urls = await signedUrls(
     rows.map((row) => row.attachment_path).filter((path): path is string => Boolean(path)),
   )
-  return rows.map((row) => rowToMessage(row, names, urls))
+  return rows.map((row) => rowToMessage(row, senders, urls))
 }
 
 export async function sendMessage(
@@ -573,6 +600,7 @@ export async function sendMessage(
       conversationId,
       senderId: session.userId,
       senderName: senderName(session.userId),
+      senderAvatarUrl: senderAvatar(session.userId),
       body: text,
       createdAt: new Date().toISOString(),
       deleted: false,
@@ -621,15 +649,15 @@ export async function sendMessage(
   }
 
   const row = data as MessageRow
-  const names = await namesFor([row.sender_id])
+  const senders = await sendersFor([row.sender_id])
   const urls = await signedUrls(row.attachment_path ? [row.attachment_path] : [])
-  return rowToMessage(row, names, urls)
+  return rowToMessage(row, senders, urls)
 }
 
 async function messageFromRow(row: MessageRow) {
-  const names = await namesFor([row.sender_id])
+  const senders = await sendersFor([row.sender_id])
   const urls = await signedUrls(row.attachment_path ? [row.attachment_path] : [])
-  return rowToMessage(row, names, urls)
+  return rowToMessage(row, senders, urls)
 }
 
 export function subscribeToMessages(handlers: {
@@ -650,6 +678,7 @@ export function subscribeToMessages(handlers: {
       const next = withDeleted({
         ...message,
         senderName: message.senderName || senderName(message.senderId),
+        senderAvatarUrl: senderAvatar(message.senderId),
       })
       if (data?.type === "update") handlers.onUpdate(next)
       else handlers.onInsert(next)
@@ -679,4 +708,21 @@ export function subscribeToMessages(handlers: {
   return () => {
     void client.removeChannel(channel)
   }
+}
+
+export type ChatPermissions = { direct: boolean; group: boolean }
+
+// Whether an admin has let this person start new direct chats and groups. Leadership members are
+// always allowed (the caller adds that). Offline preview has no admins, so everything is allowed.
+// The database enforces this too; this only decides whether the buttons are enabled.
+export async function readChatPermissions(session: Session): Promise<ChatPermissions> {
+  if (!supabase) return { direct: true, group: true }
+  const { data, error } = await supabase
+    .from("chat_permissions")
+    .select("can_start_direct, can_start_group")
+    .eq("user_id", session.userId)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  const row = data as { can_start_direct: boolean; can_start_group: boolean } | null
+  return { direct: Boolean(row?.can_start_direct), group: Boolean(row?.can_start_group) }
 }

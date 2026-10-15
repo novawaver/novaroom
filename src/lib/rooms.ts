@@ -9,20 +9,6 @@ export type RoomInfo = {
   joined: boolean
 }
 
-export type RoomResource = {
-  id: string
-  title: string
-  url: string
-  mine: boolean
-}
-
-type StoredResource = {
-  id: string
-  title: string
-  url: string
-  createdBy: string | null
-}
-
 type StoredConversation = {
   id: string
   memberIds: string[]
@@ -30,7 +16,6 @@ type StoredConversation = {
   kind?: string
   title?: string | null
   description?: string | null
-  resources?: StoredResource[]
 }
 
 type StoredDb = {
@@ -38,7 +23,7 @@ type StoredDb = {
   messages: unknown[]
 }
 
-const SEED: Array<StoredConversation & { resources: StoredResource[] }> = [
+const SEED: StoredConversation[] = [
   {
     id: "preview-room-coding",
     memberIds: [],
@@ -46,14 +31,6 @@ const SEED: Array<StoredConversation & { resources: StoredResource[] }> = [
     kind: "room",
     title: "Coding",
     description: "Coding tasks, tools, and prompts.",
-    resources: [
-      {
-        id: "preview-pin-coding",
-        title: "Python docs",
-        url: "https://docs.python.org/3/",
-        createdBy: null,
-      },
-    ],
   },
   {
     id: "preview-room-writing",
@@ -62,14 +39,6 @@ const SEED: Array<StoredConversation & { resources: StoredResource[] }> = [
     kind: "room",
     title: "Writing",
     description: "Writing tasks, style, and prompts.",
-    resources: [
-      {
-        id: "preview-pin-writing",
-        title: "Purdue OWL",
-        url: "https://owl.purdue.edu/owl/general_writing/index.html",
-        createdBy: null,
-      },
-    ],
   },
   {
     id: "preview-room-math",
@@ -78,14 +47,6 @@ const SEED: Array<StoredConversation & { resources: StoredResource[] }> = [
     kind: "room",
     title: "Math",
     description: "Math tasks, checks, and explanations.",
-    resources: [
-      {
-        id: "preview-pin-math",
-        title: "Khan Academy",
-        url: "https://www.khanacademy.org/",
-        createdBy: null,
-      },
-    ],
   },
   {
     id: "preview-room-rating",
@@ -94,14 +55,6 @@ const SEED: Array<StoredConversation & { resources: StoredResource[] }> = [
     kind: "room",
     title: "Rating",
     description: "Rating, comparisons, and review habits.",
-    resources: [
-      {
-        id: "preview-pin-rating",
-        title: "What is RLHF",
-        url: "https://en.wikipedia.org/wiki/Reinforcement_learning_from_human_feedback",
-        createdBy: null,
-      },
-    ],
   },
 ]
 
@@ -143,23 +96,10 @@ export function ensurePreviewRooms() {
       kind: "room",
       title: room.title,
       description: room.description,
-      resources: room.resources,
     })
     changed = true
   }
   if (changed) writeDb(db)
-}
-
-function assertHttps(url: string) {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error("Links must start with https://")
-  }
-  if (parsed.protocol !== "https:" || /\s/.test(url)) {
-    throw new Error("Links must start with https://")
-  }
 }
 
 export async function listRooms(session: Session): Promise<RoomInfo[]> {
@@ -224,88 +164,5 @@ export async function leaveRoom(session: Session, roomId: string) {
     return
   }
   const { error } = await supabase.rpc("leave_room", { room_id: roomId })
-  if (error) throw roomsError(error)
-}
-
-export async function listRoomResources(session: Session, roomId: string): Promise<RoomResource[]> {
-  if (!supabase) {
-    ensurePreviewRooms()
-    const room = readDb().conversations.find((item) => item.id === roomId && item.kind === "room")
-    return (room?.resources ?? []).map((resource) => ({
-      id: resource.id,
-      title: resource.title,
-      url: resource.url,
-      mine: resource.createdBy === session.userId,
-    }))
-  }
-
-  const { data, error } = await supabase
-    .from("room_resources")
-    .select("id, title, url, created_by")
-    .eq("conversation_id", roomId)
-    .order("created_at")
-  if (error) throw roomsError(error)
-  return (data ?? []).map((row) => ({
-    id: row.id as string,
-    title: row.title as string,
-    url: row.url as string,
-    mine: row.created_by === session.userId,
-  }))
-}
-
-export async function addRoomResource(session: Session, roomId: string, title: string, url: string) {
-  const cleanTitle = title.trim()
-  const cleanUrl = url.trim()
-  if (!cleanTitle || cleanTitle.length > 80) {
-    throw new Error("Give the link a name up to 80 characters.")
-  }
-  assertHttps(cleanUrl)
-
-  if (!supabase) {
-    ensurePreviewRooms()
-    const db = readDb()
-    const room = db.conversations.find((item) => item.id === roomId && item.kind === "room")
-    if (!room || !room.memberIds.includes(session.userId)) {
-      throw new Error("Join the room before adding a link.")
-    }
-    const resources = room.resources ?? []
-    if (resources.length >= 20) throw new Error("This room already has 20 links.")
-    resources.push({
-      id: crypto.randomUUID(),
-      title: cleanTitle,
-      url: cleanUrl,
-      createdBy: session.userId,
-    })
-    room.resources = resources
-    writeDb(db)
-    return
-  }
-
-  const { error } = await supabase.rpc("add_room_resource", {
-    room_id: roomId,
-    resource_title: cleanTitle,
-    resource_url: cleanUrl,
-  })
-  if (error) throw roomsError(error)
-}
-
-export async function deleteRoomResource(session: Session, resourceId: string) {
-  if (!supabase) {
-    const db = readDb()
-    for (const room of db.conversations) {
-      if (room.kind !== "room" || !room.resources) continue
-      const resource = room.resources.find((item) => item.id === resourceId)
-      if (!resource) continue
-      if (resource.createdBy !== session.userId) {
-        throw new Error("You can only remove links you added.")
-      }
-      room.resources = room.resources.filter((item) => item.id !== resourceId)
-      writeDb(db)
-      return
-    }
-    throw new Error("That link is not available.")
-  }
-
-  const { error } = await supabase.rpc("delete_room_resource", { resource_id: resourceId })
   if (error) throw roomsError(error)
 }

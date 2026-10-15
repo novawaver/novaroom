@@ -1,7 +1,38 @@
 import type { Image } from "@tauri-apps/api/image"
 
-function inTauri() {
+export function inTauri() {
   return "__TAURI_INTERNALS__" in window
+}
+
+export type WindowAction = "minimize" | "toggle-maximize" | "close"
+
+export async function controlWindow(action: WindowAction) {
+  if (!inTauri()) return
+  const { getCurrentWindow } = await import("@tauri-apps/api/window")
+  const windowHandle = getCurrentWindow()
+  if (action === "minimize") await windowHandle.minimize()
+  else if (action === "toggle-maximize") await windowHandle.toggleMaximize()
+  else await windowHandle.close()
+}
+
+// Reports the current maximized state, then every change. Returns an unsubscribe.
+export function watchMaximized(onChange: (maximized: boolean) => void) {
+  if (!inTauri()) return () => {}
+  let unlisten: (() => void) | null = null
+  let stopped = false
+  import("@tauri-apps/api/window").then(async ({ getCurrentWindow }) => {
+    const windowHandle = getCurrentWindow()
+    onChange(await windowHandle.isMaximized())
+    const stop = await windowHandle.onResized(async () => {
+      onChange(await windowHandle.isMaximized())
+    })
+    if (stopped) stop()
+    else unlisten = stop
+  })
+  return () => {
+    stopped = true
+    unlisten?.()
+  }
 }
 
 let overlay: Image | null = null
@@ -61,8 +92,13 @@ export async function notifyIncoming(title: string, body: string) {
   })
 }
 
+// True only when the person can actually see the app: the page is visible and focused, and in the
+// desktop app the window is also focused and shown. Both checks must agree, because the desktop
+// focus check alone can report a minimized or background window as active.
 export async function windowIsActive() {
-  if (!inTauri()) return document.hasFocus()
+  const pageActive = document.visibilityState === "visible" && document.hasFocus()
+  if (!pageActive) return false
+  if (!inTauri()) return true
   const { getCurrentWindow } = await import("@tauri-apps/api/window")
   const windowHandle = getCurrentWindow()
   const [focused, visible] = await Promise.all([
