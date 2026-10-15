@@ -24,6 +24,33 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
+      # Fails early with a readable message (shown on the run's summary page) if a secret is missing
+      # or the signing key is in the wrong form. Values are never printed.
+      - name: Check release secrets
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          missing=""
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::These repository secrets are missing or empty:$missing"
+            exit 1
+          fi
+          # The key file written by `tauri signer generate` is base64 text starting with this prefix.
+          case "$TAURI_SIGNING_PRIVATE_KEY" in
+            dW50cnVzdGVkIGNvbW1lbnQ6*) ;;
+            *)
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY must be the full contents of the private key file (novaroom.key), not its path."
+              exit 1
+              ;;
+          esac
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
