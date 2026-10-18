@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { beforeExit } from "../lib/unsaved"
 import { checkForUpdate, type AvailableUpdate } from "../lib/updater"
 
 // First check shortly after start-up (so it does not slow sign-in), then every few hours.
@@ -64,14 +65,17 @@ export function UpdateBanner() {
           <button
             type="button"
             className="button"
-            onClick={() => {
-              setError("")
-              setProgress(null)
-              void update.install(setProgress).catch((caught) => {
-                setProgress(undefined)
-                setError(caught instanceof Error ? caught.message : "The update could not be installed. Try again later.")
+            onClick={() =>
+              // Installing restarts the app, so unsaved changes are saved or discarded first.
+              beforeExit(() => {
+                setError("")
+                setProgress(null)
+                void update.install(setProgress).catch((caught) => {
+                  setProgress(undefined)
+                  setError(caught instanceof Error ? caught.message : "The update could not be installed. Try again later.")
+                })
               })
-            }}
+            }
           >
             {error ? "Try again" : "Update now"}
           </button>

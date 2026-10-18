@@ -22,6 +22,8 @@
   --side-muted: #6d655c;
   --side-line: #e4dbd0;
   --danger: #8d2b2b;
+  --danger-soft: #fdecec;
+  --brand-hover: #b33f17;
   --shadow: 0 18px 50px rgba(28, 25, 21, 0.08);
   --chip-strong: #d14a1d;
   --chip-soft: #ffe3cf;
@@ -43,6 +45,7 @@
   --brand-bright: #fd791e;
   --brand-ink: #ffb380;
   --danger: #f0a8a8;
+  --danger-soft: rgba(240, 168, 168, 0.12);
   --shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
   --side: #1b1916;
   --side-soft: #2a2622;
@@ -320,6 +323,45 @@ textarea:focus {
 .text-button {
   padding: 6px 10px;
   border-radius: 8px;
+}
+
+/* Hover and keyboard focus for every button style. */
+.button,
+.text-button {
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--brand-hover);
+  box-shadow: 0 4px 12px rgba(209, 74, 29, 0.25);
+}
+
+.button.secondary:hover:not(:disabled),
+.text-button:hover:not(:disabled) {
+  background: var(--side-soft);
+  border-color: var(--muted);
+  box-shadow: none;
+}
+
+.button.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  box-shadow: none;
+}
+
+.button:active:not(:disabled),
+.text-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.button:focus-visible,
+.text-button:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 2px;
 }
 
 .shell {
@@ -1089,6 +1131,22 @@ select {
   line-height: 1.5;
 }
 
+
+.startup-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.startup-row .switch {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.startup-row .hint {
+  margin: 4px 0 16px;
+}
 
 .blocked-row {
   display: flex;
@@ -3033,4 +3091,688 @@ code {
   .shell {
     grid-template-rows: minmax(220px, 40vh) 1fr;
   }
+}
+
+/* Vault */
+
+.settings.vault {
+  overflow: hidden;
+}
+
+.vault-title {
+  min-width: 0;
+}
+
+.vault-title .thread-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-unsaved {
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+
+.bar-icon.vault-save {
+  position: relative;
+}
+
+.bar-icon.vault-save:disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: transparent;
+}
+
+.vault-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--brand-bright);
+}
+
+.vault-note {
+  margin: 20px 24px 0;
+}
+
+.vault-welcome {
+  padding-top: 28px;
+}
+
+.vault-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.vault-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 24px;
+}
+
+.vault-toolbar .vault-table-name {
+  flex: 1 1 220px;
+  width: auto;
+  min-width: 0;
+  padding: 7px 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.button.vault-small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-size: 14px;
+}
+
+.button.vault-small svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.vault-grid-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0 24px 24px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.vault-grid {
+  border-collapse: collapse;
+  min-width: 100%;
+  font-size: 14px;
+}
+
+.vault-grid th,
+.vault-grid td {
+  min-width: 160px;
+  padding: 4px;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.vault-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px;
+  background: var(--side-soft);
+  font-weight: 600;
+}
+
+.vault-grid tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.vault-grid .vault-row-actions {
+  width: 44px;
+  min-width: 44px;
+  border-right: 0;
+  text-align: center;
+}
+
+.vault-col-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.vault-grid input:not([type="checkbox"]) {
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 14px;
+}
+
+.vault-grid th input:not([type="checkbox"]) {
+  font-weight: 600;
+}
+
+.vault-grid input:not([type="checkbox"]):hover {
+  border-color: var(--line);
+}
+
+:root[data-theme="dark"] .vault-grid input:not([type="checkbox"]) {
+  background: transparent;
+  border-color: transparent;
+}
+
+:root[data-theme="dark"] .vault-grid input:not([type="checkbox"]):hover {
+  border-color: var(--side-line);
+}
+
+.vault-grid select.vault-kind {
+  width: auto;
+  margin: 2px 0 0 4px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.vault-check {
+  width: 18px;
+  height: 18px;
+  margin: 6px 8px;
+  accent-color: var(--brand);
+}
+
+.vault-remove {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.vault-remove:hover {
+  background: var(--side-soft);
+  color: var(--danger);
+}
+
+.vault-remove svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.vault-grid td.vault-empty {
+  padding: 18px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.vault-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 220px;
+  margin: 0;
+  color: var(--muted);
+}
+
+.vault-search svg {
+  position: absolute;
+  left: 10px;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.vault-search input {
+  padding: 7px 12px 7px 32px;
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.vault-sort {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.vault-sort:hover:not(:disabled),
+.vault-sort[aria-pressed="true"] {
+  background: var(--paper);
+  color: var(--brand-ink);
+}
+
+.vault-sort:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.vault-sort svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.vault-grid .vault-grip-cell {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  text-align: center;
+}
+
+.vault-grip {
+  width: 24px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: grab;
+  touch-action: none;
+  opacity: 0.5;
+}
+
+.vault-grid tr:hover .vault-grip,
+.vault-grip:focus-visible {
+  opacity: 1;
+}
+
+.vault-grip:hover {
+  background: var(--side-soft);
+  color: var(--ink);
+}
+
+.vault-grip:focus-visible,
+.vault-sort:focus-visible,
+.vault-remove:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.vault-grip svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.vault-grid tbody tr:hover td {
+  background: color-mix(in srgb, var(--side-soft) 45%, transparent);
+}
+
+.vault-grid tbody.dragging,
+.vault-grid tbody.dragging .vault-grip {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.vault-grid tr.vault-dragged td {
+  opacity: 0.45;
+}
+
+.vault-grid tr.vault-drop-before td {
+  box-shadow: inset 0 2px 0 var(--brand-bright);
+}
+
+.vault-grid tr.vault-drop-after td {
+  box-shadow: inset 0 -2px 0 var(--brand-bright);
+}
+
+/* Long paths are cut from the start, so the file name at the end stays visible. */
+.vault-title .thread-email.vault-path {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.vault-path-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.vault-unsaved {
+  flex: none;
+}
+
+.vault-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.vault-mode button {
+  padding: 5px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.vault-mode button:hover {
+  background: var(--side-soft);
+  color: var(--ink);
+}
+
+.vault-mode button[aria-pressed="true"] {
+  background: var(--brand);
+  color: white;
+}
+
+.vault-mode button:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 2px;
+}
+
+.vault-col-name {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-viewing th,
+.vault-viewing td {
+  padding: 2px 6px;
+}
+
+.vault-cell-view {
+  display: block;
+  min-height: 34px;
+  padding: 7px 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.vault-cell-view.vault-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.vault-cell-view.vault-yes {
+  color: var(--timer-awake);
+}
+
+.vault-cell-view.vault-yes svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vertical-align: middle;
+}
+
+.vault-cell-view.vault-no {
+  color: var(--muted);
+}
+
+/* Vault: Email, Password and Link cells */
+
+.vault-secret {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vault-secret input,
+.vault-secret select {
+  flex: 1;
+  min-width: 0;
+}
+
+.vault-secret-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-secret-text.vault-masked {
+  color: var(--muted);
+  letter-spacing: 0.1em;
+}
+
+.vault-cell-view.vault-secret {
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.vault-cell-action {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.vault-cell-action:hover,
+.vault-cell-action[aria-pressed="true"] {
+  background: var(--side-soft);
+  color: var(--ink);
+}
+
+.vault-cell-action:focus-visible,
+.vault-link:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.vault-cell-action svg,
+.vault-link svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.vault-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand-ink);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--brand-ink) 40%, transparent);
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+
+.vault-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.vault-link svg {
+  flex: none;
+}
+
+.vault-grid select.vault-link-select {
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 14px;
+}
+
+.vault-grid select.vault-link-select:hover {
+  border-color: var(--line);
+}
+
+.vault-grid input[type="email"]:not(:placeholder-shown):invalid {
+  color: var(--danger);
+}
+
+.vault-grid tr.vault-highlight td {
+  animation: vault-highlight 2s ease-out;
+}
+
+@keyframes vault-highlight {
+  0%,
+  40% {
+    background: color-mix(in srgb, var(--brand-bright) 22%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+/* Vault: copy button on each cell in View, shown on hover or keyboard focus. */
+.vault-copyable {
+  position: relative;
+}
+
+.vault-copyable .vault-copy {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  transform: translateY(-50%);
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--line);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.vault-copyable:hover .vault-copy,
+.vault-copyable .vault-copy:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.vault-copyable .vault-copy:hover {
+  background: var(--side-soft);
+}
+
+/* Vault: "Fit to width" squeezes the columns into the page instead of scrolling sideways. */
+.button.vault-fit-toggle[aria-pressed="true"] {
+  background: var(--chip-soft);
+  border-color: var(--brand);
+  color: var(--chip-soft-ink);
+}
+
+.button.vault-fit-toggle[aria-pressed="true"]:hover {
+  background: var(--chip-soft);
+  border-color: var(--brand-ink);
+}
+
+.vault-grid-wrap:has(.vault-fit) {
+  overflow-x: hidden;
+}
+
+.vault-grid.vault-fit {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.vault-grid.vault-fit th,
+.vault-grid.vault-fit td {
+  min-width: 0;
+}
+
+.vault-grid.vault-fit .vault-grip-cell {
+  width: 32px;
+}
+
+.vault-grid.vault-fit .vault-row-actions {
+  width: 44px;
+}
+
+.vault-fit .vault-col-head input,
+.vault-fit .vault-col-name {
+  min-width: 0;
+}
+
+.vault-fit select {
+  max-width: 100%;
+}
+
+/* With "Fit to width" off, every value stays on one line; wide columns scroll sideways instead. */
+.vault-grid:not(.vault-fit) .vault-cell-view,
+.vault-grid:not(.vault-fit) .vault-link {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+/* Icon-only toolbar buttons, as wide as they are tall. */
+.button.vault-small.vault-icon-button {
+  padding: 7px 9px;
+}
+
+/* Vault: moving columns by their header handle */
+.vault-col-grip {
+  flex: none;
+  width: 20px;
+  margin-right: -2px;
+}
+
+.vault-grid th:hover .vault-col-grip {
+  opacity: 1;
+}
+
+.vault-grid.vault-col-dragging,
+.vault-grid.vault-col-dragging .vault-col-grip {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.vault-grid .vault-col-dragged {
+  opacity: 0.45;
+}
+
+.vault-grid th.vault-col-drop-before,
+.vault-grid td.vault-col-drop-before {
+  box-shadow: inset 2px 0 0 var(--brand-bright);
+}
+
+.vault-grid th.vault-col-drop-after,
+.vault-grid td.vault-col-drop-after {
+  box-shadow: inset -2px 0 0 var(--brand-bright);
 }

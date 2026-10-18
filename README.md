@@ -162,6 +162,90 @@ Coding, Writing, Math, and Rating are open rooms. A signed-in trainer chooses **
 
 For a private beta, ask 10 to 20 trainers to install Novaroom, sign in with the email code, and join the room that matches their work. Direct chats and groups are still there for people who already know each other.
 
+## Publish an update on GitHub
+
+The code lives at [github.com/novawaver/novaroom](https://github.com/novawaver/novaroom). Pushing a commit to `main` only saves the code. Installed copies of Novaroom update only when you push a version tag such as `v0.2.0`. The tag starts `.github/workflows/release.yml`, which builds the installer on GitHub and publishes it as a release. Installed apps check that release and offer the update.
+
+### One-time setup
+
+In the repository, open **Settings → Secrets and variables → Actions** and add these four repository secrets. The release stops at its first step if one is missing.
+
+| Secret | Value |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | The full text inside the private key file from `npx tauri signer generate`, not the file path |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password you chose for that key |
+| `VITE_SUPABASE_URL` | The same value as in your `.env` |
+| `VITE_SUPABASE_ANON_KEY` | The same value as in your `.env` |
+
+Keep the private key file somewhere safe and out of this folder. If it is lost, installed apps cannot accept updates signed with a new key. The repository must stay public, because installed apps read releases without signing in.
+
+### Each release
+
+1. Choose the new version number. Use a higher number than the last release, for example `0.1.0` to `0.2.0`, or `0.1.1` for a small fix.
+
+2. Change the version in all three of these files. They must match, or the updater can offer the wrong version.
+
+   | File | Line |
+   |---|---|
+   | `package.json` | `"version": "0.2.0",` |
+   | `src-tauri/tauri.conf.json` | `"version": "0.2.0",` |
+   | `src-tauri/Cargo.toml` | `version = "0.2.0"` |
+
+3. Check that the app still builds. This also updates `src-tauri/Cargo.lock` with the new version.
+
+   ```powershell
+   npm run build
+   cd src-tauri
+   cargo check
+   cd ..
+   ```
+
+4. If you added a file under `supabase/migrations/`, run it in the Supabase **SQL Editor** before you publish. The new app may need it as soon as people update.
+
+5. Look at what will be committed. `.env` and `src-tauri/target/` must not appear in the list.
+
+   ```powershell
+   git status
+   ```
+
+6. Commit and push the code to `main`.
+
+   ```powershell
+   git add -A
+   git commit -m "Release v0.2.0"
+   git push origin main
+   ```
+
+7. Tag the commit and push the tag. This starts the release build.
+
+   ```powershell
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+8. Open the **Actions** tab on GitHub and watch the **Release** run. It takes about 10 to 20 minutes. When it is green, the **Releases** page shows `Novaroom v0.2.0` with the setup file, `latest.json`, and signature files.
+
+9. Open an installed older copy of Novaroom. It should show a banner saying **Novaroom 0.2.0 is available**. Install the update and check that the banner does not come back.
+
+### If the release fails
+
+Open the failed run on the **Actions** tab and read the first red step.
+
+- **These repository secrets are missing or empty.** Add the named secrets, then run the tag again (below).
+- **TAURI_SIGNING_PRIVATE_KEY must be the full contents.** Paste the text inside the key file, not its path.
+- **A build error.** Fix it, commit, and push to `main`. Then move the tag to the fixed commit.
+
+To run the same tag again after a fix, delete it on both sides and push it again. Also delete the half-made release on the **Releases** page if one appeared.
+
+```powershell
+git tag -d v0.2.0
+git push origin --delete v0.2.0
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Do not reuse a version number that already reached users. If a published release is broken, publish the next number, for example `v0.2.1`.
+
 ## Microsoft Store
 
 Version 0.1.0 is prepared as a Windows installer. It is not published yet. The listing needs your Partner Center account, a public privacy-policy address, and a name reservation.
@@ -198,6 +282,7 @@ A direct download outside the Store waits until code signing is set up.
 | `src/` | Sign-in, profile, and chat screens |
 | `src-tauri/` | Windows shell |
 | `supabase/migrations/` | SQL to run in the Supabase project |
+| `.github/workflows/release.yml` | Builds and publishes a release when a version tag is pushed |
 | `.env.example` | The two values the app expects |
 
 ## If something fails

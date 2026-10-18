@@ -145,7 +145,7 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
 
   const dismiss = useCallback((id: string) => setToasts((current) => current.filter((toast) => toast.id !== id)), [])
 
-  return { toasts, dismiss, refreshEvents, unread, markRead }
+  return { toasts, dismiss, notify: show, refreshEvents, unread, markRead }
 }
 
 export function Toasts({

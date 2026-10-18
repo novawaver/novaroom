@@ -38,6 +38,7 @@ import { listUsers, type RegisteredUser } from "../lib/users"
 import { PROFILE_TABS, Profile, type ProfileTab } from "./Profile"
 import { SETTINGS_TABS, Settings, type SettingsTab } from "./Settings"
 import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
+import { Vault, VaultLeaveDialog, useVault } from "./Vault"
 
 function NewChatIcon() {
   return (
@@ -90,6 +91,33 @@ function LeadDeskNavIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <rect x="4" y="4.5" width="16" height="16" rx="2.5" />
       <path d="M8 3v3M16 3v3M4 9.5h16M8.5 14l2 2 4-4" />
+    </svg>
+  )
+}
+
+function VaultNavIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M12 8.8V7.5M12 16.5v-1.3M15.2 12h1.3M7.5 12h1.3M7 19.5v1M17 19.5v1" />
+    </svg>
+  )
+}
+
+function VaultTableIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+      <path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10" />
+    </svg>
+  )
+}
+
+function NewTableIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" />
     </svg>
   )
 }
@@ -305,6 +333,15 @@ function AppearanceIcon() {
   )
 }
 
+function StartupIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3.5v8" />
+      <path d="M7.2 6.5a7.5 7.5 0 1 0 9.6 0" />
+    </svg>
+  )
+}
+
 function AboutIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -411,12 +448,14 @@ const PEOPLE_ICONS: Record<PeopleFilter, ComponentType> = {
 
 const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
   appearance: AppearanceIcon,
+  startup: StartupIcon,
   about: AboutIcon,
   safety: SafetyIcon,
 }
 
 const SETTINGS_HINTS: Record<SettingsTab, string> = {
   appearance: "Light, dark, or system",
+  startup: "Open when Windows starts",
   about: "Version, privacy, terms",
   safety: "Blocked people",
 }
@@ -466,7 +505,7 @@ function SideMenu<T extends string>({
   )
 }
 
-type NavItem = "chats" | "rooms" | "people" | "leaddesk" | "timer" | "settings"
+type NavItem = "chats" | "rooms" | "people" | "leaddesk" | "timer" | "vault" | "settings"
 
 const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
   { id: "chats", label: "Chats", icon: ChatsNavIcon },
@@ -474,6 +513,7 @@ const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
   { id: "people", label: "People", icon: PeopleNavIcon },
   { id: "leaddesk", label: "LeadDesk", icon: LeadDeskNavIcon },
   { id: "timer", label: "Tracker", icon: TimerNavIcon },
+  { id: "vault", label: "Vault", icon: VaultNavIcon },
   { id: "settings", label: "Settings", icon: SettingsNavIcon },
 ]
 
@@ -540,14 +580,17 @@ function isImage(mime: string | null) {
 }
 
 export function AppShell() {
-  const { session, profile, signOut } = useAuth()
-  const [view, setView] = useState<"chats" | "profile" | "people" | "leaddesk" | "timer" | "settings">("chats")
+  const { session, profile, roleChange, dismissRoleChange, signOut } = useAuth()
+  const [view, setView] = useState<"chats" | "profile" | "people" | "leaddesk" | "timer" | "vault" | "settings">("chats")
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance")
   const [profileTab, setProfileTab] = useState<ProfileTab>("edit")
   const [peopleFilter, setPeopleFilter] = useState<PeopleFilter>("all")
   const [deskTab, setDeskTab] = useState<LeadDeskTab>("tasks")
   const isLeader = profile?.role === LEADERSHIP
   const desk = useLeadDesk(view === "leaddesk" && isLeader)
+  const vault = useVault(session?.userId ?? null, view === "vault")
+  // Leaving the Vault with unsaved changes first asks whether to save or discard them.
+  const leaveTo = (go: () => void) => (view === "vault" ? vault.guard(go) : go())
   // Records awake and idle time in the background, whichever page is open.
   const timer = useTimer(session?.userId ?? null, isLeader)
   const [timerRange, setTimerRange] = useState<TimerRange>("today")
@@ -586,6 +629,25 @@ export function AppShell() {
   useEffect(() => {
     if (view === "leaddesk" && !isLeader) setView("chats")
   }, [view, isLeader])
+
+  // Tell the person when an admin changes their role, as a toast and a desktop notification.
+  const notify = alerts.notify
+  useEffect(() => {
+    if (!roleChange) return
+    const { from, to } = roleChange
+    if (to === LEADERSHIP) {
+      notify(`role:${Date.now()}`, "You're now in Leadership", "An admin gave you the Leadership role. LeadDesk is now in the sidebar.")
+    } else if (from === LEADERSHIP) {
+      notify(
+        `role:${Date.now()}`,
+        "Leadership role removed",
+        `${to ? `Your role is now ${to}. ` : ""}LeadDesk is no longer available.`,
+      )
+    } else {
+      notify(`role:${Date.now()}`, "Your role changed", to ? `Your role is now ${to}.` : "Your role was cleared.")
+    }
+    dismissRoleChange()
+  }, [roleChange, notify, dismissRoleChange])
   const [people, setPeople] = useState<RegisteredUser[] | null>(null)
   const [peopleError, setPeopleError] = useState("")
   const [section, setSection] = useState<"chats" | "rooms">("chats")
@@ -1099,11 +1161,39 @@ export function AppShell() {
     markChatRead(chatId)
   }
 
+  function selectNav(item: NavItem) {
+    if (item === "settings" || item === "people" || item === "leaddesk" || item === "timer" || item === "vault") {
+      // Clicking the page that is already open takes it back to its first tab.
+      if (item === view) {
+        if (item === "settings") setSettingsTab("appearance")
+        if (item === "people") setPeopleFilter("all")
+        if (item === "leaddesk") setDeskTab("tasks")
+        if (item === "timer") setTimerRange("today")
+      }
+      setView(item)
+      return
+    }
+    setSection(item)
+    setView("chats")
+    setComposer(null)
+    setStartError("")
+    const current = chats.find((chat) => chat.id === selectedId)
+    if (current) lastOpenRef.current[current.kind === "room" ? "rooms" : "chats"] = current.id
+    if (current && (current.kind === "room") === (item === "rooms")) return
+    const restore = chats.find((chat) => chat.id === lastOpenRef.current[item])
+    if (restore) {
+      openChat(restore.id)
+    } else {
+      setSelectedId(null)
+      setMessages([])
+    }
+  }
+
   return (
     <div className="shell">
       <NavBar
         active={
-          view === "settings" || view === "people" || view === "leaddesk" || view === "timer"
+          view === "settings" || view === "people" || view === "leaddesk" || view === "timer" || view === "vault"
             ? view
             : view === "profile"
               ? null
@@ -1112,24 +1202,11 @@ export function AppShell() {
         showLeadDesk={isLeader}
         badges={{ leaddesk: unreadDeskEvents.length }}
         onSelect={(item) => {
-          if (item === "settings" || item === "people" || item === "leaddesk" || item === "timer") {
-            setView(item)
+          if (item === "vault" && view === "vault") {
+            vault.selectTable(vault.data?.tables[0]?.id ?? null)
             return
           }
-          setSection(item)
-          setView("chats")
-          setComposer(null)
-          setStartError("")
-          const current = chats.find((chat) => chat.id === selectedId)
-          if (current) lastOpenRef.current[current.kind === "room" ? "rooms" : "chats"] = current.id
-          if (current && (current.kind === "room") === (item === "rooms")) return
-          const restore = chats.find((chat) => chat.id === lastOpenRef.current[item])
-          if (restore) {
-            openChat(restore.id)
-          } else {
-            setSelectedId(null)
-            setMessages([])
-          }
+          leaveTo(() => selectNav(item))
         }}
         footer={
           <button
@@ -1138,7 +1215,10 @@ export function AppShell() {
             aria-current={view === "profile" ? "page" : undefined}
             aria-label="Your profile"
             title={profile.displayName || session.email}
-            onClick={() => setView("profile")}
+            onClick={() => {
+              if (view === "profile") setProfileTab("edit")
+              leaveTo(() => setView("profile"))
+            }}
           >
             <span className="avatar">
               {profile.avatarUrl ? (
@@ -1192,6 +1272,31 @@ export function AppShell() {
             })}
             active={peopleFilter}
             onSelect={setPeopleFilter}
+          />
+        ) : view === "vault" ? (
+          <SideMenu
+            label="Vault tables"
+            items={(vault.data?.tables ?? []).map((table) => ({
+              id: table.id,
+              label: table.name || "Untitled",
+              hint: table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`,
+              icon: VaultTableIcon,
+            }))}
+            active={vault.table?.id ?? ""}
+            onSelect={vault.selectTable}
+            footer={
+              vault.data && vault.editing ? (
+                <button type="button" className="side-menu-item" onClick={vault.addTable}>
+                  <span className="side-menu-icon">
+                    <NewTableIcon />
+                  </span>
+                  <span className="side-menu-text">
+                    <strong>New table</strong>
+                    <span>Add a table to this Vault</span>
+                  </span>
+                </button>
+              ) : undefined
+            }
           />
         ) : view === "settings" ? (
           <SideMenu
@@ -1458,6 +1563,8 @@ export function AppShell() {
             setView("chats")
           }}
         />
+      ) : view === "vault" ? (
+        <Vault vault={vault} />
       ) : view === "settings" ? (
         <Settings tab={settingsTab} />
       ) : view === "profile" ? (
@@ -1693,10 +1800,13 @@ export function AppShell() {
         onDismiss={alerts.dismiss}
         onOpen={() => {
           if (!isLeader) return
-          setDeskTab("schedule")
-          setView("leaddesk")
+          leaveTo(() => {
+            setDeskTab("schedule")
+            setView("leaddesk")
+          })
         }}
       />
+      <VaultLeaveDialog vault={vault} />
     </div>
   )
 }

@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -14,12 +15,20 @@ import { writeUnread } from "./lib/unread"
 
 const SESSION_KEY = PREVIEW_SESSION_KEY
 const PROFILES_KEY = PREVIEW_PROFILES_KEY
+// The last role this computer saw for each account, so a change made while the app was closed is
+// still announced on the next start.
+const ROLE_KEY = (userId: string) => `novaroom.role.${userId}`
+
+export type RoleChange = { from: string; to: string }
 
 type AuthContextValue = {
   configured: boolean
   ready: boolean
   session: Session | null
   profile: Profile | null
+  // Set when someone else (an admin) changed this person's role; cleared with dismissRoleChange.
+  roleChange: RoleChange | null
+  dismissRoleChange: () => void
   requestCode: (email: string) => Promise<void>
   verifyCode: (email: string, code: string) => Promise<void>
   saveProfile: (profile: Profile) => Promise<void>
@@ -61,6 +70,22 @@ function readPreviewProfiles(): Record<string, Profile> {
     return parsed
   } catch {
     return {}
+  }
+}
+
+function readKnownRole(userId: string): string | null {
+  try {
+    return localStorage.getItem(ROLE_KEY(userId))
+  } catch {
+    return null
+  }
+}
+
+function writeKnownRole(userId: string, role: string) {
+  try {
+    localStorage.setItem(ROLE_KEY(userId), role)
+  } catch {
+    // Not remembered; a change while the app is closed just won't be announced.
   }
 }
 
@@ -106,6 +131,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false)
   const [session, setSession] = useState<Session | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
+  const [roleChange, setRoleChange] = useState<RoleChange | null>(null)
+
+  // Takes a profile read from the database. Your own role edits are recorded before they are saved,
+  // so a role that differs from the last one seen here was changed by someone else.
+  const applyLoaded = useCallback((userId: string, loaded: Profile) => {
+    const known = readKnownRole(userId)
+    writeKnownRole(userId, loaded.role)
+    if (known !== null && known !== loaded.role) setRoleChange({ from: known, to: loaded.role })
+    setProfile(loaded)
+  }, [])
 
   useEffect(() => {
     if (!supabase) {
@@ -126,7 +161,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const loaded = await loadRemoteProfile(next.userId, next.email)
       if (!active) return
       setSession(next)
-      setProfile(loaded)
+      applyLoaded(next.userId, loaded)
     }
 
     client.auth.getSession().then(async ({ data }) => {
@@ -151,7 +186,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       active = false
       subscription.subscription.unsubscribe()
     }
-  }, [])
+  }, [applyLoaded])
+
+  // Keep the profile current while signed in: live updates, plus a reload whenever the window gets
+  // focus in case the live connection dropped.
+  const userId = session?.userId
+  const email = session?.email
+  useEffect(() => {
+    if (!supabase || !userId || !email) return
+    const client = supabase
+    let active = true
+    const reload = () => {
+      void loadRemoteProfile(userId, email)
+        .then((loaded) => {
+          if (active) applyLoaded(userId, loaded)
+        })
+        .catch(() => {})
+    }
+    const channel = client
+      .channel(`profile-${userId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "profiles", filter: `id=eq.${userId}` },
+        (payload) => applyLoaded(userId, rowToProfile(payload.new as ProfileRow)),
+      )
+      .subscribe()
+    window.addEventListener("focus", reload)
+    return () => {
+      active = false
+      window.removeEventListener("focus", reload)
+      void client.removeChannel(channel)
+    }
+  }, [userId, email, applyLoaded])
 
   const value = useMemo<AuthContextValue>(() => {
     return {
@@ -159,6 +225,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ready,
       session,
       profile,
+      roleChange,
+      dismissRoleChange: () => setRoleChange(null),
       async requestCode(email: string) {
         const normalized = email.trim().toLowerCase()
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
@@ -197,7 +265,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const next = { userId: user.id, email: user.email }
         const loaded = await loadRemoteProfile(next.userId, next.email)
         setSession(next)
-        setProfile(loaded)
+        applyLoaded(next.userId, loaded)
       },
       async saveProfile(next: Profile) {
         if (!session) throw new Error("Sign in before saving your profile.")
@@ -213,6 +281,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setProfile(saved)
           return
         }
+        // Record the new role first, so its live update isn't announced as someone else's change.
+        const knownRole = readKnownRole(session.userId)
+        writeKnownRole(session.userId, saved.role)
         const { error } = await supabase.from("profiles").upsert({
           id: session.userId,
           display_name: saved.displayName,
@@ -224,7 +295,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           domains: saved.domains,
           updated_at: new Date().toISOString(),
         })
-        if (error) throw error
+        if (error) {
+          if (knownRole !== null) writeKnownRole(session.userId, knownRole)
+          throw error
+        }
         setProfile(saved)
       },
       async deleteAccount() {
@@ -254,7 +328,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(null)
       },
     }
-  }, [profile, ready, session])
+  }, [applyLoaded, profile, ready, roleChange, session])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

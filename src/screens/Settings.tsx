@@ -2,12 +2,14 @@ import { useEffect, useState } from "react"
 import { useAuth } from "../auth"
 import { APP_VERSION, PRIVACY, TERMS } from "../legal"
 import { listBlocked, unblockUser, type BlockedPerson } from "../lib/safety"
+import { readStartup, writeStartup, type StartupSettings } from "../lib/startup"
 import { applyTheme, readTheme, writeTheme, type ThemeChoice } from "../lib/theme"
 
-export type SettingsTab = "appearance" | "about" | "safety"
+export type SettingsTab = "appearance" | "startup" | "about" | "safety"
 
 export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "appearance", label: "Appearance" },
+  { id: "startup", label: "Startup" },
   { id: "about", label: "About" },
   { id: "safety", label: "Safety" },
 ]
@@ -29,9 +31,94 @@ export function Settings({ tab }: { tab: SettingsTab }) {
           <Appearance />
         </div>
       )}
+      {tab === "startup" && <Startup />}
       {tab === "about" && <AboutNovaroom />}
       {tab === "safety" && <AccountSafety />}
     </section>
+  )
+}
+
+function Startup() {
+  const [settings, setSettings] = useState<StartupSettings | null>(null)
+  const [unavailable, setUnavailable] = useState(false)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    let active = true
+    void readStartup()
+      .then((loaded) => {
+        if (!active) return
+        if (loaded) setSettings(loaded)
+        else setUnavailable(true)
+      })
+      .catch((caught) => {
+        if (active) setError(caught instanceof Error ? caught.message : "Could not load startup settings.")
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  function change(next: StartupSettings) {
+    const previous = settings
+    setSettings(next)
+    setError("")
+    void writeStartup(next).catch((caught) => {
+      setSettings(previous)
+      setError(typeof caught === "string" ? caught : "Could not change startup settings.")
+    })
+  }
+
+  return (
+    <div className="settings-panel">
+      {unavailable ? (
+        <p className="hint">These settings are only in the Novaroom desktop app.</p>
+      ) : (
+        <>
+          <div className="startup-row">
+            <div>
+              <strong>Open Novaroom when Windows starts</strong>
+              <p className="hint">Novaroom starts when you sign in to your computer, so you see new messages.</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings?.launchAtLogin ?? false}
+              aria-label="Open Novaroom when Windows starts"
+              className="switch"
+              disabled={!settings}
+              onClick={() => settings && change({ ...settings, launchAtLogin: !settings.launchAtLogin })}
+            >
+              <span />
+            </button>
+          </div>
+          <div className="startup-row">
+            <div>
+              <strong>Start minimized</strong>
+              <p className="hint">
+                Novaroom starts minimized to the taskbar. Turn this off to open the window when Windows starts.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings?.startMinimized ?? false}
+              aria-label="Start minimized"
+              className="switch"
+              disabled={!settings?.launchAtLogin}
+              onClick={() => settings && change({ ...settings, startMinimized: !settings.startMinimized })}
+            >
+              <span />
+            </button>
+          </div>
+        </>
+      )}
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
   )
 }
 

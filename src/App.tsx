@@ -1,5 +1,7 @@
+import { useEffect } from "react"
 import { useAuth } from "./auth"
 import { inTauri } from "./lib/desktop"
+import { listenForQuit } from "./lib/unsaved"
 import { AppShell } from "./screens/AppShell"
 import { SignIn } from "./screens/SignIn"
 import { TitleBar } from "./screens/TitleBar"
@@ -19,6 +21,12 @@ function Screen() {
 }
 
 export default function App() {
+  // Quit from the tray waits here while there are unsaved changes, so the person can save them.
+  useEffect(() => {
+    const stop = listenForQuit()
+    return () => void stop.then((unlisten) => unlisten())
+  }, [])
+
   // In the browser the window keeps its own title bar; the in-app one is desktop only.
   if (!inTauri()) return <Screen />
   return (
