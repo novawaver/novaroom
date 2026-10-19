@@ -2106,6 +2106,10 @@ code {
   border-left-color: var(--muted);
 }
 
+.task-card.new {
+  background: color-mix(in srgb, var(--brand-bright) 8%, var(--card));
+}
+
 .task-open {
   display: grid;
   gap: 4px;

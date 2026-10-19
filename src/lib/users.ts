@@ -15,6 +15,14 @@ function readPreviewProfiles(): Record<string, Profile> {
   }
 }
 
+// Whether the signed-in person is an admin. Offline preview has no admins.
+export async function readIsAdmin(): Promise<boolean> {
+  if (!supabase) return false
+  const { data, error } = await supabase.rpc("is_admin")
+  if (error) throw error
+  return data === true
+}
+
 export async function listUsers(): Promise<RegisteredUser[]> {
   if (!supabase) {
     return Object.entries(readPreviewProfiles())

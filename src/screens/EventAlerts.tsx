@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { notifyIncoming } from "../lib/desktop"
-import { markAlertsDelivered, subscribeToAlerts, undeliveredAlerts } from "../lib/eventAlerts"
+import { markAlertsDelivered, subscribeToAlerts, undeliveredAlerts, type EventAlert } from "../lib/eventAlerts"
 import {
   listEvents,
   listReadEventIds,
+  listReadTaskIds,
+  listTasks,
   markEventsRead,
+  markTasksRead,
   occurrencesOf,
   subscribeToDeskChanges,
   unreadEvents,
+  unreadTasks,
   type DeskEvent,
+  type DeskTask,
 } from "../lib/leaddesk"
 
-export type Toast = { id: string; title: string; body: string }
+// tab: the LeadDesk tab that clicking the toast opens.
+export type Toast = { id: string; title: string; body: string; tab: "schedule" | "tasks" }
 
 const CHECK_EVERY_MS = 30 * 1000
 const REFRESH_EVENTS_MS = 5 * 60 * 1000
@@ -24,8 +30,9 @@ function timeOf(value: string) {
 }
 
 // Tells LeadDesk participants about events: when they are added to one (from the database inbox)
-// and when one of their events starts (checked here while the app is open). Each alert shows as a
-// desktop notification and an in-app toast. Also tracks which events are unread for the badges.
+// and when one of their events starts (checked here while the app is open). Also tells assignees
+// when a task is assigned to them. Each alert shows as a desktop notification and an in-app toast.
+// Also tracks which events and tasks are unread for the badges.
 // onRemoteChange runs when someone else's change to an event arrives, so an open page can reload.
 export function useEventAlerts(userId: string | null, isLeader: boolean, onRemoteChange?: () => void) {
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -33,14 +40,18 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
   const eventsRef = useRef<DeskEvent[]>([])
   const [events, setEvents] = useState<DeskEvent[]>([])
   const [readIds, setReadIds] = useState<Set<string> | null>(null)
+  const [tasks, setTasks] = useState<DeskTask[]>([])
+  const [readTaskIds, setReadTaskIds] = useState<Set<string> | null>(null)
+  // Tasks opened in this session, kept read even if a reload races ahead of saving the read.
+  const localTaskReadsRef = useRef(new Set<string>())
   const remoteChangeRef = useRef(onRemoteChange)
   remoteChangeRef.current = onRemoteChange
 
-  const show = useCallback((key: string, title: string, body: string) => {
+  const show = useCallback((key: string, title: string, body: string, tab: Toast["tab"] = "schedule") => {
     if (shownRef.current.has(key)) return
     shownRef.current.add(key)
     void notifyIncoming(title, body)
-    setToasts((current) => [...current.slice(-3), { id: key, title, body }])
+    setToasts((current) => [...current.slice(-3), { id: key, title, body, tab }])
     window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== key)), TOAST_MS)
   }, [])
 
@@ -54,12 +65,27 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
     }
   }, [])
 
-  // Added-to-event notifications: anything missed while offline, then live ones.
+  // Reads are reloaded with tasks because the database clears one when a task is reassigned.
+  const refreshTasks = useCallback(async () => {
+    if (!userId) return
+    try {
+      const [next, reads] = await Promise.all([listTasks(), listReadTaskIds(userId)])
+      setTasks(next)
+      setReadTaskIds(new Set([...reads, ...localTaskReadsRef.current]))
+    } catch {
+      // Keep the last list; the next change tries again.
+    }
+  }, [userId])
+
+  // Added-to-event and task-assigned notifications: anything missed while offline, then live ones.
   useEffect(() => {
     if (!userId) return
     let active = true
-    const deliver = (alerts: { id: string; title: string }[]) => {
-      for (const alert of alerts) show(`added:${alert.id}`, "Added to an event", alert.title)
+    const deliver = (alerts: EventAlert[]) => {
+      for (const alert of alerts) {
+        if (alert.kind === "task_assigned") show(`task:${alert.id}`, "Task assigned to you", alert.title, "tasks")
+        else show(`added:${alert.id}`, "Added to an event", alert.title)
+      }
       void markAlertsDelivered(alerts.map((alert) => alert.id)).catch(() => {})
     }
     void undeliveredAlerts()
@@ -69,14 +95,17 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
       .catch(() => {})
     const stop = subscribeToAlerts(userId, (alert) => {
       deliver([alert])
-      // The new event should also get its start-time reminder.
-      void refreshEvents()
+      // The new event should also get its start-time reminder, and a new task its badge.
+      if (alert.kind === "task_assigned") {
+        if (alert.taskId) localTaskReadsRef.current.delete(alert.taskId)
+        void refreshTasks()
+      } else void refreshEvents()
     })
     return () => {
       active = false
       stop()
     }
-  }, [userId, show, refreshEvents])
+  }, [userId, show, refreshEvents, refreshTasks])
 
   // Start-time reminders for events this person takes part in.
   useEffect(() => {
@@ -111,6 +140,8 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
   useEffect(() => {
     if (!userId || !isLeader) {
       setReadIds(null)
+      setReadTaskIds(null)
+      setTasks([])
       return
     }
     let active = true
@@ -119,19 +150,26 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
         if (active) setReadIds(ids)
       })
       .catch(() => {})
+    void refreshTasks()
     const stop = subscribeToDeskChanges(() => {
       void refreshEvents()
+      void refreshTasks()
       remoteChangeRef.current?.()
     })
     return () => {
       active = false
       stop()
     }
-  }, [userId, isLeader, refreshEvents])
+  }, [userId, isLeader, refreshEvents, refreshTasks])
 
   const unread = useMemo(
     () => (userId && readIds ? unreadEvents(events, readIds, userId) : []),
     [events, readIds, userId],
+  )
+
+  const unreadTaskList = useMemo(
+    () => (userId && readTaskIds ? unreadTasks(tasks, readTaskIds, userId) : []),
+    [tasks, readTaskIds, userId],
   )
 
   const markRead = useCallback(
@@ -143,9 +181,29 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
     [userId],
   )
 
+  const markTaskRead = useCallback(
+    (id: string) => {
+      if (!userId) return
+      localTaskReadsRef.current.add(id)
+      setReadTaskIds((current) => new Set([...(current ?? []), id]))
+      void markTasksRead(userId, [id]).catch(() => {})
+    },
+    [userId],
+  )
+
   const dismiss = useCallback((id: string) => setToasts((current) => current.filter((toast) => toast.id !== id)), [])
 
-  return { toasts, dismiss, notify: show, refreshEvents, unread, markRead }
+  return {
+    toasts,
+    dismiss,
+    notify: show,
+    refreshEvents,
+    refreshTasks,
+    unread,
+    markRead,
+    unreadTasks: unreadTaskList,
+    markTaskRead,
+  }
 }
 
 export function Toasts({
@@ -154,7 +212,7 @@ export function Toasts({
   onDismiss,
 }: {
   toasts: Toast[]
-  onOpen: () => void
+  onOpen: (toast: Toast) => void
   onDismiss: (id: string) => void
 }) {
   if (toasts.length === 0) return null
@@ -167,7 +225,7 @@ export function Toasts({
             className="toast-body"
             onClick={() => {
               onDismiss(toast.id)
-              onOpen()
+              onOpen(toast)
             }}
           >
             <strong>{toast.title}</strong>

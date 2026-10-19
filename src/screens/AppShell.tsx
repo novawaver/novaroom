@@ -34,7 +34,7 @@ import { Toasts, useEventAlerts } from "./EventAlerts"
 import { TIMER_RANGES, Timer, rangeTotals, useTimer, useTimerHistory, type TimerRange } from "./Timer"
 import { formatDuration } from "../lib/timer"
 import { isTimeZone, localTimeZone } from "../lib/timezone"
-import { listUsers, type RegisteredUser } from "../lib/users"
+import { listUsers, readIsAdmin, type RegisteredUser } from "../lib/users"
 import { PROFILE_TABS, Profile, type ProfileTab } from "./Profile"
 import { SETTINGS_TABS, Settings, type SettingsTab } from "./Settings"
 import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
@@ -587,7 +587,23 @@ export function AppShell() {
   const [peopleFilter, setPeopleFilter] = useState<PeopleFilter>("all")
   const [deskTab, setDeskTab] = useState<LeadDeskTab>("tasks")
   const isLeader = profile?.role === LEADERSHIP
-  const desk = useLeadDesk(view === "leaddesk" && isLeader)
+  // Admins get everything Leadership members have, without the limits an admin sets for them.
+  const [isAdmin, setIsAdmin] = useState(false)
+  useEffect(() => {
+    setIsAdmin(false)
+    if (!session) return
+    let active = true
+    void readIsAdmin()
+      .then((next) => {
+        if (active) setIsAdmin(next)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [session?.userId])
+  const hasLeadDesk = isLeader || isAdmin
+  const desk = useLeadDesk(view === "leaddesk" && hasLeadDesk)
   const vault = useVault(session?.userId ?? null, view === "vault")
   // Leaving the Vault with unsaved changes first asks whether to save or discard them.
   const leaveTo = (go: () => void) => (view === "vault" ? vault.guard(go) : go())
@@ -612,13 +628,16 @@ export function AppShell() {
     }
   }
   const timerHistory = useTimerHistory(session?.userId ?? null, view === "timer", timer.version, timer.live, timerZone)
-  const alerts = useEventAlerts(session?.userId ?? null, isLeader, () => {
+  const alerts = useEventAlerts(session?.userId ?? null, hasLeadDesk, () => {
     if (view === "leaddesk") void desk.reload()
   })
   const refreshAlertEvents = alerts.refreshEvents
   const { unread: unreadDeskEvents, markRead: markDeskEventsRead } = alerts
   // An event stays unread, with its badges and "New" tag, until it is opened.
   const unreadEventIds = useMemo(() => new Set(unreadDeskEvents.map((event) => event.id)), [unreadDeskEvents])
+  // Tasks assigned to this person by someone else stay unread until opened.
+  const { unreadTasks: unreadDeskTasks, markTaskRead: markDeskTaskRead } = alerts
+  const unreadTaskIds = useMemo(() => new Set(unreadDeskTasks.map((task) => task.id)), [unreadDeskTasks])
 
   // Edits made on LeadDesk should change start-time reminders straight away.
   useEffect(() => {
@@ -627,8 +646,8 @@ export function AppShell() {
 
   // Leave LeadDesk if the Leadership role is removed while it is open.
   useEffect(() => {
-    if (view === "leaddesk" && !isLeader) setView("chats")
-  }, [view, isLeader])
+    if (view === "leaddesk" && !hasLeadDesk) setView("chats")
+  }, [view, hasLeadDesk])
 
   // Tell the person when an admin changes their role, as a toast and a desktop notification.
   const notify = alerts.notify
@@ -654,9 +673,9 @@ export function AppShell() {
   const [chats, setChats] = useState<ChatSummary[]>([])
   // What an admin has allowed this person to start. Unknown (null) until loaded.
   const [chatPermissions, setChatPermissions] = useState<ChatPermissions | null>(null)
-  // Leadership members can always start chats and groups; everyone else needs an admin's permission.
-  const canStartDirect = isLeader || chatPermissions?.direct === true
-  const canStartGroup = isLeader || chatPermissions?.group === true
+  // Leadership members and admins can always start chats and groups; everyone else needs permission.
+  const canStartDirect = isLeader || isAdmin || chatPermissions?.direct === true
+  const canStartGroup = isLeader || isAdmin || chatPermissions?.group === true
   // False until the first load finishes, so the sidebar shows placeholders instead of "No chats yet".
   const [chatsLoaded, setChatsLoaded] = useState(false)
   const [roomsLoaded, setRoomsLoaded] = useState(false)
@@ -1200,8 +1219,8 @@ export function AppShell() {
               ? null
               : section
         }
-        showLeadDesk={isLeader}
-        badges={{ leaddesk: unreadDeskEvents.length }}
+        showLeadDesk={hasLeadDesk}
+        badges={{ leaddesk: unreadDeskEvents.length + unreadDeskTasks.length }}
         onSelect={(item) => {
           if (item === "vault" && view === "vault") {
             vault.selectTable(vault.data?.tables[0]?.id ?? null)
@@ -1254,7 +1273,8 @@ export function AppShell() {
               label,
               hint: leadDeskHints(desk.data, session.userId)[id],
               icon: LEADDESK_ICONS[id],
-              badge: id === "schedule" ? unreadDeskEvents.length : undefined,
+              badge:
+                id === "schedule" ? unreadDeskEvents.length : id === "tasks" ? unreadDeskTasks.length : undefined,
             }))}
             active={deskTab}
             onSelect={setDeskTab}
@@ -1547,6 +1567,9 @@ export function AppShell() {
           reload={desk.reload}
           newEventIds={unreadEventIds}
           onEventOpened={(id) => markDeskEventsRead([id])}
+          newTaskIds={unreadTaskIds}
+          onTaskOpened={markDeskTaskRead}
+          isAdmin={isAdmin}
         />
       ) : view === "people" ? (
         <People
@@ -1805,10 +1828,10 @@ export function AppShell() {
       <Toasts
         toasts={alerts.toasts}
         onDismiss={alerts.dismiss}
-        onOpen={() => {
-          if (!isLeader) return
+        onOpen={(toast) => {
+          if (!hasLeadDesk) return
           leaveTo(() => {
-            setDeskTab("schedule")
+            setDeskTab(toast.tab)
             setView("leaddesk")
           })
         }}

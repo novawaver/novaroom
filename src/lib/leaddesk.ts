@@ -402,6 +402,45 @@ export function unreadEvents(events: DeskEvent[], readIds: Set<string>, userId: 
   return events.filter((event) => event.createdBy !== userId && !readIds.has(event.id))
 }
 
+const PREVIEW_TASK_READS_KEY = (userId: string) => `novaroom.preview.leaddesk-task-reads.${userId}`
+
+// Tasks this person has already opened.
+export async function listReadTaskIds(userId: string): Promise<Set<string>> {
+  if (!supabase) {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(PREVIEW_TASK_READS_KEY(userId)) ?? "[]") as string[])
+    } catch {
+      return new Set()
+    }
+  }
+  const { data, error } = await supabase.from("leaddesk_task_reads").select("task_id").eq("user_id", userId)
+  fail(error)
+  return new Set((data as Array<{ task_id: string }>).map((row) => row.task_id))
+}
+
+export async function markTasksRead(userId: string, taskIds: string[]) {
+  if (taskIds.length === 0) return
+  if (!supabase) {
+    const seen = await listReadTaskIds(userId)
+    for (const id of taskIds) seen.add(id)
+    localStorage.setItem(PREVIEW_TASK_READS_KEY(userId), JSON.stringify([...seen]))
+    return
+  }
+  const { error } = await supabase
+    .from("leaddesk_task_reads")
+    .upsert(
+      taskIds.map((taskId) => ({ user_id: userId, task_id: taskId })),
+      { onConflict: "user_id,task_id", ignoreDuplicates: true },
+    )
+  fail(error)
+}
+
+// Unread: assigned to this person and not opened since. The database clears the read when someone
+// else assigns it to them, and marks it read when they assign it to themselves.
+export function unreadTasks(tasks: DeskTask[], readIds: Set<string>, userId: string) {
+  return tasks.filter((task) => task.assigneeId === userId && !readIds.has(task.id))
+}
+
 // Calls onChange whenever an event or task this person can see is added, changed or removed.
 export function subscribeToDeskChanges(onChange: () => void) {
   if (!supabase) return () => {}
@@ -410,6 +449,8 @@ export function subscribeToDeskChanges(onChange: () => void) {
     .channel("leaddesk-changes")
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_events" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_tasks" }, () => onChange())
+    // Someone may have lost access to an event, which the events stream above cannot tell them.
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "leaddesk_signals" }, () => onChange())
     .subscribe()
   return () => {
     void client.removeChannel(channel)

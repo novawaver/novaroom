@@ -1,18 +1,26 @@
 import { supabase } from "./supabase"
 
-// "You were added to an event" notifications, created by the database for each new participant.
-export type EventAlert = { id: string; eventId: string | null; title: string }
+// "You were added to an event" and "A task was assigned to you" notifications, created by the database.
+export type AlertKind = "event_added" | "task_assigned"
 
-type AlertRow = { id: string; event_id: string | null; title: string }
+export type EventAlert = { id: string; kind: AlertKind; eventId: string | null; taskId: string | null; title: string }
 
-const toAlert = (row: AlertRow): EventAlert => ({ id: row.id, eventId: row.event_id, title: row.title })
+type AlertRow = { id: string; kind: AlertKind; event_id: string | null; task_id: string | null; title: string }
+
+const toAlert = (row: AlertRow): EventAlert => ({
+  id: row.id,
+  kind: row.kind,
+  eventId: row.event_id,
+  taskId: row.task_id,
+  title: row.title,
+})
 
 // Notifications not shown yet, for example ones that arrived while the app was closed.
 export async function undeliveredAlerts(): Promise<EventAlert[]> {
   if (!supabase) return []
   const { data, error } = await supabase
     .from("leaddesk_notifications")
-    .select("id, event_id, title")
+    .select("id, kind, event_id, task_id, title")
     .is("delivered_at", null)
     .order("created_at")
     .limit(20)

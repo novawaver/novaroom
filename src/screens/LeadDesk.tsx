@@ -153,6 +153,9 @@ export function LeadDesk({
   reload,
   newEventIds,
   onEventOpened,
+  newTaskIds,
+  onTaskOpened,
+  isAdmin,
 }: {
   tab: LeadDeskTab
   data: DeskData | null
@@ -161,6 +164,11 @@ export function LeadDesk({
   // Unread events, shown as "New" on the Schedule tab until they are opened.
   newEventIds: Set<string>
   onEventOpened: (eventId: string) => void
+  // Tasks assigned to this person that they have not opened yet, shown as "New".
+  newTaskIds: Set<string>
+  onTaskOpened: (taskId: string) => void
+  // Admins skip the limits admins set for leaders: adding tasks, locked events, assignee notes.
+  isAdmin: boolean
 }) {
   const { session } = useAuth()
   const [editing, setEditing] = useState<{ kind: LeadDeskTab; item: DeskTask | DeskEvent | DeskNote | null } | null>(
@@ -186,7 +194,7 @@ export function LeadDesk({
 
   const label = LEADDESK_TABS.find((item) => item.id === tab)?.label ?? "LeadDesk"
   const newLabel = tab === "tasks" ? "New task" : tab === "schedule" ? "New event" : "New note"
-  const newBlocked = tab === "tasks" && !data?.canAddTasks
+  const newBlocked = tab === "tasks" && !isAdmin && !data?.canAddTasks
 
   return (
     <section className={tab === "schedule" ? "settings desk-fixed" : "settings"}>
@@ -218,7 +226,11 @@ export function LeadDesk({
           users={data.users}
           selfId={session.userId}
           selectedId={selectedTask?.id ?? null}
-          onSelect={(task) => setSelectedTaskId(task.id)}
+          newTaskIds={newTaskIds}
+          onSelect={(task) => {
+            setSelectedTaskId(task.id)
+            if (newTaskIds.has(task.id)) onTaskOpened(task.id)
+          }}
           onMove={(task, status) => void act(() => setTaskStatus(task.id, status))}
         />
       ) : tab === "schedule" ? (
@@ -226,6 +238,7 @@ export function LeadDesk({
           events={data.events}
           users={data.users}
           newEventIds={newEventIds}
+          isAdmin={isAdmin}
           onSelect={(event) => onEventOpened(event.id)}
           onEdit={(event) => setEditing({ kind: "schedule", item: event })}
         />
@@ -237,6 +250,7 @@ export function LeadDesk({
           task={selectedTask}
           users={data.users}
           selfId={session.userId}
+          isAdmin={isAdmin}
           covered={editing !== null}
           onSaved={reload}
           onEdit={() => setEditing({ kind: "tasks", item: selectedTask })}
@@ -281,6 +295,7 @@ function TaskBoard({
   users,
   selfId,
   selectedId,
+  newTaskIds,
   onSelect,
   onMove,
 }: {
@@ -288,6 +303,7 @@ function TaskBoard({
   users: RegisteredUser[]
   selfId: string
   selectedId: string | null
+  newTaskIds: Set<string>
   onSelect: (task: DeskTask) => void
   onMove: (task: DeskTask, status: TaskStatus) => void
 }) {
@@ -320,7 +336,7 @@ function TaskBoard({
                   // The whole card opens the task; the title button keeps it reachable by keyboard.
                   <article
                     key={task.id}
-                    className={`task-card priority-${task.priority}${task.id === selectedId ? " selected" : ""}`}
+                    className={`task-card priority-${task.priority}${task.id === selectedId ? " selected" : ""}${newTaskIds.has(task.id) ? " new" : ""}`}
                     onClick={() => onSelect(task)}
                   >
                     <button
@@ -328,7 +344,10 @@ function TaskBoard({
                       className="task-open"
                       aria-current={task.id === selectedId ? "true" : undefined}
                     >
-                      <strong>{task.title}</strong>
+                      <strong>
+                        {task.title}
+                        {newTaskIds.has(task.id) && <span className="new-tag">New</span>}
+                      </strong>
                       {task.notes && <span className="task-notes">{task.notes}</span>}
                     </button>
                     <div className="task-meta">
@@ -387,6 +406,7 @@ function TaskDrawer({
   task,
   users,
   selfId,
+  isAdmin,
   covered,
   onEdit,
   onClose,
@@ -395,6 +415,7 @@ function TaskDrawer({
   task: DeskTask
   users: RegisteredUser[]
   selfId: string
+  isAdmin: boolean
   // True while the editor is open on top, so Esc closes only the editor.
   covered: boolean
   onEdit: () => void
@@ -451,20 +472,20 @@ function TaskDrawer({
           <h3>Description</h3>
           {task.notes ? <p className="event-notes">{task.notes}</p> : <p className="hint">No description.</p>}
         </div>
-        <AssigneeNotes key={task.id} task={task} isAssignee={task.assigneeId === selfId} onSaved={onSaved} />
+        <AssigneeNotes key={task.id} task={task} canWrite={task.assigneeId === selfId || isAdmin} onSaved={onSaved} />
       </aside>
     </div>
   )
 }
 
-// The assignee writes about the result here; everyone else only reads it.
+// The assignee (or an admin) writes about the result here; everyone else only reads it.
 function AssigneeNotes({
   task,
-  isAssignee,
+  canWrite,
   onSaved,
 }: {
   task: DeskTask
-  isAssignee: boolean
+  canWrite: boolean
   onSaved: () => Promise<void>
 }) {
   // null until the assignee starts typing, so saved changes from elsewhere still show.
@@ -491,7 +512,7 @@ function AssigneeNotes({
   return (
     <div className="task-section">
       <h3>Notes from assignee</h3>
-      {isAssignee ? (
+      {canWrite ? (
         <>
           <textarea
             value={value}
@@ -668,12 +689,14 @@ function Schedule({
   events,
   users,
   newEventIds,
+  isAdmin,
   onSelect,
   onEdit,
 }: {
   events: DeskEvent[]
   users: RegisteredUser[]
   newEventIds: Set<string>
+  isAdmin: boolean
   onSelect: (event: DeskEvent) => void
   onEdit: (event: DeskEvent) => void
 }) {
@@ -794,7 +817,13 @@ function Schedule({
           )}
         </div>
         {selected ? (
-          <EventDetail event={selected} users={users} onEdit={() => onEdit(selected)} onClose={() => setSelectedId(null)} />
+          <EventDetail
+            event={selected}
+            users={users}
+            canEdit={!selected.locked || isAdmin}
+            onEdit={() => onEdit(selected)}
+            onClose={() => setSelectedId(null)}
+          />
         ) : (
           <aside className="event-detail empty">
             <p className="hint">Select an event to see its details.</p>
@@ -819,11 +848,14 @@ function PersonAvatar({ users, id }: { users: RegisteredUser[]; id: string | nul
 function EventDetail({
   event,
   users,
+  canEdit,
   onEdit,
   onClose,
 }: {
   event: DeskEvent
   users: RegisteredUser[]
+  // Locked events can only be changed by admins.
+  canEdit: boolean
   onEdit: () => void
   onClose: () => void
 }) {
@@ -844,7 +876,7 @@ function EventDetail({
             <LockIcon />
           </span>
         )}
-        {!event.locked && (
+        {canEdit && (
           <button type="button" className="event-detail-icon" aria-label="Edit event" title="Edit" onClick={onEdit}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M11 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V13" />
