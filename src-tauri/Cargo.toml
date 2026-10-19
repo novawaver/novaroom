@@ -28,6 +28,7 @@ tauri-plugin-process = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+tauri-plugin-single-instance = "2"
 
 # Reads how long the computer has had no keyboard or mouse input, for the Timer.
 [target.'cfg(windows)'.dependencies]

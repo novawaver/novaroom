@@ -1162,6 +1162,14 @@ select {
   border-color: #3d3832;
 }
 
+/* Selects with a transparent background (Vault cells, profile fields) would otherwise
+   open a white dropdown list while the options keep the light text color. */
+:root[data-theme="dark"] select option,
+:root[data-theme="dark"] select optgroup {
+  background: #2a2622;
+  color: var(--cream);
+}
+
 :root[data-theme="dark"] .notice {
   background: #2a2418;
   color: #f0ddb8;
