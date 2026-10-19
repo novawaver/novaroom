@@ -93,9 +93,9 @@ export function useLeadDesk(open: boolean) {
   return { data, error, reload }
 }
 
-export function leadDeskHints(data: DeskData | null, selfId: string): Record<LeadDeskTab, string> {
+export function leadDeskHints(data: DeskData | null, selfId: string, isAdmin: boolean): Record<LeadDeskTab, string> {
   if (!data) return { tasks: "Loading…", schedule: "Loading…", notes: "Loading…" }
-  const open = visibleTasks(data.tasks, selfId).filter((task) => task.status !== "done").length
+  const open = visibleTasks(data.tasks, selfId, isAdmin).filter((task) => task.status !== "done").length
   const daily = data.events.filter((event) => event.repeat === "daily").length
   const upcoming = data.events.filter(
     (event) => event.repeat !== "daily" && event.endsAt && new Date(event.endsAt).getTime() >= Date.now(),
@@ -225,6 +225,7 @@ export function LeadDesk({
           tasks={data.tasks}
           users={data.users}
           selfId={session.userId}
+          isAdmin={isAdmin}
           selectedId={selectedTask?.id ?? null}
           newTaskIds={newTaskIds}
           onSelect={(task) => {
@@ -285,8 +286,9 @@ export function LeadDesk({
 
 // Tasks ----------------------------------------------------------------------
 
-// The board shows tasks assigned to this person plus unassigned ones, not other people's.
-export function visibleTasks(tasks: DeskTask[], selfId: string) {
+// Leaders see tasks assigned to them plus unassigned ones, not other people's. Admins see every task.
+export function visibleTasks(tasks: DeskTask[], selfId: string, isAdmin: boolean) {
+  if (isAdmin) return tasks
   return tasks.filter((task) => task.assigneeId === null || task.assigneeId === selfId)
 }
 
@@ -294,6 +296,7 @@ function TaskBoard({
   tasks,
   users,
   selfId,
+  isAdmin,
   selectedId,
   newTaskIds,
   onSelect,
@@ -302,12 +305,13 @@ function TaskBoard({
   tasks: DeskTask[]
   users: RegisteredUser[]
   selfId: string
+  isAdmin: boolean
   selectedId: string | null
   newTaskIds: Set<string>
   onSelect: (task: DeskTask) => void
   onMove: (task: DeskTask, status: TaskStatus) => void
 }) {
-  const shown = visibleTasks(tasks, selfId)
+  const shown = visibleTasks(tasks, selfId, isAdmin)
   const today = todayKey()
   const rank: Record<TaskPriority, number> = { high: 0, normal: 1, low: 2 }
 
@@ -757,7 +761,6 @@ function Schedule({
           <strong>
             {event.title}
             {newEventIds.has(event.id) && <span className="new-tag">New</span>}
-            {event.visibility === "participants" && <span className="task-tag schedule-repeat">Participants only</span>}
           </strong>
           {event.location && <span>{event.location}</span>}
           {original && <span className="schedule-zone">Set for {original}</span>}
@@ -821,6 +824,7 @@ function Schedule({
             event={selected}
             users={users}
             canEdit={!selected.locked || isAdmin}
+            isAdmin={isAdmin}
             onEdit={() => onEdit(selected)}
             onClose={() => setSelectedId(null)}
           />
@@ -849,6 +853,7 @@ function EventDetail({
   event,
   users,
   canEdit,
+  isAdmin,
   onEdit,
   onClose,
 }: {
@@ -856,6 +861,8 @@ function EventDetail({
   users: RegisteredUser[]
   // Locked events can only be changed by admins.
   canEdit: boolean
+  // Only admins see who an event is visible to.
+  isAdmin: boolean
   onEdit: () => void
   onClose: () => void
 }) {
@@ -925,6 +932,12 @@ function EventDetail({
         <dd>
           <PersonAvatar users={users} id={event.createdBy} />
         </dd>
+        {isAdmin && (
+          <>
+            <dt>Who can see it</dt>
+            <dd>{event.visibility === "participants" ? "Only participants and the creator" : "All leaders"}</dd>
+          </>
+        )}
       </dl>
       {event.notes && <p className="event-notes">{event.notes}</p>}
     </aside>

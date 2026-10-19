@@ -35,9 +35,12 @@ import { TIMER_RANGES, Timer, rangeTotals, useTimer, useTimerHistory, type Timer
 import { formatDuration } from "../lib/timer"
 import { isTimeZone, localTimeZone } from "../lib/timezone"
 import { listUsers, readIsAdmin, type RegisteredUser } from "../lib/users"
+import { PRESENCE_LABELS, usePresence } from "../lib/presence"
+import { typingText, useTyping } from "../lib/typing"
 import { PROFILE_TABS, Profile, type ProfileTab } from "./Profile"
 import { SETTINGS_TABS, Settings, type SettingsTab } from "./Settings"
 import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
+import { groupTables } from "../lib/vault"
 import { Vault, VaultLeaveDialog, useVault } from "./Vault"
 
 function NewChatIcon() {
@@ -466,16 +469,25 @@ function SideMenu<T extends string>({
   active,
   onSelect,
   footer,
+  plain,
 }: {
   label: string
-  items: Array<{ id: T; label: string; hint: string; icon: ComponentType; badge?: number }>
+  // Items with a group are listed under a heading for it; items should come sorted by group.
+  items: Array<{ id: T; label: string; hint: string; icon: ComponentType; badge?: number; group?: string }>
   active: T
   onSelect: (id: T) => void
   footer?: ReactNode
+  // A compact list without lines between items or the arrow on the right, e.g. Vault tables.
+  plain?: boolean
 }) {
   return (
-    <nav className="side-menu" aria-label={label}>
-      {items.map(({ id, label: itemLabel, hint, icon: Icon, badge }) => (
+    <nav className={plain ? "side-menu side-menu-plain" : "side-menu"} aria-label={label}>
+      {items.map(({ id, label: itemLabel, hint, icon: Icon, badge, group }, index) => [
+        group && group !== items[index - 1]?.group && (
+          <h3 key={`group-${group}`} className="side-menu-group">
+            {group}
+          </h3>
+        ),
         <button
           key={id}
           type="button"
@@ -498,8 +510,8 @@ function SideMenu<T extends string>({
           <span className="side-menu-chevron">
             <ChevronIcon />
           </span>
-        </button>
-      ))}
+        </button>,
+      ])}
       {footer && <div className="side-menu-footer">{footer}</div>}
     </nav>
   )
@@ -609,6 +621,8 @@ export function AppShell() {
   const leaveTo = (go: () => void) => (view === "vault" ? vault.guard(go) : go())
   // Records awake and idle time in the background, whichever page is open.
   const timer = useTimer(session?.userId ?? null, isLeader)
+  // Online, idle or offline for everyone, shown as a dot on profile pictures.
+  const presenceOf = usePresence(session?.userId ?? null)
   const [timerRange, setTimerRange] = useState<TimerRange>("today")
   // The zone the Time Tracker counts days in; remembered on this computer.
   const [timerZone, setTimerZone] = useState(() => {
@@ -933,6 +947,9 @@ export function AppShell() {
     if (node) node.scrollTop = node.scrollHeight
   }, [messages, selectedId])
 
+  // Who else is typing in the open chat. People this person blocked are never shown.
+  const typing = useTyping(selectedId, session?.userId ?? null, profile?.displayName ?? "")
+  const typingNow = typingText(typing.typists.filter((typist) => !blockedIds.includes(typist.userId)))
   if (!session || !profile) return null
 
   const selected = chats.find((chat) => chat.id === selectedId) ?? null
@@ -1079,6 +1096,7 @@ export function AppShell() {
   }
 
   async function onSend(event: FormEvent) {
+    typing.onType(false)
     event.preventDefault()
     if (!selectedId || lock !== "open") return
     const text = body
@@ -1247,6 +1265,10 @@ export function AppShell() {
                 <span>{initials(profile.displayName || session.email)}</span>
               )}
             </span>
+            <span
+              className={`presence-dot nav-presence ${presenceOf(session.userId)}`}
+              title={PRESENCE_LABELS[presenceOf(session.userId)]}
+            />
           </button>
         }
       />
@@ -1271,7 +1293,7 @@ export function AppShell() {
             items={LEADDESK_TABS.map(({ id, label }) => ({
               id,
               label,
-              hint: leadDeskHints(desk.data, session.userId)[id],
+              hint: leadDeskHints(desk.data, session.userId, isAdmin)[id],
               icon: LEADDESK_ICONS[id],
               badge:
                 id === "schedule" ? unreadDeskEvents.length : id === "tasks" ? unreadDeskTasks.length : undefined,
@@ -1297,12 +1319,16 @@ export function AppShell() {
         ) : view === "vault" ? (
           <SideMenu
             label="Vault tables"
-            items={(vault.data?.tables ?? []).map((table) => ({
-              id: table.id,
-              label: table.name || "Untitled",
-              hint: table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`,
-              icon: VaultTableIcon,
-            }))}
+            plain
+            items={groupTables(vault.data?.tables ?? []).flatMap(({ category, tables }) =>
+              tables.map((table) => ({
+                id: table.id,
+                label: table.name || "Untitled",
+                hint: table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`,
+                icon: VaultTableIcon,
+                group: category,
+              })),
+            )}
             active={vault.table?.id ?? ""}
             onSelect={vault.selectTable}
             footer={
@@ -1577,6 +1603,7 @@ export function AppShell() {
           error={peopleError}
           filter={peopleFilter}
           canMessageLeaders={isLeader}
+          presenceOf={presenceOf}
           onMessage={async (userId) => {
             const id = await startLeaderChat(session, userId)
             setChats(await listChats(session))
@@ -1735,6 +1762,19 @@ export function AppShell() {
                   })
                 )}
               </div>
+              {/* Always there, so the composer does not jump when someone starts or stops typing. */}
+              <p className="typing-status" aria-live="polite">
+                {typingNow && (
+                  <>
+                    <span className="typing-dots" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </span>
+                    {typingNow}…
+                  </>
+                )}
+              </p>
               <form className="composer" onSubmit={onSend}>
                 {closed && (
                   <p className="notice" role="status">
@@ -1797,6 +1837,7 @@ export function AppShell() {
                     disabled={closed}
                     onChange={(event) => {
                       setBody(event.target.value)
+                      typing.onType(event.target.value.trim() !== "")
                       if (selectedId) markChatRead(selectedId)
                     }}
                     onKeyDown={(event) => {

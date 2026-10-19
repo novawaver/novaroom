@@ -13,7 +13,11 @@ use tauri_plugin_dialog::DialogExt;
 
 /// Marks a SQLite file as a Novaroom Vault, so opening some other database is refused.
 const VAULT_APP: &str = "novaroom-vault";
-const VAULT_VERSION: i64 = 1;
+/// The newest Vault this app can open. New files start at 1, and a save only raises the version
+/// when the Vault needs it, so older Novaroom versions keep opening files that do not.
+const VAULT_VERSION: i64 = 2;
+/// Version 2 added List and Sub-table columns, whose cells hold arrays an older app cannot show.
+const NESTED_KINDS: [&str; 2] = ["list", "subtable"];
 const VAULT_EXTENSION: &str = "vault";
 
 const SCHEMA: &str = "
@@ -21,7 +25,8 @@ CREATE TABLE IF NOT EXISTS vault_info (key TEXT PRIMARY KEY, value TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS vault_tables (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  position INTEGER NOT NULL
+  position INTEGER NOT NULL,
+  category TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS vault_columns (
   id TEXT PRIMARY KEY,
@@ -59,6 +64,9 @@ pub struct VaultRow {
 pub struct VaultTable {
     id: String,
     name: String,
+    /// Groups tables in the sidebar; empty when the table has no category.
+    #[serde(default)]
+    category: String,
     columns: Vec<VaultColumn>,
     rows: Vec<VaultRow>,
 }
@@ -117,6 +125,15 @@ fn upgrade(connection: &Connection) -> Result<(), String> {
             .execute_batch("ALTER TABLE vault_columns ADD COLUMN options TEXT NOT NULL DEFAULT '{}';")
             .map_err(message)?;
     }
+    let has_category = connection
+        .prepare("SELECT 1 FROM pragma_table_info('vault_tables') WHERE name = 'category'")
+        .and_then(|mut statement| statement.exists([]))
+        .map_err(message)?;
+    if !has_category {
+        connection
+            .execute_batch("ALTER TABLE vault_tables ADD COLUMN category TEXT NOT NULL DEFAULT '';")
+            .map_err(message)?;
+    }
     Ok(())
 }
 
@@ -130,7 +147,7 @@ fn create(path: &Path) -> Result<(), String> {
     connection
         .execute(
             "INSERT INTO vault_info (key, value) VALUES ('app', ?1), ('version', ?2)",
-            params![VAULT_APP, VAULT_VERSION.to_string()],
+            params![VAULT_APP, "1"],
         )
         .map_err(message)?;
     Ok(())
@@ -138,12 +155,13 @@ fn create(path: &Path) -> Result<(), String> {
 
 fn read(connection: &Connection) -> Result<VaultData, String> {
     let mut tables: Vec<VaultTable> = connection
-        .prepare("SELECT id, name FROM vault_tables ORDER BY position")
+        .prepare("SELECT id, name, category FROM vault_tables ORDER BY position")
         .map_err(message)?
         .query_map([], |row| {
             Ok(VaultTable {
                 id: row.get(0)?,
                 name: row.get(1)?,
+                category: row.get(2)?,
                 columns: Vec::new(),
                 rows: Vec::new(),
             })
@@ -194,7 +212,7 @@ fn write(connection: &mut Connection, data: &VaultData) -> Result<(), String> {
         .map_err(message)?;
     {
         let mut insert_table = tx
-            .prepare("INSERT INTO vault_tables (id, name, position) VALUES (?1, ?2, ?3)")
+            .prepare("INSERT INTO vault_tables (id, name, position, category) VALUES (?1, ?2, ?3, ?4)")
             .map_err(message)?;
         let mut insert_column = tx
             .prepare(
@@ -206,7 +224,7 @@ fn write(connection: &mut Connection, data: &VaultData) -> Result<(), String> {
             .map_err(message)?;
         for (table_position, table) in data.tables.iter().enumerate() {
             insert_table
-                .execute(params![table.id, table.name, table_position as i64])
+                .execute(params![table.id, table.name, table_position as i64, table.category.trim()])
                 .map_err(message)?;
             for (position, column) in table.columns.iter().enumerate() {
                 let options = serde_json::to_string(&column.options).map_err(message)?;
@@ -222,6 +240,15 @@ fn write(connection: &mut Connection, data: &VaultData) -> Result<(), String> {
             }
         }
     }
+    let nested = data
+        .tables
+        .iter()
+        .any(|table| table.columns.iter().any(|column| NESTED_KINDS.contains(&column.kind.as_str())));
+    tx.execute(
+        "INSERT INTO vault_info (key, value) VALUES ('version', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![if nested { "2" } else { "1" }],
+    )
+    .map_err(message)?;
     tx.commit().map_err(message)
 }
 

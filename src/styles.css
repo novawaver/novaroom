@@ -368,7 +368,13 @@ textarea:focus {
   height: 100%;
   display: grid;
   grid-template-columns: 76px 320px 1fr;
+  /* One row as tall as the window, so the nav bar, sidebar and page each scroll on their own. */
+  grid-template-rows: minmax(0, 1fr);
   background: var(--paper);
+}
+
+.shell > * {
+  min-height: 0;
 }
 
 .navbar {
@@ -380,7 +386,9 @@ textarea:focus {
   align-items: stretch;
   gap: 4px;
   padding: 14px 6px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .nav-item {
@@ -462,6 +470,8 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 22px 16px 16px;
 }
 
@@ -501,6 +511,15 @@ textarea:focus {
   margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid var(--side-line);
+}
+
+.side-menu-plain .side-menu-item {
+  border-bottom: 0;
+  border-radius: 12px;
+}
+
+.side-menu-plain .side-menu-chevron {
+  display: none;
 }
 
 .side-menu-item.sign-out,
@@ -1943,6 +1962,42 @@ code {
 
 .person-badge-leadership {
   background: #f5c242;
+}
+
+/* Online, idle or offline dot over the bottom-right corner of a profile picture. */
+.presence-dot {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--timer-offline);
+}
+
+.presence-dot.online {
+  background: var(--timer-awake);
+}
+
+.presence-dot.idle {
+  background: var(--timer-idle);
+}
+
+.person-presence {
+  right: -6px;
+  bottom: -6px;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--ink);
+}
+
+.nav-profile {
+  position: relative;
+}
+
+.nav-presence {
+  /* The avatar is 36px and centred in the button, so this sits on its bottom-right edge. */
+  left: calc(50% + 8px);
+  bottom: 7px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--side);
 }
 
 .person-photo img {
@@ -3473,6 +3528,55 @@ code {
   text-align: center;
 }
 
+/* + buttons at the end of the header (add column) and under the row handles (add row). */
+.vault-add {
+  width: 26px;
+  height: 26px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px dashed var(--muted);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.vault-add:hover {
+  border-style: solid;
+  border-color: var(--brand);
+  background: var(--chip-soft);
+  color: var(--chip-soft-ink);
+}
+
+.vault-add:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.vault-add svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.vault-grid tfoot td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+}
+
+.vault-grid tfoot .vault-add-row-rest {
+  border-right: 0;
+}
+
+.vault-grid tfoot .vault-add {
+  margin: 6px 0;
+}
+
 .vault-grip {
   width: 24px;
   height: 28px;
@@ -3552,42 +3656,13 @@ code {
   flex: none;
 }
 
-.vault-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  margin-right: 6px;
-  padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-}
-
-.vault-mode button {
-  padding: 5px 14px;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 14px;
-  font-weight: 600;
-  transition:
-    background-color 0.15s ease,
-    color 0.15s ease;
-}
-
-.vault-mode button:hover {
+/* Shown in place of Edit while editing, shaded so it is clear the table is being edited. */
+.bar-icon.vault-cancel {
   background: var(--side-soft);
-  color: var(--ink);
 }
 
-.vault-mode button[aria-pressed="true"] {
-  background: var(--brand);
-  color: white;
-}
-
-.vault-mode button:focus-visible {
-  outline: 2px solid var(--brand-bright);
-  outline-offset: 2px;
+.bar-icon.vault-cancel:hover {
+  background: var(--line);
 }
 
 .vault-col-name {
@@ -3871,4 +3946,344 @@ code {
 .vault-grid th.vault-col-drop-after,
 .vault-grid td.vault-col-drop-after {
   box-shadow: inset -2px 0 0 var(--brand-bright);
+}
+
+/* Vault List cells: one item per line. */
+.vault-cell-view.vault-list {
+  display: grid;
+  gap: 2px;
+}
+
+.vault-grid textarea.vault-list-input {
+  display: block;
+  width: 100%;
+  min-width: 140px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.vault-grid textarea.vault-list-input:hover,
+.vault-grid textarea.vault-list-input:focus {
+  border-color: var(--line);
+}
+
+/* Vault Sub-table cells open their items in a panel over the page. */
+.vault-modal {
+  display: grid;
+  gap: 14px;
+  width: min(520px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 20px 24px 24px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.vault-modal.wide {
+  width: min(960px, 100%);
+}
+
+.vault-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.vault-modal-head h2 {
+  font-size: 20px;
+}
+
+.vault-modal .form-actions {
+  margin-top: 0;
+}
+
+.vault-grid-wrap.vault-sub-wrap {
+  max-height: 60vh;
+}
+
+.vault-sub-columns {
+  display: grid;
+  gap: 8px;
+}
+
+.vault-sub-column {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.vault-sub-column input,
+.vault-sub-column select {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.vault-sub-columns-button {
+  margin: 2px 0 0 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vault-sub-columns-button:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+/* Vault filters: rules under the toolbar, each a column, a condition, and a value. */
+.vault-filters {
+  display: grid;
+  gap: 8px;
+  margin: -4px 24px 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.vault-filters .hint {
+  margin: 0;
+}
+
+.vault-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.vault-filter-join {
+  width: 44px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.vault-filter select,
+.vault-filter input {
+  width: auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.vault-filter input {
+  flex: 1 1 160px;
+  max-width: 280px;
+}
+
+.vault-filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.button.vault-small.vault-filter-toggle svg {
+  stroke-linejoin: round;
+}
+
+.button.vault-filter-toggle[aria-pressed="true"] {
+  border-color: var(--brand);
+  color: var(--brand-ink);
+}
+
+.vault-filter-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--brand);
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* Category headings between groups of items in a side menu, e.g. Vault tables. */
+.side-menu-group {
+  margin: 14px 8px 4px;
+  color: var(--side-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.side-menu-group:first-child {
+  margin-top: 4px;
+}
+
+.vault-toolbar .vault-table-category {
+  flex: 0 1 180px;
+  width: auto;
+  min-width: 0;
+  padding: 7px 12px;
+  font-size: 14px;
+}
+
+/* Vault duplicates: pick the columns to compare, then each group of matching rows is shaded. */
+.vault-duplicates-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.vault-duplicates-head strong {
+  margin-right: 4px;
+  font-size: 14px;
+}
+
+.vault-duplicates .hint {
+  margin: 0;
+}
+
+.vault-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.vault-chip:hover {
+  border-color: var(--muted);
+}
+
+.vault-chip[aria-pressed="true"] {
+  border-color: var(--brand);
+  background: var(--chip-soft);
+  color: var(--chip-soft-ink);
+}
+
+.vault-grid tr.vault-dup-even td {
+  background: color-mix(in srgb, var(--brand-bright) 8%, transparent);
+}
+
+.vault-grid tr.vault-dup-odd td {
+  background: color-mix(in srgb, var(--brand-bright) 16%, transparent);
+}
+
+.vault-grid tr.vault-dup-start td {
+  border-top: 2px solid var(--brand-bright);
+}
+
+/* Cells whose value is also in another row of the same column, marked automatically. */
+.vault-grid td.vault-cell-repeated {
+  position: relative;
+  background: color-mix(in srgb, var(--timer-idle) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--timer-idle);
+}
+
+.vault-repeated-mark {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: color-mix(in srgb, var(--timer-idle) 75%, var(--ink));
+}
+
+.vault-repeated-mark:hover {
+  background: color-mix(in srgb, var(--timer-idle) 30%, transparent);
+}
+
+.vault-repeated-mark:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.vault-repeated-mark svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+/* Keep the copy button and the mark side by side instead of on top of each other. */
+.vault-cell-repeated .vault-copyable .vault-copy {
+  right: 24px;
+}
+
+.vault-grid td.vault-cell-repeated > :first-child {
+  padding-right: 18px;
+}
+
+/* "Alex is typing…" between the messages and the composer. */
+.typing-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin: 0;
+  padding: 2px 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.typing-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: typing-dot 1.2s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots span {
+    animation: none;
+    opacity: 0.6;
+  }
 }

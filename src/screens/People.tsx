@@ -3,6 +3,7 @@ import { useState } from "react"
 import type { RegisteredUser } from "../lib/users"
 import { ROLES } from "../types"
 import { LEADERSHIP } from "../lib/leaddesk"
+import { PRESENCE_LABELS, type PresenceStatus } from "../lib/presence"
 
 const ACCENTS = ["violet", "green", "indigo", "blue", "amber", "red"]
 
@@ -70,10 +71,12 @@ function UserBadges({ user }: { user: RegisteredUser }) {
 function UserCard({
   user,
   isSelf,
+  presence,
   onMessage,
 }: {
   user: RegisteredUser
   isSelf: boolean
+  presence: PresenceStatus
   // Present only when the viewer may start a chat with this person.
   onMessage?: () => void
 }) {
@@ -93,6 +96,12 @@ function UserCard({
             {user.avatarUrl && <span className="person-corner" />}
           </span>
           <UserBadges user={user} />
+          <span
+            className={`presence-dot person-presence ${presence}`}
+            title={PRESENCE_LABELS[presence]}
+            role="img"
+            aria-label={PRESENCE_LABELS[presence]}
+          />
         </span>
       </span>
       <span className="person-rule" />
@@ -123,11 +132,13 @@ export function People({
   error,
   filter,
   canMessageLeaders,
+  presenceOf,
   onMessage,
 }: {
   users: RegisteredUser[] | null
   error: string
   filter: PeopleFilter
+  presenceOf: (userId: string) => PresenceStatus
   // Leadership members can start a direct chat with other Leadership members from here.
   canMessageLeaders: boolean
   onMessage: (userId: string) => Promise<void>
@@ -189,6 +200,7 @@ export function People({
                   key={user.userId}
                   user={user}
                   isSelf={user.userId === session.userId}
+                  presence={presenceOf(user.userId)}
                   onMessage={messageHandler(user)}
                 />
           ))}
@@ -206,6 +218,7 @@ export function People({
                   key={user.userId}
                   user={user}
                   isSelf={user.userId === session.userId}
+                  presence={presenceOf(user.userId)}
                   onMessage={messageHandler(user)}
                 />
               ))}

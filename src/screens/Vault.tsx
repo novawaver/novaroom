@@ -1,21 +1,34 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import {
   VAULT_COLUMN_KINDS,
+  VAULT_SUB_KINDS,
   cellText,
   convertCell,
   createVaultFile,
+  duplicateCells,
   fileName,
+  filterNeedsValue,
+  filterOps,
+  findDuplicates,
   moveBefore,
   newColumn,
+  newFilter,
   newRow,
   newTable,
+  passesFilter,
   pickVaultFile,
+  listItems,
   looksLikeEmail,
+  webAddress,
   readVault,
   rememberVaultFile,
   rememberedVaultFile,
   rowLabel,
   sortRows,
+  subRows,
+  vaultCategories,
+  subTableText,
   vaultAvailable,
   writeVault,
   type VaultCell,
@@ -23,6 +36,10 @@ import {
   type SortDirection,
   type VaultColumnKind,
   type VaultData,
+  type VaultFilter,
+  type FilterOp,
+  type VaultRow,
+  type VaultSubKind,
   type VaultTable,
 } from "../lib/vault"
 import { setExitGuard } from "../lib/unsaved"
@@ -50,6 +67,23 @@ function NewFileIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M13.5 3.5h-7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-9" />
       <path d="M13.5 3.5v6h6M12 12.5v5M9.5 15h5" />
+    </svg>
+  )
+}
+
+function EditIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M11 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V13" />
+      <path d="M17.6 3.9a2 2 0 0 1 2.8 2.8L12.5 14.6 9 15.5l.9-3.5 7.7-8.1z" />
+    </svg>
+  )
+}
+
+function CancelIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
     </svg>
   )
 }
@@ -90,6 +124,43 @@ function LinkIcon() {
   )
 }
 
+function FilterIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 5.5h16l-6.2 7.3v5.4l-3.6 1.8v-7.2z" />
+    </svg>
+  )
+}
+
+/** Two stacked cards with a check: repeated values are being marked. */
+function RepeatedIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="3.5" width="11" height="11" rx="2" />
+      <path d="M18 8.5h.5a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V18" />
+      <path d="M6.5 9l2 2 3.5-4" />
+    </svg>
+  )
+}
+
+function DuplicatesIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="4" width="11" height="11" rx="2" />
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+    </svg>
+  )
+}
+
+function TableIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="5" width="16" height="14" rx="2" />
+      <path d="M4 10h16M10 10v9" />
+    </svg>
+  )
+}
+
 function CheckIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -122,6 +193,18 @@ function readFit() {
     return localStorage.getItem(FIT_KEY) === "true"
   } catch {
     return false
+  }
+}
+
+// Whether a table marks cells repeating a value from another row. Set per table on this computer,
+// and on unless turned off, so toggling it never leaves the Vault file with unsaved changes.
+const repeatedKey = (tableId: string) => `novaroom.vault-mark-repeated.${tableId}`
+
+function readMarkRepeated(tableId: string) {
+  try {
+    return localStorage.getItem(repeatedKey(tableId)) !== "false"
+  } catch {
+    return true
   }
 }
 
@@ -189,6 +272,8 @@ export function useVault(userId: string | null, active: boolean) {
   const [focusRow, setFocusRow] = useState<{ tableId: string; rowId: string } | null>(null)
   // What to do once the person answers the "save or discard?" question.
   const [pending, setPending] = useState<{ run: () => void } | null>(null)
+  // Each table's filter rules, kept while the file is open. They only change what is shown.
+  const [filters, setFilters] = useState<Record<string, VaultFilter[]>>({})
 
   const dirty = useMemo(
     () => data !== null && saved !== null && JSON.stringify(data) !== JSON.stringify(saved),
@@ -207,6 +292,7 @@ export function useVault(userId: string | null, active: boolean) {
         setData(next)
         setTableId(next.tables[0]?.id ?? null)
         setEditing(false)
+        setFilters({})
         if (userId) rememberVaultFile(userId, path)
       } catch (caught) {
         setFile(null)
@@ -290,7 +376,8 @@ export function useVault(userId: string | null, active: boolean) {
 
   function addTable() {
     if (!data) return
-    const created = newTable(`Table ${data.tables.length + 1}`)
+    // A new table joins the category of the table that is open.
+    const created = newTable(`Table ${data.tables.length + 1}`, table?.category.trim() ?? "")
     update((current) => ({ tables: [...current.tables, created] }))
     setTableId(created.id)
     setEditing(true)
@@ -347,6 +434,8 @@ export function useVault(userId: string | null, active: boolean) {
     setEditing,
     focusRow,
     clearFocusRow: () => setFocusRow(null),
+    filtersOf: (id: string) => filters[id] ?? [],
+    setTableFilters: (id: string, next: VaultFilter[]) => setFilters((current) => ({ ...current, [id]: next })),
     openRow,
     guard,
     save,
@@ -403,6 +492,10 @@ function CellEditor({
 }) {
   const label = column.name || "Cell"
   switch (column.kind) {
+    case "list":
+      return <ListEditor label={label} value={value} onChange={onChange} />
+    case "subtable":
+      return <SubTableCell column={column} value={value} editing onChange={onChange} />
     case "email":
       return (
         <input
@@ -414,6 +507,32 @@ function CellEditor({
       )
     case "password":
       return <PasswordEditor label={label} value={value} onChange={onChange} />
+    case "url": {
+      const text = typeof value === "string" ? value : ""
+      const address = webAddress(text)
+      return (
+        <span className="vault-secret">
+          <input
+            type="url"
+            aria-label={label}
+            placeholder="https://"
+            value={text}
+            onChange={(event) => onChange(event.target.value || null)}
+          />
+          {address && (
+            <button
+              type="button"
+              className="vault-cell-action"
+              aria-label={`Open ${text}`}
+              title="Open in your browser"
+              onClick={() => openWebAddress(address)}
+            >
+              <OpenLinkIcon />
+            </button>
+          )}
+        </span>
+      )
+    }
     case "link": {
       const rowId = typeof value === "string" ? value : ""
       const missing = rowId !== "" && link?.label(rowId) === null
@@ -540,6 +659,10 @@ function copyText(column: VaultColumn, value: VaultCell, link?: LinkTarget) {
       return typeof value === "string" ? (link?.label(value) ?? "") : ""
     case "date":
       return typeof value === "string" ? formatDate(value) : ""
+    case "list":
+      return listItems(value).join("\n")
+    case "subtable":
+      return ""
     default:
       return String(value)
   }
@@ -568,11 +691,34 @@ function PasswordView({ value }: { value: string }) {
   )
 }
 
+function openWebAddress(address: string) {
+  void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(address))
+}
+
+function OpenLinkIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M13.5 4.5h6v6M19.5 4.5l-8 8" />
+      <path d="M17.5 13.5v4a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h4" />
+    </svg>
+  )
+}
+
 function openEmail(address: string) {
   void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(`mailto:${address}`))
 }
 
 function CellView({ column, value, link }: { column: VaultColumn; value: VaultCell; link?: LinkTarget }) {
+  if (column.kind === "list") {
+    return (
+      <span className="vault-cell-view vault-list">
+        {listItems(value).map((item, index) => (
+          <span key={index}>{item}</span>
+        ))}
+      </span>
+    )
+  }
+  if (column.kind === "subtable") return <SubTableCell column={column} value={value} editing={false} />
   if (column.kind === "link") {
     if (typeof value !== "string" || !link) return <span className="vault-cell-view" />
     const name = link.label(value)
@@ -589,6 +735,17 @@ function CellView({ column, value, link }: { column: VaultColumn; value: VaultCe
   }
   if (column.kind === "password") {
     return typeof value === "string" && value ? <PasswordView value={value} /> : <span className="vault-cell-view" />
+  }
+  if (column.kind === "url" && typeof value === "string" && webAddress(value)) {
+    const address = webAddress(value)!
+    return (
+      <span className="vault-cell-view">
+        <button type="button" className="vault-link" title={`Open ${address} in your browser`} onClick={() => openWebAddress(address)}>
+          <OpenLinkIcon />
+          {value.trim().replace(/^https?:\/\//i, "").replace(/\/$/, "")}
+        </button>
+      </span>
+    )
   }
   if (column.kind === "email" && typeof value === "string" && looksLikeEmail(value)) {
     return (
@@ -634,11 +791,477 @@ function CopyableCell({ column, value, link }: { column: VaultColumn; value: Vau
   )
 }
 
+/** A List cell in Edit: one item per line. Blank lines are left out of what is saved. */
+function ListEditor({ label, value, onChange }: { label: string; value: VaultCell; onChange: (value: VaultCell) => void }) {
+  // What is typed, kept while editing so a new, still-empty line does not vanish.
+  const [draft, setDraft] = useState<string | null>(null)
+  const items = listItems(value)
+  return (
+    <textarea
+      className="vault-list-input"
+      aria-label={`${label}, one item per line`}
+      placeholder="One item per line"
+      rows={Math.max(1, Math.min(items.length + 1, 6))}
+      value={draft ?? items.join("\n")}
+      onChange={(event) => {
+        setDraft(event.target.value)
+        const lines = event.target.value
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+        onChange(lines.length > 0 ? lines : null)
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  )
+}
+
+function itemCount(count: number) {
+  return count === 1 ? "1 item" : `${count} items`
+}
+
+/** A Sub-table cell: how many items it holds, opening a panel with the items themselves. */
+function SubTableCell({
+  column,
+  value,
+  editing,
+  onChange,
+}: {
+  column: VaultColumn
+  value: VaultCell
+  editing: boolean
+  onChange?: (value: VaultCell) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rows = subRows(value)
+  if (!editing && rows.length === 0) return <span className="vault-cell-view" />
+  return (
+    <span className="vault-cell-view">
+      <button type="button" className="vault-link" title={`Open ${column.name || "sub-table"}`} onClick={() => setOpen(true)}>
+        <TableIcon />
+        {rows.length === 0 ? "Add items" : itemCount(rows.length)}
+      </button>
+      {open && (
+        <SubTableDialog
+          column={column}
+          rows={rows}
+          onChange={editing && onChange ? (next) => onChange(next.length > 0 ? next : null) : undefined}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </span>
+  )
+}
+
+/** A Vault panel over the page. Closes on Escape or a click outside, like the app's other dialogs. */
+function VaultModal({
+  title,
+  wide,
+  onClose,
+  children,
+}: {
+  title: string
+  wide?: boolean
+  onClose: () => void
+  children: ReactNode
+}) {
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose()
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  return createPortal(
+    <div className="desk-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className={wide ? "vault-modal wide" : "vault-modal"} role="dialog" aria-label={title}>
+        <div className="vault-modal-head">
+          <h2>{title}</h2>
+          <button type="button" className="vault-remove" aria-label="Close" title="Close" onClick={onClose}>
+            <RemoveIcon />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/** The items inside one Sub-table cell. Read-only unless onChange is given (Edit mode). */
+function SubTableDialog({
+  column,
+  rows,
+  onChange,
+  onClose,
+}: {
+  column: VaultColumn
+  rows: VaultRow[]
+  onChange?: (rows: VaultRow[]) => void
+  onClose: () => void
+}) {
+  const columns = column.columns ?? []
+  const editing = Boolean(onChange)
+  const setCell = (rowId: string, columnId: string, value: VaultCell) =>
+    onChange?.(rows.map((row) => (row.id === rowId ? { ...row, cells: { ...row.cells, [columnId]: value } } : row)))
+
+  return (
+    <VaultModal title={column.name || "Sub-table"} wide onClose={onClose}>
+      {columns.length === 0 ? (
+        <p className="hint">
+          {editing
+            ? "This sub-table has no columns yet. Add some with Columns in its header."
+            : "This sub-table has no columns yet."}
+        </p>
+      ) : (
+        <div className="vault-grid-wrap vault-sub-wrap">
+          <table className={editing ? "vault-grid vault-fit" : "vault-grid vault-viewing vault-fit"}>
+            <thead>
+              <tr>
+                {columns.map((sub) => (
+                  <th key={sub.id} scope="col">
+                    <span className="vault-col-name">{sub.name}</span>
+                  </th>
+                ))}
+                {editing && <th className="vault-row-actions" aria-label="Item actions" />}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td className="vault-empty" colSpan={columns.length + (editing ? 1 : 0)}>
+                    No items yet.
+                  </td>
+                </tr>
+              ) : (
+                rows.map((row) => (
+                  <tr key={row.id}>
+                    {columns.map((sub) => (
+                      <td key={sub.id}>
+                        {editing ? (
+                          <CellEditor
+                            column={sub}
+                            value={row.cells[sub.id] ?? null}
+                            onChange={(value) => setCell(row.id, sub.id, value)}
+                          />
+                        ) : (
+                          <CopyableCell column={sub} value={row.cells[sub.id] ?? null} />
+                        )}
+                      </td>
+                    ))}
+                    {editing && (
+                      <td className="vault-row-actions">
+                        <button
+                          type="button"
+                          className="vault-remove"
+                          aria-label="Delete item"
+                          title="Delete item"
+                          onClick={() => onChange?.(rows.filter((item) => item.id !== row.id))}
+                        >
+                          <RemoveIcon />
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="form-actions">
+        {editing && columns.length > 0 && (
+          <button type="button" className="button secondary vault-small" onClick={() => onChange?.([...rows, newRow()])}>
+            <PlusIcon /> Item
+          </button>
+        )}
+        <button type="button" className="button vault-small" onClick={onClose}>
+          Done
+        </button>
+      </div>
+    </VaultModal>
+  )
+}
+
+type SubColumnsChange = (columns: VaultColumn[], convert?: { columnId: string; kind: VaultSubKind }) => void
+
+/** Names and types of a Sub-table column's own columns, shared by every cell in it. */
+function SubColumnsDialog({
+  column,
+  onChange,
+  onClose,
+}: {
+  column: VaultColumn
+  onChange: SubColumnsChange
+  onClose: () => void
+}) {
+  const columns = column.columns ?? []
+
+  return (
+    <VaultModal title={`Columns in ${column.name || "sub-table"}`} onClose={onClose}>
+      {columns.length === 0 && <p className="hint">No columns yet.</p>}
+      <div className="vault-sub-columns">
+        {columns.map((sub, index) => (
+          <div key={sub.id} className="vault-sub-column">
+            <input
+              aria-label={`Name of column ${index + 1}`}
+              value={sub.name}
+              onChange={(event) =>
+                onChange(columns.map((item) => (item.id === sub.id ? { ...item, name: event.target.value } : item)))
+              }
+            />
+            <select
+              aria-label={`Type of ${sub.name}`}
+              value={sub.kind}
+              onChange={(event) => {
+                const kind = event.target.value as VaultSubKind
+                onChange(
+                  columns.map((item) => (item.id === sub.id ? { ...item, kind } : item)),
+                  { columnId: sub.id, kind },
+                )
+              }}
+            >
+              {VAULT_SUB_KINDS.map(({ id, label }) => (
+                <option key={id} value={id}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="vault-remove"
+              aria-label={`Delete column ${sub.name}`}
+              title="Delete column"
+              onClick={() => onChange(columns.filter((item) => item.id !== sub.id))}
+            >
+              <RemoveIcon />
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="form-actions">
+        <button
+          type="button"
+          className="button secondary vault-small"
+          onClick={() => onChange([...columns, newColumn(`Column ${columns.length + 1}`)])}
+        >
+          <PlusIcon /> Column
+        </button>
+        <button type="button" className="button vault-small" onClick={onClose}>
+          Done
+        </button>
+      </div>
+    </VaultModal>
+  )
+}
+
+function SubColumnsButton({ column, onChange }: { column: VaultColumn; onChange: SubColumnsChange }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button
+        type="button"
+        className="vault-sub-columns-button"
+        title="Columns inside this sub-table"
+        onClick={() => setOpen(true)}
+      >
+        Columns ({column.columns?.length ?? 0})
+      </button>
+      {open && <SubColumnsDialog column={column} onChange={onChange} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
+/** The filter rules of one table: column, condition, and value, one rule per line. */
+function FilterBar({
+  table,
+  filters,
+  onChange,
+}: {
+  table: VaultTable
+  filters: VaultFilter[]
+  onChange: (filters: VaultFilter[]) => void
+}) {
+  const set = (id: string, patch: Partial<VaultFilter>) =>
+    onChange(filters.map((filter) => (filter.id === id ? { ...filter, ...patch } : filter)))
+
+  return (
+    <div className="vault-filters" role="group" aria-label="Filters">
+      {filters.length === 0 && <p className="hint">No filters yet. Add one to show only the rows you need.</p>}
+      {filters.map((filter, index) => {
+        const column = table.columns.find((item) => item.id === filter.columnId)
+        const ops = column ? filterOps(column.kind) : []
+        const op = ops.some((item) => item.id === filter.op) ? filter.op : ops[0]?.id
+        return (
+          <div key={filter.id} className="vault-filter">
+            <span className="vault-filter-join">{index === 0 ? "Where" : "and"}</span>
+            <select
+              aria-label="Column to filter"
+              value={column ? filter.columnId : ""}
+              onChange={(event) => {
+                const next = table.columns.find((item) => item.id === event.target.value)
+                if (next) set(filter.id, { columnId: next.id, op: filterOps(next.kind)[0].id, value: "" })
+              }}
+            >
+              {!column && <option value="">Deleted column</option>}
+              {table.columns.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name || "Untitled"}
+                </option>
+              ))}
+            </select>
+            {column && (
+              <select
+                aria-label="Condition"
+                value={op}
+                onChange={(event) => set(filter.id, { op: event.target.value as FilterOp })}
+              >
+                {ops.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {column && op && filterNeedsValue(op) && (
+              <input
+                type={column.kind === "number" ? "number" : column.kind === "date" ? "date" : "text"}
+                aria-label="Filter value"
+                placeholder="Value"
+                value={filter.value}
+                onChange={(event) => set(filter.id, { op, value: event.target.value })}
+              />
+            )}
+            <button
+              type="button"
+              className="vault-remove"
+              aria-label="Remove filter"
+              title="Remove filter"
+              onClick={() => onChange(filters.filter((item) => item.id !== filter.id))}
+            >
+              <RemoveIcon />
+            </button>
+          </div>
+        )
+      })}
+      <div className="vault-filter-actions">
+        <button
+          type="button"
+          className="button secondary vault-small"
+          disabled={table.columns.length === 0}
+          onClick={() => onChange([...filters, newFilter(table.columns[0])])}
+        >
+          <PlusIcon /> Filter
+        </button>
+        {filters.length > 0 && (
+          <button type="button" className="button secondary vault-small" onClick={() => onChange([])}>
+            Clear filters
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Marks a cell whose value is also in other rows; clicking it lists those rows together. */
+function RepeatedMark({ others, column, onShow }: { others: number; column: VaultColumn; onShow: () => void }) {
+  const text = `Same ${column.name || "value"} as ${others === 1 ? "1 other row" : `${others} other rows`}`
+  return (
+    <button type="button" className="vault-repeated-mark" aria-label={`${text}. Show them together.`} title={`${text}. Click to show them together.`} onClick={onShow}>
+      <DuplicatesIcon />
+    </button>
+  )
+}
+
+/** Which columns to compare when looking for duplicate rows, and what was found. */
+function DuplicatesBar({
+  table,
+  columnIds,
+  rowCount,
+  groupCount,
+  onChange,
+  onClose,
+}: {
+  table: VaultTable
+  columnIds: string[]
+  rowCount: number
+  groupCount: number
+  onChange: (columnIds: string[]) => void
+  onClose: () => void
+}) {
+  const all = columnIds.length === table.columns.length
+  return (
+    <div className="vault-filters vault-duplicates" role="group" aria-label="Duplicates">
+      <div className="vault-duplicates-head">
+        <strong>Rows with the same</strong>
+        <button
+          type="button"
+          className="vault-chip"
+          aria-pressed={all}
+          onClick={() => onChange(table.columns.map((column) => column.id))}
+        >
+          All columns
+        </button>
+        {table.columns.map((column) => {
+          const on = !all && columnIds.includes(column.id)
+          return (
+            <button
+              key={column.id}
+              type="button"
+              className="vault-chip"
+              aria-pressed={on}
+              onClick={() =>
+                // From "All columns", picking one compares just that column; otherwise it toggles.
+                onChange(all ? [column.id] : on ? columnIds.filter((id) => id !== column.id) : [...columnIds, column.id])
+              }
+            >
+              {column.name || "Untitled"}
+            </button>
+          )
+        })}
+      </div>
+      <p className="hint" role="status">
+        {columnIds.length === 0
+          ? "Pick at least one column to compare."
+          : groupCount === 0
+            ? "No duplicates found."
+            : `${rowCount} rows in ${groupCount} group${groupCount === 1 ? "" : "s"} have the same values. Rows with the same values are listed together.`}{" "}
+        Capitals and extra spaces are ignored.
+      </p>
+      <div className="vault-filter-actions">
+        <button type="button" className="button secondary vault-small" onClick={onClose}>
+          Show all rows
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable }) {
   const change = (next: (current: VaultTable) => VaultTable) => vault.updateTable(table.id, next)
   const { editing } = vault
   const [query, setQuery] = useState("")
   const [fit, setFit] = useState(readFit)
+  const [markRepeated, setMarkRepeated] = useState(() => readMarkRepeated(table.id))
+
+  function toggleMarkRepeated() {
+    const next = !markRepeated
+    setMarkRepeated(next)
+    try {
+      // Only "off" is stored; on is the default, so tables never turned off leave nothing behind.
+      if (next) localStorage.removeItem(repeatedKey(table.id))
+      else localStorage.setItem(repeatedKey(table.id), "false")
+    } catch {
+      // Not remembered; the choice still applies until the page is closed.
+    }
+  }
+  const filters = vault.filtersOf(table.id)
+  const setFilters = (next: VaultFilter[]) => vault.setTableFilters(table.id, next)
+  // The filter rules show under the toolbar; open from the start when the table already has some.
+  const [showFilters, setShowFilters] = useState(filters.length > 0)
+  // The columns compared when looking for duplicate rows; null when the check is off.
+  const [duplicateColumnIds, setDuplicateColumnIds] = useState<string[] | null>(null)
 
   function toggleFit() {
     const next = !fit
@@ -678,20 +1301,50 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   const labelIn = (column: VaultColumn) => (rowId: string) => links.get(column.id)?.label(rowId) ?? ""
 
   const search = query.trim().toLowerCase()
+  const columnById = new Map(table.columns.map((column) => [column.id, column]))
+  // Duplicates are found across the whole table, then search and filters narrow what is shown.
+  const duplicateColumns = (duplicateColumnIds ?? [])
+    .map((id) => columnById.get(id))
+    .filter((column): column is VaultColumn => column !== undefined)
+  const duplicates =
+    duplicateColumnIds && duplicateColumns.length > 0 ? findDuplicates(table.rows, duplicateColumns) : null
+  const duplicateGroups = duplicates ? new Set(duplicates.values()).size : 0
+  // Always on: every cell whose value also appears in another row of its column is marked.
+  const repeated = useMemo(
+    () => (markRepeated ? duplicateCells(table.rows, table.columns) : new Map<string, Map<string, number>>()),
+    [markRepeated, table.rows, table.columns],
+  )
+  const candidates = duplicateColumnIds ? table.rows.filter((row) => duplicates?.has(row.id)) : table.rows
+  const filtered = filters.length
+    ? candidates.filter((row) =>
+        filters.every((filter) => {
+          const column = columnById.get(filter.columnId)
+          return passesFilter(row, column, filter, column && labelIn(column))
+        }),
+      )
+    : candidates
   const matching = search
-    ? table.rows.filter((row) =>
+    ? filtered.filter((row) =>
         table.columns.some((column) =>
-          cellText(row.cells[column.id] ?? null, column.kind, labelIn(column)).toLowerCase().includes(search),
+          (column.kind === "subtable"
+            ? subTableText(row.cells[column.id] ?? null, column.columns ?? [])
+            : cellText(row.cells[column.id] ?? null, column.kind, labelIn(column))
+          )
+            .toLowerCase()
+            .includes(search),
         ),
       )
-    : table.rows
+    : filtered
   const viewSortColumn = !editing && sorted ? table.columns.find((column) => column.id === sorted.columnId) : undefined
   const shown =
     viewSortColumn && sorted
       ? sortRows(matching, viewSortColumn, sorted.direction, labelIn(viewSortColumn))
-      : matching
+      : duplicates
+        ? // Each group of duplicates is listed together, groups in the order they first appear.
+          [...matching].sort((a, b) => duplicates.get(a.id)! - duplicates.get(b.id)!)
+        : matching
   // Reordering by hand only makes sense when every row is on screen.
-  const canMove = editing && !search && table.rows.length > 1
+  const canMove = editing && !duplicateColumnIds && shown.length === table.rows.length && table.rows.length > 1
   // Grip and delete columns either side of the cells, in Edit only.
   const extraColumns = editing ? 2 : 0
   // Where to draw the drop line; none when letting go would leave the row where it is.
@@ -810,6 +1463,15 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   function setKind(columnId: string, kind: VaultColumnKind) {
     const before = table.columns.find((column) => column.id === columnId)
     if (!before || before.kind === kind) return
+    if (
+      before.kind === "subtable" &&
+      table.rows.some((row) => subRows(row.cells[columnId]).length > 0) &&
+      !window.confirm(
+        `Changing the type of "${before.name}" clears the items inside it. You can still discard this before you save.`,
+      )
+    ) {
+      return
+    }
     const label = labelIn(before)
     // A new Link points at another table first, or at this one when it is the only table.
     const target = kind === "link" ? (tables.find((item) => item.id !== table.id) ?? table).id : undefined
@@ -819,7 +1481,16 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
     change((current) => ({
       ...current,
       columns: current.columns.map((column) =>
-        column.id === columnId ? { id: column.id, name: column.name, kind, ...(target ? { target } : {}) } : column,
+        column.id === columnId
+          ? {
+              id: column.id,
+              name: column.name,
+              kind,
+              ...(target ? { target } : {}),
+              // A new Sub-table starts with one column to fill in.
+              ...(kind === "subtable" ? { columns: [newColumn("Name")] } : {}),
+            }
+          : column,
       ),
       rows: current.rows.map((row) =>
         columnId in row.cells ? { ...row, cells: { ...row.cells, [columnId]: convert(row.cells[columnId]) } } : row,
@@ -837,6 +1508,46 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
         return { ...row, cells }
       }),
     }))
+  }
+
+  /**
+   * Changes a Sub-table column's own columns. Values of a removed sub-column are dropped, and a
+   * sub-column whose type changed has its values converted, inside every cell of the column.
+   */
+  function setSubColumns(columnId: string, columns: VaultColumn[], convert?: { columnId: string; kind: VaultSubKind }) {
+    const kept = new Set(columns.map((sub) => sub.id))
+    const fix = (row: VaultRow): VaultRow => ({
+      ...row,
+      cells: Object.fromEntries(
+        Object.entries(row.cells)
+          .filter(([id]) => kept.has(id))
+          .map(([id, value]) => [id, convert?.columnId === id ? convertCell(value, convert.kind) : value]),
+      ),
+    })
+    change((current) => ({
+      ...current,
+      columns: current.columns.map((column) => (column.id === columnId ? { ...column, columns } : column)),
+      rows: current.rows.map((row) => {
+        const inner = subRows(row.cells[columnId])
+        return inner.length > 0 ? { ...row, cells: { ...row.cells, [columnId]: inner.map(fix) } } : row
+      }),
+    }))
+  }
+
+  function addColumn() {
+    change((current) => ({ ...current, columns: [...current.columns, newColumn(`Column ${current.columns.length + 1}`)] }))
+    // Show the new column, which is added at the far right.
+    window.requestAnimationFrame(() => wrapRef.current?.scrollTo({ left: wrapRef.current.scrollWidth, behavior: "smooth" }))
+  }
+
+  function addRow() {
+    // A new, empty row would not match the search, filters or duplicates, so show every row again.
+    setQuery("")
+    setFilters([])
+    setDuplicateColumnIds(null)
+    change((current) => ({ ...current, rows: [...current.rows, newRow()] }))
+    // Show the new row, which is added at the bottom.
+    window.requestAnimationFrame(() => wrapRef.current?.scrollTo({ top: wrapRef.current.scrollHeight, behavior: "smooth" }))
   }
 
   function removeColumn(columnId: string) {
@@ -870,6 +1581,24 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
             onChange={(event) => change((current) => ({ ...current, name: event.target.value }))}
           />
         )}
+        {editing && (
+          <>
+            <input
+              className="vault-table-category"
+              aria-label="Category"
+              placeholder="Category"
+              title="Tables with the same category are listed together"
+              list="vault-categories"
+              value={table.category ?? ""}
+              onChange={(event) => change((current) => ({ ...current, category: event.target.value }))}
+            />
+            <datalist id="vault-categories">
+              {vaultCategories(tables).map((category) => (
+                <option key={category} value={category} />
+              ))}
+            </datalist>
+          </>
+        )}
         <label className="vault-search">
           <SearchIcon />
           <input
@@ -883,6 +1612,48 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
             }}
           />
         </label>
+        <button
+          type="button"
+          className="button secondary vault-small vault-filter-toggle"
+          aria-pressed={showFilters}
+          aria-expanded={showFilters}
+          title={filters.length > 0 ? `${filters.length} filter${filters.length === 1 ? "" : "s"} on` : "Filter rows"}
+          onClick={() => {
+            // Opening an empty filter bar starts a first rule right away.
+            if (!showFilters && filters.length === 0 && table.columns.length > 0) setFilters([newFilter(table.columns[0])])
+            // Closing it drops rules still waiting for a value, so the count only shows filters in use.
+            if (showFilters) setFilters(filters.filter((filter) => !filterNeedsValue(filter.op) || filter.value.trim()))
+            setShowFilters(!showFilters)
+          }}
+        >
+          <FilterIcon /> Filter
+          {filters.length > 0 && <span className="vault-filter-count">{filters.length}</span>}
+        </button>
+        <button
+          type="button"
+          className="button secondary vault-small vault-filter-toggle"
+          aria-pressed={duplicateColumnIds !== null}
+          title="Find rows with the same values"
+          disabled={table.rows.length < 2 && duplicateColumnIds === null}
+          onClick={() => setDuplicateColumnIds(duplicateColumnIds ? null : table.columns.map((column) => column.id))}
+        >
+          <DuplicatesIcon /> Duplicates
+          {duplicateGroups > 0 && <span className="vault-filter-count">{duplicateGroups}</span>}
+        </button>
+        <button
+          type="button"
+          className="button secondary vault-small vault-icon-button vault-fit-toggle"
+          aria-pressed={markRepeated}
+          aria-label="Mark repeated values"
+          title={
+            markRepeated
+              ? "This table marks values that also appear in another row of the same column. Click to turn this off for this table."
+              : "This table does not mark repeated values. Click to mark values that also appear in another row of the same column."
+          }
+          onClick={toggleMarkRepeated}
+        >
+          <RepeatedIcon />
+        </button>
         <button
           type="button"
           className="button secondary vault-small vault-icon-button vault-fit-toggle"
@@ -901,27 +1672,6 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
           <>
             <button
               type="button"
-              className="button secondary vault-small"
-              onClick={() =>
-                change((current) => ({ ...current, columns: [...current.columns, newColumn(`Column ${current.columns.length + 1}`)] }))
-              }
-            >
-              <PlusIcon /> Column
-            </button>
-            <button
-              type="button"
-              className="button secondary vault-small"
-              disabled={table.columns.length === 0}
-              onClick={() => {
-                // A new, empty row would not match the search, so show every row again.
-                setQuery("")
-                change((current) => ({ ...current, rows: [...current.rows, newRow()] }))
-              }}
-            >
-              <PlusIcon /> Row
-            </button>
-            <button
-              type="button"
               className="button danger vault-small vault-icon-button"
               aria-label="Delete table"
               title="Delete table"
@@ -936,9 +1686,26 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
           </>
         )}
       </div>
+      {showFilters && table.columns.length > 0 && <FilterBar table={table} filters={filters} onChange={setFilters} />}
+      {duplicateColumnIds && table.columns.length > 0 && (
+        <DuplicatesBar
+          table={table}
+          columnIds={duplicateColumns.map((column) => column.id)}
+          rowCount={duplicates?.size ?? 0}
+          groupCount={duplicateGroups}
+          onChange={setDuplicateColumnIds}
+          onClose={() => setDuplicateColumnIds(null)}
+        />
+      )}
       {table.columns.length === 0 ? (
         <p className="hint vault-note">
-          {editing ? "Add a column to start this table." : "This table has no columns yet. Switch to Edit to add some."}
+          {editing ? (
+            <button type="button" className="button secondary vault-small" onClick={addColumn}>
+              <PlusIcon /> Add a column
+            </button>
+          ) : (
+            "This table has no columns yet. Click Edit to add some."
+          )}
         </p>
       ) : (
         <div className="vault-grid-wrap" ref={wrapRef}>
@@ -1034,6 +1801,12 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         ))}
                       </select>
                     )}
+                    {editing && column.kind === "subtable" && (
+                      <SubColumnsButton
+                        column={column}
+                        onChange={(columns, convert) => setSubColumns(column.id, columns, convert)}
+                      />
+                    )}
                     {editing && column.kind === "link" && (
                       <select
                         className="vault-kind"
@@ -1052,14 +1825,28 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                     )}
                   </th>
                 ))}
-                {editing && <th className="vault-row-actions" aria-label="Row actions" />}
+                {editing && (
+                  <th className="vault-row-actions">
+                    <button type="button" className="vault-add" aria-label="Add column" title="Add column" onClick={addColumn}>
+                      <PlusIcon />
+                    </button>
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody ref={bodyRef} className={drag ? "dragging" : undefined}>
               {shown.length === 0 ? (
                 <tr>
                   <td className="vault-empty" colSpan={table.columns.length + extraColumns}>
-                    {table.rows.length === 0 ? "No rows yet." : "No rows match your search."}
+                    {table.rows.length === 0
+                      ? "No rows yet."
+                      : duplicateColumnIds && !search && !filters.length
+                        ? "No duplicate rows."
+                        : search && filters.length
+                        ? "No rows match your search and filters."
+                        : search
+                          ? "No rows match your search."
+                          : "No rows match your filters."}
                   </td>
                 </tr>
               ) : (
@@ -1071,6 +1858,12 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                     className={
                       [
                         highlight === row.id && "vault-highlight",
+                        // Alternate shading tells one group of duplicates from the next.
+                        duplicates?.has(row.id) && (duplicates.get(row.id)! % 2 === 0 ? "vault-dup-even" : "vault-dup-odd"),
+                        duplicates?.has(row.id) &&
+                          index > 0 &&
+                          duplicates.get(shown[index - 1].id) !== duplicates.get(row.id) &&
+                          "vault-dup-start",
                         drag?.id === row.id && "vault-dragged",
                         dropAt === index && "vault-drop-before",
                         dropAt === shown.length && index === shown.length - 1 && "vault-drop-after",
@@ -1115,7 +1908,14 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                       </td>
                     )}
                     {table.columns.map((column, columnIndex) => (
-                      <td key={column.id} className={columnClass(column, columnIndex)}>
+                      <td
+                        key={column.id}
+                        className={
+                          [columnClass(column, columnIndex), repeated.get(column.id)?.has(row.id) && "vault-cell-repeated"]
+                            .filter(Boolean)
+                            .join(" ") || undefined
+                        }
+                      >
                         {editing ? (
                           <CellEditor
                             column={column}
@@ -1125,6 +1925,13 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                           />
                         ) : (
                           <CopyableCell column={column} value={row.cells[column.id] ?? null} link={links.get(column.id)} />
+                        )}
+                        {repeated.get(column.id)?.has(row.id) && (
+                          <RepeatedMark
+                            others={repeated.get(column.id)!.get(row.id)!}
+                            column={column}
+                            onShow={() => setDuplicateColumnIds([column.id])}
+                          />
                         )}
                       </td>
                     ))}
@@ -1147,6 +1954,18 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                 ))
               )}
             </tbody>
+            {editing && (
+              <tfoot>
+                <tr>
+                  <td className="vault-grip-cell">
+                    <button type="button" className="vault-add" aria-label="Add row" title="Add row" onClick={addRow}>
+                      <PlusIcon />
+                    </button>
+                  </td>
+                  <td className="vault-add-row-rest" colSpan={table.columns.length + 1} />
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       )}
@@ -1197,16 +2016,6 @@ export function Vault({ vault }: { vault: VaultState }) {
         </div>
         {opened && (
           <div className="profile-bar-actions">
-            {vault.table && (
-              <div className="vault-mode" role="group" aria-label="Mode">
-                <button type="button" aria-pressed={!vault.editing} onClick={() => vault.setEditing(false)}>
-                  View
-                </button>
-                <button type="button" aria-pressed={vault.editing} onClick={() => vault.setEditing(true)}>
-                  Edit
-                </button>
-              </div>
-            )}
             <button
               type="button"
               className="bar-icon"
@@ -1236,6 +2045,29 @@ export function Vault({ vault }: { vault: VaultState }) {
               <SaveIcon />
               {vault.dirty && <span className="vault-dot" aria-hidden="true" />}
             </button>
+            {vault.table &&
+              (vault.editing ? (
+                <button
+                  type="button"
+                  className="bar-icon vault-cancel"
+                  aria-label="Cancel editing"
+                  title="Cancel editing"
+                  // With unsaved changes, first asks whether to save or discard them.
+                  onClick={() => vault.guard(() => vault.setEditing(false))}
+                >
+                  <CancelIcon />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="bar-icon"
+                  aria-label="Edit table"
+                  title="Edit table"
+                  onClick={() => vault.setEditing(true)}
+                >
+                  <EditIcon />
+                </button>
+              ))}
           </div>
         )}
       </header>
