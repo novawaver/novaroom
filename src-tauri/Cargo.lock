@@ -2319,7 +2319,7 @@ dependencies = [
 
 [[package]]
 name = "novaroom-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2333,6 +2333,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tauri-winrt-notification",
  "windows-sys 0.61.2",
 ]
 

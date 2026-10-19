@@ -1330,6 +1330,15 @@ select {
   justify-content: flex-end;
 }
 
+/* A small centred line between messages, such as the thank-you after a report. */
+.message-system-note {
+  margin: 0;
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 .avatar.message-avatar {
   width: 52px;
   height: 52px;
@@ -1896,6 +1905,44 @@ code {
   color: var(--ink);
   font-size: 34px;
   font-weight: 500;
+}
+
+/* Holds the photo plus badges that overhang its edge (the photo itself clips its contents). */
+.person-avatar {
+  position: relative;
+  flex: none;
+}
+
+.person-badges {
+  position: absolute;
+  left: -8px;
+  bottom: -8px;
+  display: flex;
+  gap: 4px;
+}
+
+.person-badge {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  color: #1c1915;
+}
+
+.person-badge svg {
+  width: 19px;
+  height: 19px;
+  fill: currentColor;
+}
+
+.person-badge-admin {
+  background: #6ab7f0;
+}
+
+.person-badge-leadership {
+  background: #f5c242;
 }
 
 .person-photo img {
@@ -2507,6 +2554,43 @@ code {
   display: block;
   color: var(--muted);
   font-size: 13px;
+}
+
+/* Description and notes from assignee in the task drawer; headings match the facts list. */
+.task-section {
+  display: grid;
+  gap: 8px;
+}
+
+.task-section h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+.task-section .hint,
+.task-section .form-error {
+  margin: 0;
+}
+
+.task-section textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  resize: vertical;
+}
+
+.task-section-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .event-notes {

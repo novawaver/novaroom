@@ -1,6 +1,6 @@
 [package]
 name = "novaroom-app"
-version = "0.1.1"
+version = "0.1.2"
 description = "Chat for AI trainers"
 authors = ["Novawave"]
 edition = "2021"
@@ -33,6 +33,8 @@ tauri-plugin-single-instance = "2"
 # Reads how long the computer has had no keyboard or mouse input, for the Timer.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation"] }
+# Windows toasts with a click handler, so clicking one opens the window (see `notify` in lib.rs).
+tauri-winrt-notification = "0.8"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

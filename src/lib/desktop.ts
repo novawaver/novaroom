@@ -78,6 +78,15 @@ export async function setTaskbarBadge(count: number) {
 
 export async function notifyIncoming(title: string, body: string) {
   if (!inTauri()) return
+  const text = { title: title || "Novaroom", body: body.slice(0, 180) }
+  // On Windows the app shows its own toast, which opens the window when clicked.
+  try {
+    const { invoke } = await import("@tauri-apps/api/core")
+    await invoke("notify", text)
+    return
+  } catch {
+    // Not Windows, or the toast could not be built; fall back to the plugin's notification.
+  }
   const { isPermissionGranted, requestPermission, sendNotification } = await import(
     "@tauri-apps/plugin-notification"
   )
@@ -86,10 +95,7 @@ export async function notifyIncoming(title: string, body: string) {
     granted = (await requestPermission()) === "granted"
   }
   if (!granted) return
-  sendNotification({
-    title: title || "Novaroom",
-    body: body.slice(0, 180),
-  })
+  sendNotification(text)
 }
 
 // True only when the person can actually see the app: the page is visible and focused, and in the

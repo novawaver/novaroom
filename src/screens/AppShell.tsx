@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from "react"
 import { useAuth } from "../auth"
 import { notifyIncoming, setTaskbarBadge, windowIsActive } from "../lib/desktop"
 import { readUnread, unreadTotal, writeUnread } from "../lib/unread"
@@ -682,7 +682,8 @@ export function AppShell() {
   const [reportId, setReportId] = useState<string | null>(null)
   const [reportReason, setReportReason] = useState<ReportReason>("harassment")
   const [reportNote, setReportNote] = useState("")
-  const [reportSaved, setReportSaved] = useState(false)
+  // The message last reported, so a thank-you note shows under it in the message list.
+  const [reportedId, setReportedId] = useState<string | null>(null)
   const [rooms, setRooms] = useState<RoomInfo[]>([])
   const selectedRef = useRef<string | null>(null)
   const blockedRef = useRef<string[]>([])
@@ -974,10 +975,10 @@ export function AppShell() {
   async function onReport() {
     if (!reporting) return
     setSendError("")
-    setReportSaved(false)
+    setReportedId(null)
     try {
       await reportMessage(session!, reporting, reportReason, reportNote)
-      setReportSaved(true)
+      setReportedId(reporting.id)
       setReportId(null)
       setReportNote("")
     } catch (caught) {
@@ -1636,70 +1637,77 @@ export function AppShell() {
                       </span>
                     )
                     return (
-                      <div key={message.id} className={mine ? "message-row mine" : "message-row theirs"}>
-                        {!mine && avatar}
-                        <article className={mine ? "bubble mine" : "bubble theirs"}>
-                          {(selected.kind === "group" || selected.kind === "room") &&
-                            message.senderId !== session.userId && <p className="sender-name">{message.senderName}</p>}
-                          {message.attachmentUrl && isImage(message.attachmentMime) && (
-                            <img
-                              className="bubble-image"
-                              src={message.attachmentUrl}
-                              alt={message.attachmentName ?? "Image"}
-                            />
-                          )}
-                          {message.attachmentUrl && !isImage(message.attachmentMime) && (
-                            <a
-                              className="file-link"
-                              href={message.attachmentUrl}
-                              download={message.attachmentName ?? undefined}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              {message.attachmentName ?? "File"}
-                              {message.attachmentSize != null ? ` (${formatBytes(message.attachmentSize)})` : ""}
-                            </a>
-                          )}
-                          {message.body && <p>{message.body}</p>}
-                          {message.deleted && <p className="deleted-note">Message deleted</p>}
-                          <span className="bubble-meta">
-                            <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
-                            {message.senderId === session.userId &&
-                              (sendingIds.has(message.id) ? (
-                                <span className="bubble-status sending" role="img" aria-label="Sending" />
-                              ) : (
-                                <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label="Sent">
-                                  <path d="M3 8.5l3 3 7-7" />
-                                </svg>
-                              ))}
-                          </span>
-                          {!message.deleted && !sendingIds.has(message.id) && (
-                            <MessageMenu
-                              side={message.senderId === session.userId ? "mine" : "theirs"}
-                              actions={
-                                message.senderId === session.userId
-                                  ? [{ label: "Delete", danger: true, onSelect: () => void onDelete(message) }]
-                                  : [
-                                      {
-                                        label: "Report",
-                                        danger: true,
-                                        onSelect: () => {
-                                          setReportSaved(false)
-                                          setReportId(message.id)
-                                          setReportReason("harassment")
-                                          setReportNote("")
+                      <Fragment key={message.id}>
+                        <div className={mine ? "message-row mine" : "message-row theirs"}>
+                          {!mine && avatar}
+                          <article className={mine ? "bubble mine" : "bubble theirs"}>
+                            {(selected.kind === "group" || selected.kind === "room") &&
+                              message.senderId !== session.userId && <p className="sender-name">{message.senderName}</p>}
+                            {message.attachmentUrl && isImage(message.attachmentMime) && (
+                              <img
+                                className="bubble-image"
+                                src={message.attachmentUrl}
+                                alt={message.attachmentName ?? "Image"}
+                              />
+                            )}
+                            {message.attachmentUrl && !isImage(message.attachmentMime) && (
+                              <a
+                                className="file-link"
+                                href={message.attachmentUrl}
+                                download={message.attachmentName ?? undefined}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {message.attachmentName ?? "File"}
+                                {message.attachmentSize != null ? ` (${formatBytes(message.attachmentSize)})` : ""}
+                              </a>
+                            )}
+                            {message.body && <p>{message.body}</p>}
+                            {message.deleted && <p className="deleted-note">Message deleted</p>}
+                            <span className="bubble-meta">
+                              <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
+                              {message.senderId === session.userId &&
+                                (sendingIds.has(message.id) ? (
+                                  <span className="bubble-status sending" role="img" aria-label="Sending" />
+                                ) : (
+                                  <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label="Sent">
+                                    <path d="M3 8.5l3 3 7-7" />
+                                  </svg>
+                                ))}
+                            </span>
+                            {!message.deleted && !sendingIds.has(message.id) && (
+                              <MessageMenu
+                                side={message.senderId === session.userId ? "mine" : "theirs"}
+                                actions={
+                                  message.senderId === session.userId
+                                    ? [{ label: "Delete", danger: true, onSelect: () => void onDelete(message) }]
+                                    : [
+                                        {
+                                          label: "Report",
+                                          danger: true,
+                                          onSelect: () => {
+                                            setReportedId(null)
+                                            setReportId(message.id)
+                                            setReportReason("harassment")
+                                            setReportNote("")
+                                          },
                                         },
-                                      },
-                                      ...(selected.kind === "group" && !blockedIds.includes(message.senderId)
-                                        ? [{ label: "Block", onSelect: () => void onBlock(message.senderId, true) }]
-                                        : []),
-                                    ]
-                              }
-                            />
-                          )}
-                        </article>
-                        {mine && avatar}
-                      </div>
+                                        ...(selected.kind === "group" && !blockedIds.includes(message.senderId)
+                                          ? [{ label: "Block", onSelect: () => void onBlock(message.senderId, true) }]
+                                          : []),
+                                      ]
+                                }
+                              />
+                            )}
+                          </article>
+                          {mine && avatar}
+                        </div>
+                        {message.id === reportedId && (
+                          <p className="message-system-note" role="status">
+                            Report sent. Thank you.
+                          </p>
+                        )}
+                      </Fragment>
                     )
                   })
                 )}
@@ -1710,7 +1718,6 @@ export function AppShell() {
                     {messagingLockMessage(lock)}
                   </p>
                 )}
-                {reportSaved && <p className="form-ok">Report sent. Thank you.</p>}
                 {reporting && (
                   <div className="report-box">
                     <label>

@@ -7,7 +7,10 @@ export type TaskPriority = "low" | "normal" | "high"
 export type DeskTask = {
   id: string
   title: string
+  // Shown as "Description". The column is still called notes in the database.
   notes: string
+  // Written by the assignee about the result.
+  assigneeNotes: string
   status: TaskStatus
   priority: TaskPriority
   assigneeId: string | null
@@ -112,6 +115,7 @@ type TaskRow = {
   id: string
   title: string
   notes: string
+  assignee_notes: string
   status: TaskStatus
   priority: TaskPriority
   assignee_id: string | null
@@ -124,6 +128,7 @@ const toTask = (row: TaskRow): DeskTask => ({
   id: row.id,
   title: row.title,
   notes: row.notes,
+  assigneeNotes: row.assignee_notes,
   status: row.status,
   priority: row.priority,
   assigneeId: row.assignee_id,
@@ -133,16 +138,23 @@ const toTask = (row: TaskRow): DeskTask => ({
 })
 
 export async function listTasks(): Promise<DeskTask[]> {
-  if (!supabase) return readPreview().tasks.map((task) => ({ ...task, createdBy: task.createdBy ?? null }))
+  if (!supabase) {
+    return readPreview().tasks.map((task) => ({
+      ...task,
+      assigneeNotes: task.assigneeNotes ?? "",
+      createdBy: task.createdBy ?? null,
+    }))
+  }
   const { data, error } = await supabase
     .from("leaddesk_tasks")
-    .select("id, title, notes, status, priority, assignee_id, due_date, created_by, created_at")
+    .select("id, title, notes, assignee_notes, status, priority, assignee_id, due_date, created_by, created_at")
     .order("created_at")
   fail(error)
   return (data as TaskRow[]).map(toTask)
 }
 
-export async function saveTask(task: Omit<DeskTask, "id" | "createdAt"> & { id?: string }) {
+// Leaves assigneeNotes alone; only the assignee changes those, through saveAssigneeNotes.
+export async function saveTask(task: Omit<DeskTask, "id" | "createdAt" | "assigneeNotes"> & { id?: string }) {
   // createdBy is only used by the preview store; the database sets created_by itself.
   const fields = {
     title: task.title.trim(),
@@ -155,12 +167,14 @@ export async function saveTask(task: Omit<DeskTask, "id" | "createdAt"> & { id?:
   if (!fields.title) throw new Error("Give the task a title.")
   if (!supabase) {
     const desk = readPreview()
+    const existing = desk.tasks.find((item) => item.id === task.id)
     const saved: DeskTask = {
       ...task,
       title: fields.title,
       notes: fields.notes,
+      assigneeNotes: existing?.assigneeNotes ?? "",
       id: task.id ?? crypto.randomUUID(),
-      createdAt: desk.tasks.find((item) => item.id === task.id)?.createdAt ?? new Date().toISOString(),
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
     }
     desk.tasks = task.id ? desk.tasks.map((item) => (item.id === task.id ? saved : item)) : [...desk.tasks, saved]
     writePreview(desk)
@@ -173,6 +187,34 @@ export async function saveTask(task: Omit<DeskTask, "id" | "createdAt"> & { id?:
         .eq("id", task.id)
     : await supabase.from("leaddesk_tasks").insert(fields)
   fail(error)
+}
+
+export async function saveAssigneeNotes(id: string, text: string) {
+  const assigneeNotes = text.trim()
+  if (!supabase) {
+    const desk = readPreview()
+    desk.tasks = desk.tasks.map((item) => (item.id === id ? { ...item, assigneeNotes } : item))
+    writePreview(desk)
+    return
+  }
+  const { error } = await supabase
+    .from("leaddesk_tasks")
+    .update({ assignee_notes: assigneeNotes, updated_at: new Date().toISOString() })
+    .eq("id", id)
+  fail(error)
+}
+
+// Whether an admin has let this person add new tasks. Offline preview has no admins, so it is allowed.
+// The database enforces this too; this only decides whether the button is enabled.
+export async function readCanAddTasks(userId: string): Promise<boolean> {
+  if (!supabase) return true
+  const { data, error } = await supabase
+    .from("task_permissions")
+    .select("can_add_tasks")
+    .eq("user_id", userId)
+    .maybeSingle()
+  fail(error)
+  return Boolean((data as { can_add_tasks: boolean } | null)?.can_add_tasks)
 }
 
 export async function setTaskStatus(id: string, status: TaskStatus) {

@@ -8,7 +8,9 @@ import {
   listEvents,
   listNotes,
   listTasks,
+  readCanAddTasks,
   saveEvent,
+  saveAssigneeNotes,
   saveNote,
   saveTask,
   setTaskStatus,
@@ -57,22 +59,32 @@ export type DeskData = {
   leaders: RegisteredUser[]
   // Everyone, for showing who created an event or took part after leaving Leadership.
   users: RegisteredUser[]
+  // Whether an admin has let this person add new tasks.
+  canAddTasks: boolean
 }
 
 // Loads everything on LeadDesk while it is open; the sidebar counts and the page share it.
 export function useLeadDesk(open: boolean) {
+  const { session } = useAuth()
+  const userId = session?.userId ?? null
   const [data, setData] = useState<DeskData | null>(null)
   const [error, setError] = useState("")
 
   const reload = useCallback(async () => {
     try {
-      const [tasks, events, notes, users] = await Promise.all([listTasks(), listEvents(), listNotes(), listUsers()])
-      setData({ tasks, events, notes, users, leaders: users.filter((user) => user.role === LEADERSHIP) })
+      const [tasks, events, notes, users, canAddTasks] = await Promise.all([
+        listTasks(),
+        listEvents(),
+        listNotes(),
+        listUsers(),
+        userId ? readCanAddTasks(userId) : Promise.resolve(false),
+      ])
+      setData({ tasks, events, notes, users, leaders: users.filter((user) => user.role === LEADERSHIP), canAddTasks })
       setError("")
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load LeadDesk.")
     }
-  }, [])
+  }, [userId])
 
   useEffect(() => {
     if (open) void reload()
@@ -174,12 +186,19 @@ export function LeadDesk({
 
   const label = LEADDESK_TABS.find((item) => item.id === tab)?.label ?? "LeadDesk"
   const newLabel = tab === "tasks" ? "New task" : tab === "schedule" ? "New event" : "New note"
+  const newBlocked = tab === "tasks" && !data?.canAddTasks
 
   return (
     <section className={tab === "schedule" ? "settings desk-fixed" : "settings"}>
       <header className="thread-bar profile-bar">
         <h1>{label}</h1>
-        <button type="button" className="button desk-new" onClick={() => setEditing({ kind: tab, item: null })}>
+        <button
+          type="button"
+          className="button desk-new"
+          disabled={newBlocked}
+          title={newBlocked && data ? "You need an admin's permission to add tasks" : undefined}
+          onClick={() => setEditing({ kind: tab, item: null })}
+        >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 5v14M5 12h14" />
           </svg>
@@ -217,7 +236,9 @@ export function LeadDesk({
         <TaskDrawer
           task={selectedTask}
           users={data.users}
+          selfId={session.userId}
           covered={editing !== null}
+          onSaved={reload}
           onEdit={() => setEditing({ kind: "tasks", item: selectedTask })}
           onClose={closeTask}
         />
@@ -365,16 +386,20 @@ function TaskBoard({
 function TaskDrawer({
   task,
   users,
+  selfId,
   covered,
   onEdit,
   onClose,
+  onSaved,
 }: {
   task: DeskTask
   users: RegisteredUser[]
+  selfId: string
   // True while the editor is open on top, so Esc closes only the editor.
   covered: boolean
   onEdit: () => void
   onClose: () => void
+  onSaved: () => Promise<void>
 }) {
   useEffect(() => {
     if (covered) return
@@ -422,8 +447,86 @@ function TaskDrawer({
             <PersonAvatar users={users} id={task.createdBy} />
           </dd>
         </dl>
-        {task.notes && <p className="event-notes">{task.notes}</p>}
+        <div className="task-section">
+          <h3>Description</h3>
+          {task.notes ? <p className="event-notes">{task.notes}</p> : <p className="hint">No description.</p>}
+        </div>
+        <AssigneeNotes key={task.id} task={task} isAssignee={task.assigneeId === selfId} onSaved={onSaved} />
       </aside>
+    </div>
+  )
+}
+
+// The assignee writes about the result here; everyone else only reads it.
+function AssigneeNotes({
+  task,
+  isAssignee,
+  onSaved,
+}: {
+  task: DeskTask
+  isAssignee: boolean
+  onSaved: () => Promise<void>
+}) {
+  // null until the assignee starts typing, so saved changes from elsewhere still show.
+  const [draft, setDraft] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState("")
+  const value = draft ?? task.assigneeNotes
+
+  async function save() {
+    if (draft === null) return
+    setSaving(true)
+    setError("")
+    try {
+      await saveAssigneeNotes(task.id, draft)
+      await onSaved()
+      setDraft(null)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not save your notes.")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="task-section">
+      <h3>Notes from assignee</h3>
+      {isAssignee ? (
+        <>
+          <textarea
+            value={value}
+            rows={5}
+            maxLength={2000}
+            placeholder="How did it go? Add results, links or anything the team should know."
+            aria-label="Notes from assignee"
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          {error && (
+            <p className="form-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="task-section-actions">
+            {draft !== null && (
+              <button type="button" className="button secondary" disabled={saving} onClick={() => setDraft(null)}>
+                Cancel
+              </button>
+            )}
+            <button
+              type="button"
+              className="button"
+              disabled={saving || draft === null || draft.trim() === task.assigneeNotes}
+              onClick={() => void save()}
+            >
+              {saving ? "Saving…" : "Save notes"}
+            </button>
+          </div>
+        </>
+      ) : task.assigneeNotes ? (
+        <p className="event-notes">{task.assigneeNotes}</p>
+      ) : (
+        <p className="hint">{task.assigneeId ? "The assignee hasn't added notes yet." : "Assign someone to get their notes."}</p>
+      )}
     </div>
   )
 }
@@ -480,7 +583,7 @@ function TaskEditor({
         <input value={title} maxLength={120} required autoFocus onChange={(event) => setTitle(event.target.value)} />
       </label>
       <label>
-        Notes
+        Description
         <textarea value={notes} rows={4} maxLength={2000} onChange={(event) => setNotes(event.target.value)} />
       </label>
       <div className="desk-form-row">

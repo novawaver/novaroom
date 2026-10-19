@@ -50,6 +50,47 @@ fn request_quit(app: &tauri::AppHandle) {
     }
 }
 
+/// Shows a Windows toast that brings the window forward when clicked. The notification plugin's
+/// toasts have no click handler on desktop, so clicking them did nothing.
+#[tauri::command]
+fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use tauri_winrt_notification::Toast;
+        // Only the installed app has a Start menu shortcut carrying our app ID; a build run straight
+        // from target\ borrows PowerShell's so the toast still appears (same rule as the plugin).
+        let exe_dir = tauri::utils::platform::current_exe()
+            .map_err(|error| error.to_string())?
+            .parent()
+            .map(|dir| dir.to_path_buf())
+            .unwrap_or_default();
+        let from_target = exe_dir.ends_with("target\\debug") || exe_dir.ends_with("target\\release");
+        let app_id = if from_target {
+            Toast::POWERSHELL_APP_ID.to_string()
+        } else {
+            app.config().identifier.clone()
+        };
+        // Toast::show waits briefly, so keep it off the command thread.
+        std::thread::spawn(move || {
+            let clicked = app.clone();
+            let _ = Toast::new(&app_id)
+                .title(&title)
+                .text1(&body)
+                .on_activated(move |_| {
+                    show_main(&clicked);
+                    Ok(())
+                })
+                .show();
+        });
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, title, body);
+        Err("Clickable notifications are only built for Windows.".into())
+    }
+}
+
 /// Seconds since the last keyboard or mouse input anywhere on the computer, for the Timer.
 /// Returns None where the system cannot tell us, and the app falls back to its own window.
 #[tauri::command]
@@ -183,6 +224,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             idle_seconds,
+            notify,
             startup_settings,
             set_startup_settings,
             set_unsaved_changes,

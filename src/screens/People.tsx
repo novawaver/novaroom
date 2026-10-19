@@ -39,6 +39,34 @@ function accentFor(userId: string) {
   return ACCENTS[hash % ACCENTS.length]
 }
 
+// Small icon badges over the bottom-left corner of a person's photo.
+function UserBadges({ user }: { user: RegisteredUser }) {
+  const badges = [
+    user.isAdmin && {
+      id: "admin",
+      label: "Admin",
+      icon: <path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z" />,
+    },
+    user.role === LEADERSHIP && {
+      id: "leadership",
+      label: LEADERSHIP,
+      icon: <path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" />,
+    },
+  ].filter((badge) => !!badge)
+  if (badges.length === 0) return null
+  return (
+    <span className="person-badges">
+      {badges.map((badge) => (
+        <span key={badge.id} className={`person-badge person-badge-${badge.id}`} title={badge.label} role="img" aria-label={badge.label}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            {badge.icon}
+          </svg>
+        </span>
+      ))}
+    </span>
+  )
+}
+
 function UserCard({
   user,
   isSelf,
@@ -59,9 +87,12 @@ function UserCard({
           <span>{user.status || (isSelf ? "This is you" : "No status yet")}</span>
           {isSelf && <span className="person-tag">You</span>}
         </span>
-        <span className="person-photo">
-          {user.avatarUrl ? <img src={user.avatarUrl} alt="" /> : <span>{initials(name)}</span>}
-          {user.avatarUrl && <span className="person-corner" />}
+        <span className="person-avatar">
+          <span className="person-photo">
+            {user.avatarUrl ? <img src={user.avatarUrl} alt="" /> : <span>{initials(name)}</span>}
+            {user.avatarUrl && <span className="person-corner" />}
+          </span>
+          <UserBadges user={user} />
         </span>
       </span>
       <span className="person-rule" />

@@ -1,4 +1,5 @@
-export const APP_VERSION = "0.1.0"
+// Comes from package.json at build time, so the About line always matches the installed release.
+export { version as APP_VERSION } from "../package.json"
 
 export const PRIVACY = [
   "Novaroom is a chat app for AI trainers, operated by Novawave. This policy covers a signed-in account. Local preview stays on that Windows user account and is not sent to the Novaroom database.",

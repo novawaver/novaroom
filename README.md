@@ -183,12 +183,11 @@ Keep the private key file somewhere safe and out of this folder. If it is lost, 
 
 1. Choose the new version number. Use a higher number than the last release, for example `0.1.0` to `0.2.0`, or `0.1.1` for a small fix.
 
-2. Change the version in all three of these files. They must match, or the updater can offer the wrong version.
+2. Change the version in both of these files, and make them match. The installer, the updater, and **Settings → About** all read the number from `package.json`. `src-tauri/tauri.conf.json` points at that file, so leave it alone.
 
    | File | Line |
    |---|---|
    | `package.json` | `"version": "0.2.0",` |
-   | `src-tauri/tauri.conf.json` | `"version": "0.2.0",` |
    | `src-tauri/Cargo.toml` | `version = "0.2.0"` |
 
 3. Check that the app still builds. This also updates `src-tauri/Cargo.lock` with the new version.
@@ -225,7 +224,7 @@ Keep the private key file somewhere safe and out of this folder. If it is lost, 
 
 8. Open the **Actions** tab on GitHub and watch the **Release** run. It takes about 10 to 20 minutes. When it is green, the **Releases** page shows `Novaroom v0.2.0` with the setup file, `latest.json`, and signature files.
 
-9. Open an installed older copy of Novaroom. It should show a banner saying **Novaroom 0.2.0 is available**. Install the update and check that the banner does not come back.
+9. Open an installed older copy of Novaroom. It should show a banner saying **Novaroom 0.2.0 is available**. Install the update and check that **Settings → About** shows the new number.
 
 ### If the release fails
 
