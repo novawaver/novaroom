@@ -2933,6 +2933,11 @@ code {
   font-size: 14px;
 }
 
+.settings-update-actions {
+  justify-content: flex-start;
+  margin-top: 12px;
+}
+
 .toasts {
   position: fixed;
   right: 20px;

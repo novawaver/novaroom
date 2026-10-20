@@ -4,12 +4,14 @@ import { APP_VERSION, PRIVACY, TERMS } from "../legal"
 import { listBlocked, unblockUser, type BlockedPerson } from "../lib/safety"
 import { readStartup, writeStartup, type StartupSettings } from "../lib/startup"
 import { applyTheme, readTheme, writeTheme, type ThemeChoice } from "../lib/theme"
+import { canUpdate, checkNow, installUpdate, setAutoUpdate, useUpdates } from "../lib/updater"
 
-export type SettingsTab = "appearance" | "startup" | "about" | "safety"
+export type SettingsTab = "appearance" | "startup" | "updates" | "about" | "safety"
 
 export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "appearance", label: "Appearance" },
   { id: "startup", label: "Startup" },
+  { id: "updates", label: "Updates" },
   { id: "about", label: "About" },
   { id: "safety", label: "Safety" },
 ]
@@ -32,6 +34,7 @@ export function Settings({ tab }: { tab: SettingsTab }) {
         </div>
       )}
       {tab === "startup" && <Startup />}
+      {tab === "updates" && <Updates />}
       {tab === "about" && <AboutNovaroom />}
       {tab === "safety" && <AccountSafety />}
     </section>
@@ -112,6 +115,94 @@ function Startup() {
             </button>
           </div>
         </>
+      )}
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function Updates() {
+  const { autoUpdate, checking, checkedAt, update, progress, error } = useUpdates()
+  const installing = progress !== undefined
+
+  if (!canUpdate()) {
+    return (
+      <div className="settings-panel">
+        <p className="hint">Updates are only in the installed Novaroom desktop app.</p>
+      </div>
+    )
+  }
+
+  let status: string
+  if (installing) {
+    status =
+      progress === null
+        ? `Downloading Novaroom ${update?.version}…`
+        : progress < 1
+          ? `Downloading Novaroom ${update?.version}… ${Math.round(progress * 100)}%`
+          : "Installing… Novaroom will restart."
+  } else if (checking) {
+    status = "Checking for updates…"
+  } else if (update) {
+    status = `Novaroom ${update.version} is available.`
+  } else if (checkedAt) {
+    status = `Novaroom is up to date. Last checked at ${new Date(checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+  } else {
+    status = "Novaroom has not checked for updates yet."
+  }
+
+  return (
+    <div className="settings-panel">
+      <div className="startup-row">
+        <div>
+          <strong>Update automatically</strong>
+          <p className="hint">
+            Novaroom installs new versions as soon as they are released, then restarts. Turn this off to choose
+            when to update.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoUpdate}
+          aria-label="Update automatically"
+          className="switch"
+          onClick={() => setAutoUpdate(!autoUpdate)}
+        >
+          <span />
+        </button>
+      </div>
+      <hr className="settings-divider" />
+      <h2>Version</h2>
+      <p className="hint">You have Novaroom {APP_VERSION}.</p>
+      <p className="hint" role="status" aria-live="polite">
+        {status}
+      </p>
+      {installing && progress !== null && progress < 1 && (
+        <span className="update-progress" aria-hidden="true">
+          <span style={{ width: `${Math.round(progress * 100)}%` }} />
+        </span>
+      )}
+      {!installing && (
+        <div className="update-actions settings-update-actions">
+          <button
+            type="button"
+            className="button secondary"
+            disabled={checking}
+            onClick={() => void checkNow(true)}
+          >
+            {checking ? "Checking…" : "Check for updates"}
+          </button>
+          {update && (
+            <button type="button" className="button" disabled={checking} onClick={installUpdate}>
+              Update now
+            </button>
+          )}
+        </div>
       )}
       {error && (
         <p className="form-error" role="alert">

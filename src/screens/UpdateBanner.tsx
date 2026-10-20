@@ -1,40 +1,14 @@
-import { useEffect, useState } from "react"
-import { beforeExit } from "../lib/unsaved"
-import { checkForUpdate, type AvailableUpdate } from "../lib/updater"
+import { useState } from "react"
+import { installUpdate, useUpdates } from "../lib/updater"
 
-// First check shortly after start-up (so it does not slow sign-in), then every few hours.
-const FIRST_CHECK_MS = 15 * 1000
-const CHECK_EVERY_MS = 6 * 60 * 60 * 1000
-
-// Offers a newer version of the app when one has been released, and installs it on request.
+// Offers a newer version of the app when one has been released, and shows it installing — on request,
+// or straight away when automatic updates are on (Settings → Updates).
 export function UpdateBanner() {
-  const [update, setUpdate] = useState<AvailableUpdate | null>(null)
+  const { update, progress, error } = useUpdates()
   const [dismissed, setDismissed] = useState<string | null>(null)
-  const [progress, setProgress] = useState<number | null | undefined>(undefined)
-  const [error, setError] = useState("")
 
-  useEffect(() => {
-    let active = true
-    const run = () => {
-      void checkForUpdate()
-        .then((next) => {
-          if (active && next) setUpdate(next)
-        })
-        .catch(() => {
-          // Offline or the release server is unreachable; try again at the next check.
-        })
-    }
-    const first = window.setTimeout(run, FIRST_CHECK_MS)
-    const repeat = window.setInterval(run, CHECK_EVERY_MS)
-    return () => {
-      active = false
-      window.clearTimeout(first)
-      window.clearInterval(repeat)
-    }
-  }, [])
-
-  if (!update || dismissed === update.version) return null
   const installing = progress !== undefined
+  if (!update || (dismissed === update.version && !installing)) return null
 
   return (
     <div className="update-banner" role="status" aria-live="polite">
@@ -62,21 +36,7 @@ export function UpdateBanner() {
           <button type="button" className="button secondary" onClick={() => setDismissed(update.version)}>
             Later
           </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() =>
-              // Installing restarts the app, so unsaved changes are saved or discarded first.
-              beforeExit(() => {
-                setError("")
-                setProgress(null)
-                void update.install(setProgress).catch((caught) => {
-                  setProgress(undefined)
-                  setError(caught instanceof Error ? caught.message : "The update could not be installed. Try again later.")
-                })
-              })
-            }
-          >
+          <button type="button" className="button" onClick={installUpdate}>
             {error ? "Try again" : "Update now"}
           </button>
         </div>

@@ -346,6 +346,16 @@ function StartupIcon() {
   )
 }
 
+function UpdatesIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
+      <path d="M19.5 4v4h-4" />
+      <path d="M12 8.5v4l2.5 1.5" />
+    </svg>
+  )
+}
+
 function AboutIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -453,6 +463,7 @@ const PEOPLE_ICONS: Record<PeopleFilter, ComponentType> = {
 const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
   appearance: AppearanceIcon,
   startup: StartupIcon,
+  updates: UpdatesIcon,
   about: AboutIcon,
   safety: SafetyIcon,
 }
@@ -460,6 +471,7 @@ const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
 const SETTINGS_HINTS: Record<SettingsTab, string> = {
   appearance: "Light, dark, or system",
   startup: "Open when Windows starts",
+  updates: "Check and install new versions",
   about: "Version, privacy, terms",
   safety: "Blocked people",
 }
