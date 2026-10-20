@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from "react"
 import { useAuth } from "../auth"
-import { notifyIncoming, setTaskbarBadge, windowIsActive } from "../lib/desktop"
+import { notifyIncoming, onNotificationClick, setTaskbarBadge, windowIsActive } from "../lib/desktop"
+import { useReconnectEpoch } from "../lib/network"
 import { readUnread, unreadTotal, writeUnread } from "../lib/unread"
 import {
   blockUser,
@@ -718,6 +719,10 @@ export function AppShell() {
   // The message last reported, so a thank-you note shows under it in the message list.
   const [reportedId, setReportedId] = useState<string | null>(null)
   const [rooms, setRooms] = useState<RoomInfo[]>([])
+  // Goes up each time the connection returns after being lost.
+  const epoch = useReconnectEpoch()
+  // Handles a click on a desktop notification; replaced each render so it sees the latest state.
+  const notificationClickRef = useRef<(target: string) => void>(() => {})
   const selectedRef = useRef<string | null>(null)
   const blockedRef = useRef<string[]>([])
   const logRef = useRef<HTMLDivElement>(null)
@@ -920,7 +925,7 @@ export function AppShell() {
               void setTaskbarBadge(unreadTotal(next))
               return next
             })
-            void notifyIncoming(message.senderName || "Novaroom", messageLabel(message))
+            void notifyIncoming(message.senderName || "Novaroom", messageLabel(message), `chat:${message.conversationId}`)
           })
         }
         setMessages((current) => {
@@ -940,12 +945,55 @@ export function AppShell() {
         void loadMessages(openId).then(setMessages).catch(() => undefined)
       },
     })
-  }, [session])
+  }, [session, epoch])
+
+  // When the connection comes back, load what was missed while it was down. Requests that were
+  // waiting when it dropped have failed by now, so this also ends any loading they left behind.
+  useEffect(() => {
+    if (!session || epoch === 0) return
+    let active = true
+    void listChats(session)
+      .then((next) => {
+        if (!active) return
+        setChats(next)
+        setStartError("")
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setChatsLoaded(true)
+      })
+    void listRooms(session)
+      .then((next) => {
+        if (active) setRooms(next)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setRoomsLoaded(true)
+      })
+    const openId = selectedRef.current
+    if (openId) {
+      void loadMessages(openId)
+        .then((next) => {
+          if (!active || selectedRef.current !== openId) return
+          setMessages(next)
+          setSendError("")
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (active && selectedRef.current === openId) setLoadingMessages(false)
+        })
+    }
+    return () => {
+      active = false
+    }
+  }, [session, epoch])
 
   useEffect(() => {
     const node = logRef.current
     if (node) node.scrollTop = node.scrollHeight
   }, [messages, selectedId])
+
+  useEffect(() => onNotificationClick((target) => notificationClickRef.current(target)), [])
 
   // Who else is typing in the open chat. People this person blocked are never shown.
   const typing = useTyping(selectedId, session?.userId ?? null, profile?.displayName ?? "")
@@ -1162,6 +1210,11 @@ export function AppShell() {
   }, [body, selectedId])
 
   const conversations = chats.filter((chat) => chat.kind !== "room")
+  // Unread messages per navbar section, counting only conversations this person is still in.
+  const unreadChats = conversations.reduce((sum, chat) => sum + (unread[chat.id] > 0 ? unread[chat.id] : 0), 0)
+  const unreadRooms = chats
+    .filter((chat) => chat.kind === "room")
+    .reduce((sum, chat) => sum + (unread[chat.id] > 0 ? unread[chat.id] : 0), 0)
   const contacts = chats.filter((chat) => chat.kind === "direct" && chat.otherUserId)
   const profileHints: Record<ProfileTab, string> = {
     edit: "Name, status, avatar",
@@ -1197,6 +1250,26 @@ export function AppShell() {
     setView("chats")
     setSearch("")
     markChatRead(chatId)
+  }
+
+  // Clicking a desktop notification opens what it was about: the chat a message came from, or the
+  // LeadDesk tab for a task or event.
+  notificationClickRef.current = (target) => {
+    const [kind, id] = [target.slice(0, target.indexOf(":")), target.slice(target.indexOf(":") + 1)]
+    if (kind === "chat" && id) {
+      leaveTo(() => {
+        const chat = chats.find((item) => item.id === id)
+        setSection(chat?.kind === "room" ? "rooms" : "chats")
+        setComposer(null)
+        setStartError("")
+        openChat(id)
+      })
+    } else if (kind === "desk" && hasLeadDesk && (id === "tasks" || id === "schedule")) {
+      leaveTo(() => {
+        setDeskTab(id)
+        setView("leaddesk")
+      })
+    }
   }
 
   function selectNav(item: NavItem) {
@@ -1238,7 +1311,11 @@ export function AppShell() {
               : section
         }
         showLeadDesk={hasLeadDesk}
-        badges={{ leaddesk: unreadDeskEvents.length + unreadDeskTasks.length }}
+        badges={{
+          chats: unreadChats,
+          rooms: unreadRooms,
+          leaddesk: unreadDeskEvents.length + unreadDeskTasks.length,
+        }}
         onSelect={(item) => {
           if (item === "vault" && view === "vault") {
             vault.selectTable(vault.data?.tables[0]?.id ?? null)

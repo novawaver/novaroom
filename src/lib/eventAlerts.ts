@@ -42,7 +42,8 @@ export function subscribeToAlerts(userId: string, onAlert: (alert: EventAlert) =
   if (!supabase) return () => {}
   const client = supabase
   const channel = client
-    .channel(`leaddesk-notifications-${userId}`)
+    // A fresh topic each time: reusing one that is still closing would leave this subscription dead.
+    .channel(`leaddesk-notifications-${userId}:${crypto.randomUUID()}`)
     .on(
       "postgres_changes",
       { event: "INSERT", schema: "public", table: "leaddesk_notifications", filter: `user_id=eq.${userId}` },

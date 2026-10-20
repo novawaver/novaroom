@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { controlWindow, watchMaximized } from "../lib/desktop"
+import { NetworkStatus } from "./NetworkStatus"
 
 function MinimizeIcon() {
   return (
@@ -45,31 +46,34 @@ export function TitleBar() {
         <img src="/logo.png" alt="" width={16} height={16} data-tauri-drag-region />
         <span data-tauri-drag-region>Novaroom</span>
       </div>
-      <div className="titlebar-controls">
-        <button
-          type="button"
-          className="titlebar-button"
-          aria-label="Minimize"
-          onClick={() => controlWindow("minimize")}
-        >
-          <MinimizeIcon />
-        </button>
-        <button
-          type="button"
-          className="titlebar-button"
-          aria-label={maximized ? "Restore" : "Maximize"}
-          onClick={() => controlWindow("toggle-maximize")}
-        >
-          {maximized ? <RestoreIcon /> : <MaximizeIcon />}
-        </button>
-        <button
-          type="button"
-          className="titlebar-button close"
-          aria-label="Close"
-          onClick={() => controlWindow("close")}
-        >
-          <CloseIcon />
-        </button>
+      <div className="titlebar-end">
+        <NetworkStatus />
+        <div className="titlebar-controls">
+          <button
+            type="button"
+            className="titlebar-button"
+            aria-label="Minimize"
+            onClick={() => controlWindow("minimize")}
+          >
+            <MinimizeIcon />
+          </button>
+          <button
+            type="button"
+            className="titlebar-button"
+            aria-label={maximized ? "Restore" : "Maximize"}
+            onClick={() => controlWindow("toggle-maximize")}
+          >
+            {maximized ? <RestoreIcon /> : <MaximizeIcon />}
+          </button>
+          <button
+            type="button"
+            className="titlebar-button close"
+            aria-label="Close"
+            onClick={() => controlWindow("close")}
+          >
+            <CloseIcon />
+          </button>
+        </div>
       </div>
     </header>
   )

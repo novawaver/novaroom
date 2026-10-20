@@ -76,13 +76,15 @@ export async function setTaskbarBadge(count: number) {
   overlay = image
 }
 
-export async function notifyIncoming(title: string, body: string) {
+// target: what clicking the notification opens, such as "chat:<id>" or "desk:tasks". It comes back
+// through onNotificationClick.
+export async function notifyIncoming(title: string, body: string, target?: string) {
   if (!inTauri()) return
   const text = { title: title || "Novaroom", body: body.slice(0, 180) }
   // On Windows the app shows its own toast, which opens the window when clicked.
   try {
     const { invoke } = await import("@tauri-apps/api/core")
-    await invoke("notify", text)
+    await invoke("notify", { ...text, target: target ?? null })
     return
   } catch {
     // Not Windows, or the toast could not be built; fall back to the plugin's notification.
@@ -96,6 +98,23 @@ export async function notifyIncoming(title: string, body: string) {
   }
   if (!granted) return
   sendNotification(text)
+}
+
+// Calls onClick with the target given to notifyIncoming when the person clicks a notification.
+// Returns an unsubscribe.
+export function onNotificationClick(onClick: (target: string) => void) {
+  if (!inTauri()) return () => {}
+  let unlisten: (() => void) | null = null
+  let stopped = false
+  import("@tauri-apps/api/event").then(async ({ listen }) => {
+    const stop = await listen<string>("notification-clicked", (event) => onClick(event.payload))
+    if (stopped) stop()
+    else unlisten = stop
+  })
+  return () => {
+    stopped = true
+    unlisten?.()
+  }
 }
 
 // True only when the person can actually see the app: the page is visible and focused, and in the

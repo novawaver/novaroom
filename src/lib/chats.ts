@@ -688,7 +688,8 @@ export function subscribeToMessages(handlers: {
 
   const client = supabase
   const channel: RealtimeChannel = client
-    .channel("novaroom-messages")
+    // A fresh topic each time: reusing one that is still closing would leave this subscription dead.
+    .channel(`novaroom-messages:${crypto.randomUUID()}`)
     .on(
       "postgres_changes",
       { event: "INSERT", schema: "public", table: "messages" },

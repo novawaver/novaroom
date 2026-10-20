@@ -446,7 +446,8 @@ export function subscribeToDeskChanges(onChange: () => void) {
   if (!supabase) return () => {}
   const client = supabase
   const channel = client
-    .channel("leaddesk-changes")
+    // A fresh topic each time: reusing one that is still closing would leave this subscription dead.
+    .channel(`leaddesk-changes:${crypto.randomUUID()}`)
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_events" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_tasks" }, () => onChange())
     // Someone may have lost access to an event, which the events stream above cannot tell them.

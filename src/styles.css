@@ -121,6 +121,53 @@ button {
   height: 100%;
 }
 
+.titlebar-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+}
+
+.network-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--side-muted);
+  white-space: nowrap;
+}
+
+.network-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--side-muted);
+}
+
+.network-status.good .network-dot {
+  background: #2f9e5b;
+}
+
+.network-status.slow .network-dot {
+  background: #d99a1e;
+}
+
+.network-status.offline {
+  color: var(--danger);
+}
+
+.network-status.offline .network-dot {
+  background: var(--danger);
+  animation: network-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes network-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .titlebar-button {
   width: 46px;
   height: 100%;

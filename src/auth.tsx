@@ -204,7 +204,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .catch(() => {})
     }
     const channel = client
-      .channel(`profile-${userId}`)
+      .channel(`profile-${userId}:${crypto.randomUUID()}`)
       .on(
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "profiles", filter: `id=eq.${userId}` },

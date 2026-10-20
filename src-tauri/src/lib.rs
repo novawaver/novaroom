@@ -52,8 +52,10 @@ fn request_quit(app: &tauri::AppHandle) {
 
 /// Shows a Windows toast that brings the window forward when clicked. The notification plugin's
 /// toasts have no click handler on desktop, so clicking them did nothing.
+/// target says what the click should open (for example "chat:<id>"); it is sent back to the window
+/// as a "notification-clicked" event.
 #[tauri::command]
-fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+fn notify(app: tauri::AppHandle, title: String, body: String, target: Option<String>) -> Result<(), String> {
     #[cfg(windows)]
     {
         use tauri_winrt_notification::Toast;
@@ -78,6 +80,9 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
                 .text1(&body)
                 .on_activated(move |_| {
                     show_main(&clicked);
+                    if let Some(target) = &target {
+                        let _ = clicked.emit("notification-clicked", target.clone());
+                    }
                     Ok(())
                 })
                 .show();
@@ -86,7 +91,7 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, title, body);
+        let _ = (app, title, body, target);
         Err("Clickable notifications are only built for Windows.".into())
     }
 }

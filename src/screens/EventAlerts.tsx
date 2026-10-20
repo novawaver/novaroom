@@ -15,6 +15,7 @@ import {
   type DeskEvent,
   type DeskTask,
 } from "../lib/leaddesk"
+import { useReconnectEpoch } from "../lib/network"
 
 // tab: the LeadDesk tab that clicking the toast opens.
 export type Toast = { id: string; title: string; body: string; tab: "schedule" | "tasks" }
@@ -46,11 +47,13 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
   const localTaskReadsRef = useRef(new Set<string>())
   const remoteChangeRef = useRef(onRemoteChange)
   remoteChangeRef.current = onRemoteChange
+  // Subscriptions are made again, and missed changes loaded, each time the connection comes back.
+  const epoch = useReconnectEpoch()
 
   const show = useCallback((key: string, title: string, body: string, tab: Toast["tab"] = "schedule") => {
     if (shownRef.current.has(key)) return
     shownRef.current.add(key)
-    void notifyIncoming(title, body)
+    void notifyIncoming(title, body, `desk:${tab}`)
     setToasts((current) => [...current.slice(-3), { id: key, title, body, tab }])
     window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== key)), TOAST_MS)
   }, [])
@@ -105,7 +108,7 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
       active = false
       stop()
     }
-  }, [userId, show, refreshEvents, refreshTasks])
+  }, [userId, show, refreshEvents, refreshTasks, epoch])
 
   // Start-time reminders for events this person takes part in.
   useEffect(() => {
@@ -156,11 +159,16 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
       void refreshTasks()
       remoteChangeRef.current?.()
     })
+    // After a reconnect, also reload an open LeadDesk page with whatever changed meanwhile.
+    if (epoch > 0) {
+      void refreshEvents()
+      remoteChangeRef.current?.()
+    }
     return () => {
       active = false
       stop()
     }
-  }, [userId, isLeader, refreshEvents, refreshTasks])
+  }, [userId, isLeader, refreshEvents, refreshTasks, epoch])
 
   const unread = useMemo(
     () => (userId && readIds ? unreadEvents(events, readIds, userId) : []),
