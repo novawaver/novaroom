@@ -4,6 +4,7 @@ import { inTauri } from "./desktop"
 
 export type VaultColumnKind =
   | "text"
+  | "notes"
   | "number"
   | "date"
   | "checkbox"
@@ -12,10 +13,12 @@ export type VaultColumnKind =
   | "password"
   | "link"
   | "list"
+  | "links"
   | "subtable"
 
 export const VAULT_COLUMN_KINDS: Array<{ id: VaultColumnKind; label: string }> = [
   { id: "text", label: "Text" },
+  { id: "notes", label: "Notes" },
   { id: "number", label: "Number" },
   { id: "date", label: "Date" },
   { id: "checkbox", label: "Yes / no" },
@@ -24,24 +27,33 @@ export const VAULT_COLUMN_KINDS: Array<{ id: VaultColumnKind; label: string }> =
   { id: "password", label: "Password" },
   { id: "link", label: "Link" },
   { id: "list", label: "List" },
+  { id: "links", label: "List of links" },
   { id: "subtable", label: "Sub-table" },
 ]
 
 /** Kinds a Sub-table's own columns can have: no Links and no Sub-tables inside Sub-tables. */
-export type VaultSubKind = Exclude<VaultColumnKind, "link" | "subtable">
+export type VaultSubKind = Exclude<VaultColumnKind, "link" | "links" | "subtable">
 
 export const VAULT_SUB_KINDS = VAULT_COLUMN_KINDS.filter(
-  (kind): kind is { id: VaultSubKind; label: string } => kind.id !== "link" && kind.id !== "subtable",
+  (kind): kind is { id: VaultSubKind; label: string } =>
+    kind.id !== "link" && kind.id !== "links" && kind.id !== "subtable",
 )
 
-// List cells hold their lines; Sub-table cells hold their own rows.
+/** Whether a column's cells point at rows of another table: one row (Link) or several (List of links). */
+export function linksRows(kind: VaultColumnKind): kind is "link" | "links" {
+  return kind === "link" || kind === "links"
+}
+
+// List cells hold their lines, List of links cells the ids of the rows they point to, and
+// Sub-table cells their own rows.
 export type VaultCell = string | number | boolean | null | string[] | VaultRow[]
 
 export type VaultColumn = {
   id: string
   name: string
   kind: VaultColumnKind
-  // Link columns: the table whose rows the cells point to. Each cell holds one row id from it.
+  // Link and List of links columns: the table whose rows the cells point to. A Link cell holds one
+  // row id from it, a List of links cell several.
   target?: string
   // Sub-table columns: the columns of the small table inside each cell.
   columns?: VaultColumn[]
@@ -157,6 +169,8 @@ export function convertCell(value: VaultCell, kind: VaultColumnKind): VaultCell 
   if (value === null || value === "") return null
   // Sub-table rows only fit a Sub-table; nothing else can become one.
   if (kind === "subtable" || (Array.isArray(value) && subRows(value).length > 0)) return null
+  // Row ids only mean something to a Link column, so other values cannot become links.
+  if (linksRows(kind)) return null
   if (kind === "list") {
     const text = typeof value === "boolean" ? (value ? "Yes" : "No") : String(value)
     const lines = Array.isArray(value) ? listItems(value) : text.split(/\r?\n/)
@@ -170,13 +184,11 @@ export function convertCell(value: VaultCell, kind: VaultColumnKind): VaultCell 
   }
   switch (kind) {
     case "text":
+    case "notes":
     case "email":
     case "url":
     case "password":
       return typeof value === "boolean" ? (value ? "Yes" : "No") : String(value)
-    case "link":
-      // Row ids only mean something to a Link column, so other values cannot become links.
-      return null
     case "number": {
       const number = typeof value === "number" ? value : Number(value)
       return Number.isFinite(number) && typeof value !== "boolean" ? number : null
@@ -198,6 +210,7 @@ export function cellText(value: VaultCell, kind: VaultColumnKind, linkLabel?: (r
   if (value === null || value === undefined || kind === "password") return ""
   if (kind === "checkbox") return value === true ? "yes" : "no"
   if (kind === "link") return linkLabel && typeof value === "string" ? linkLabel(value) : ""
+  if (kind === "links") return linkLabel ? listItems(value).map(linkLabel).join(" ") : ""
   if (kind === "list") return listItems(value).join(" ")
   if (kind === "subtable") return ""
   return String(value)
@@ -271,11 +284,13 @@ export function sortRows(
     const shown = (value: VaultCell | undefined): VaultCell | undefined =>
       column.kind === "link" && typeof value === "string"
         ? (linkLabel?.(value) ?? "")
-        : column.kind === "list"
-          ? (listItems(value)[0] ?? null)
-          : column.kind === "subtable"
-            ? subRows(value).length || null
-            : value
+        : column.kind === "links"
+          ? (listItems(value).map((id) => linkLabel?.(id) ?? "")[0] ?? null)
+          : column.kind === "list"
+            ? (listItems(value)[0] ?? null)
+            : column.kind === "subtable"
+              ? subRows(value).length || null
+              : value
     const left = shown(a.cells[column.id])
     const right = shown(b.cells[column.id])
     // An untouched box and an unticked one both mean "no".
@@ -371,6 +386,7 @@ export function filterOps(kind: VaultColumnKind): Array<{ id: FilterOp; label: s
         { id: "empty", label: "has no items" },
       ]
     case "list":
+    case "links":
       return [
         { id: "contains", label: "has an item containing" },
         { id: "notContains", label: "has no item containing" },
@@ -410,7 +426,7 @@ export function passesFilter(
   const isEmpty =
     column.kind === "subtable"
       ? subRows(value).length === 0
-      : column.kind === "list"
+      : column.kind === "list" || column.kind === "links"
         ? listItems(value).length === 0
         : value === null || value === ""
   switch (filter.op) {
@@ -457,12 +473,14 @@ export function passesFilter(
   const texts =
     column.kind === "list"
       ? listItems(value).map((item) => item.toLowerCase())
-      : [
-          (column.kind === "subtable"
-            ? subTableText(value, column.columns ?? [])
-            : cellText(value, column.kind, linkLabel)
-          ).toLowerCase(),
-        ]
+      : column.kind === "links"
+        ? listItems(value).map((id) => (linkLabel?.(id) ?? "").toLowerCase())
+        : [
+            (column.kind === "subtable"
+              ? subTableText(value, column.columns ?? [])
+              : cellText(value, column.kind, linkLabel)
+            ).toLowerCase(),
+          ]
   switch (filter.op) {
     case "contains":
       return texts.some((text) => text.includes(wanted))
@@ -489,7 +507,7 @@ function duplicateKey(value: VaultCell | undefined, column: VaultColumn): string
   if (Array.isArray(value)) return JSON.stringify(listItems(value).map((item) => duplicateKey(item, column)))
   if (value === null || value === undefined) return ""
   // Links compare the row they point to, which is the same whatever that row is called.
-  if (typeof value === "string" && column.kind !== "link") return value.trim().replace(/\s+/g, " ").toLowerCase()
+  if (typeof value === "string" && !linksRows(column.kind)) return value.trim().replace(/\s+/g, " ").toLowerCase()
   return String(value)
 }
 

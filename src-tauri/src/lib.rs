@@ -5,6 +5,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
+mod localchat;
 mod vault;
 
 /// The argument Windows passes when it starts Novaroom at sign-in, so we can tell that launch apart.
@@ -221,6 +222,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(UnsavedChanges::default())
+        .manage(localchat::LocalChat::default())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name(AUTOSTART_NAME)
@@ -237,7 +239,14 @@ pub fn run() {
             vault::vault_create,
             vault::vault_pick,
             vault::vault_read,
-            vault::vault_write
+            vault::vault_write,
+            localchat::local_chat_start,
+            localchat::local_chat_stop,
+            localchat::local_chat_set_directory,
+            localchat::local_chat_peers,
+            localchat::local_chat_chats,
+            localchat::local_chat_messages,
+            localchat::local_chat_send
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -253,11 +262,13 @@ pub fn run() {
             if !cfg!(debug_assertions) {
                 let _ = apply_launch_at_login(app.handle(), startup.launch_at_login);
             }
+            // The window starts hidden (see tauri.conf.json) and is only shown here. Minimizing a
+            // window that was already showing did not stick: it could still open at sign-in. Now a
+            // minimized start never shows it, and Novaroom waits in the tray as it does after the
+            // window is closed.
             let launched_at_login = std::env::args().any(|arg| arg == AUTOSTART_ARG);
-            if launched_at_login && startup.start_minimized {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.minimize();
-                }
+            if !(launched_at_login && startup.start_minimized) {
+                show_main(app.handle());
             }
 
             let show = MenuItem::with_id(app, "show", "Show Novaroom", true, None::<&str>)?;

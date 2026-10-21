@@ -43,6 +43,7 @@ import { SETTINGS_TABS, Settings, type SettingsTab } from "./Settings"
 import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
 import { groupTables } from "../lib/vault"
 import { Vault, VaultLeaveDialog, useVault } from "./Vault"
+import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
 
 function NewChatIcon() {
   return (
@@ -542,27 +543,100 @@ const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
   { id: "settings", label: "Settings", icon: SettingsNavIcon },
 ]
 
+type ChatMode = "online" | "local"
+
+/** Switches the Chats page between chats over the internet and Local chat on the office network. */
+function ChatModeSwitch({
+  mode,
+  unread,
+  onChange,
+}: {
+  mode: ChatMode
+  unread: Record<ChatMode, number>
+  onChange: (mode: ChatMode) => void
+}) {
+  const modes: Array<{ id: ChatMode; label: string; hint: string }> = [
+    { id: "online", label: "Online", hint: "Chats over the internet" },
+    { id: "local", label: "Local", hint: "Chats with people on this network, without internet" },
+  ]
+  return (
+    <div className="chat-mode" role="tablist" aria-label="Kind of chat">
+      {modes.map(({ id, label, hint }) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          className="chat-mode-tab"
+          aria-selected={mode === id}
+          title={hint}
+          onClick={() => onChange(id)}
+        >
+          {label}
+          {unread[id] > 0 && <span className="chat-mode-count">{unread[id] > 9 ? "9+" : unread[id]}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function MenuIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.5 7h15M4.5 12h15M4.5 17h15" />
+    </svg>
+  )
+}
+
+// Whether the nav bar shows labels next to its icons, remembered on this computer.
+const NAV_EXPANDED_KEY = "novaroom.nav-expanded"
+
+function readNavExpanded() {
+  try {
+    return localStorage.getItem(NAV_EXPANDED_KEY) === "true"
+  } catch {
+    return false
+  }
+}
+
 function NavBar({
   active,
   showLeadDesk,
   badges,
   onSelect,
   footer,
+  expanded,
+  onToggle,
 }: {
   active: NavItem | null
   showLeadDesk: boolean
   badges?: Partial<Record<NavItem, number>>
   onSelect: (item: NavItem) => void
   footer?: ReactNode
+  // Icons only when collapsed (labels still read out and shown on hover); labels beside them when expanded.
+  expanded: boolean
+  onToggle: () => void
 }) {
   return (
-    <nav className="navbar" aria-label="Sections">
+    <nav className={expanded ? "navbar expanded" : "navbar"} aria-label="Sections">
+      <button
+        type="button"
+        className="nav-item nav-toggle"
+        aria-expanded={expanded}
+        aria-label={expanded ? "Collapse menu" : "Expand menu"}
+        title={expanded ? "Collapse menu" : "Expand menu"}
+        onClick={onToggle}
+      >
+        <span className="nav-tile">
+          <MenuIcon />
+        </span>
+      </button>
       {NAV_ITEMS.filter(({ id }) => id !== "leaddesk" || showLeadDesk).map(({ id, label, icon: Icon }) => (
         <button
           key={id}
           type="button"
           className="nav-item"
           aria-current={active === id ? "page" : undefined}
+          title={expanded ? undefined : label}
           onClick={() => onSelect(id)}
         >
           <span className="nav-tile">
@@ -573,7 +647,7 @@ function NavBar({
               </span>
             ) : null}
           </span>
-          <span>{label}</span>
+          <span className="nav-label">{label}</span>
         </button>
       ))}
       {footer}
@@ -604,12 +678,16 @@ function isImage(mime: string | null) {
   return Boolean(mime?.startsWith("image/") && mime !== "image/svg+xml")
 }
 
-export function AppShell() {
+// local: Local chat, which runs for the whole app (see App.tsx) so it keeps going offline.
+export function AppShell({ local }: { local: LocalChatState }) {
   const { session, profile, roleChange, dismissRoleChange, signOut } = useAuth()
-  const [view, setView] = useState<"chats" | "profile" | "people" | "leaddesk" | "timer" | "vault" | "settings">("chats")
+  const [view, setView] = useState<"chats" | "profile" | "local" | "people" | "leaddesk" | "timer" | "vault" | "settings">("chats")
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance")
   const [profileTab, setProfileTab] = useState<ProfileTab>("edit")
   const [peopleFilter, setPeopleFilter] = useState<PeopleFilter>("all")
+  const [navExpanded, setNavExpanded] = useState(readNavExpanded)
+  // Which kind of chat the Chats page shows; Local chat is the "local" view.
+  const [chatMode, setChatMode] = useState<ChatMode>("online")
   const [deskTab, setDeskTab] = useState<LeadDeskTab>("tasks")
   const isLeader = profile?.role === LEADERSHIP
   // Admins get everything Leadership members have, without the limits an admin sets for them.
@@ -1268,7 +1346,14 @@ export function AppShell() {
   // LeadDesk tab for a task or event.
   notificationClickRef.current = (target) => {
     const [kind, id] = [target.slice(0, target.indexOf(":")), target.slice(target.indexOf(":") + 1)]
-    if (kind === "chat" && id) {
+    if (kind === "local" && id) {
+      leaveTo(() => {
+        local.select(id)
+        setSection("chats")
+        setChatMode("local")
+        setView("local")
+      })
+    } else if (kind === "chat" && id) {
       leaveTo(() => {
         const chat = chats.find((item) => item.id === id)
         setSection(chat?.kind === "room" ? "rooms" : "chats")
@@ -1284,8 +1369,25 @@ export function AppShell() {
     }
   }
 
+  const chatModeSwitch = (
+    <ChatModeSwitch
+      mode={view === "local" ? "local" : "online"}
+      unread={{ online: unreadChats, local: local.unreadTotal }}
+      onChange={(mode) => {
+        setChatMode(mode)
+        setView(mode === "local" ? "local" : "chats")
+      }}
+    />
+  )
+
   function selectNav(item: NavItem) {
-    if (item === "settings" || item === "people" || item === "leaddesk" || item === "timer" || item === "vault") {
+    if (
+      item === "settings" ||
+      item === "people" ||
+      item === "leaddesk" ||
+      item === "timer" ||
+      item === "vault"
+    ) {
       // Clicking the page that is already open takes it back to its first tab.
       if (item === view) {
         if (item === "settings") setSettingsTab("appearance")
@@ -1297,6 +1399,11 @@ export function AppShell() {
       return
     }
     setSection(item)
+    // Chats opens on whichever kind of chat was last shown.
+    if (item === "chats" && chatMode === "local") {
+      setView("local")
+      return
+    }
     setView("chats")
     setComposer(null)
     setStartError("")
@@ -1313,18 +1420,34 @@ export function AppShell() {
   }
 
   return (
-    <div className="shell">
+    <div className={navExpanded ? "shell nav-open" : "shell"}>
       <NavBar
+        expanded={navExpanded}
+        onToggle={() => {
+          const next = !navExpanded
+          setNavExpanded(next)
+          try {
+            localStorage.setItem(NAV_EXPANDED_KEY, String(next))
+          } catch {
+            // Not remembered; the choice still applies until the app closes.
+          }
+        }}
         active={
-          view === "settings" || view === "people" || view === "leaddesk" || view === "timer" || view === "vault"
+          view === "settings" ||
+          view === "people" ||
+          view === "leaddesk" ||
+          view === "timer" ||
+          view === "vault"
             ? view
             : view === "profile"
               ? null
-              : section
+              : view === "local"
+                ? "chats"
+                : section
         }
         showLeadDesk={hasLeadDesk}
         badges={{
-          chats: unreadChats,
+          chats: unreadChats + local.unreadTotal,
           rooms: unreadRooms,
           leaddesk: unreadDeskEvents.length + unreadDeskTasks.length,
         }}
@@ -1347,22 +1470,30 @@ export function AppShell() {
               leaveTo(() => setView("profile"))
             }}
           >
-            <span className="avatar">
-              {profile.avatarUrl ? (
-                <img src={profile.avatarUrl} alt="" />
-              ) : (
-                <span>{initials(profile.displayName || session.email)}</span>
-              )}
+            <span className="nav-profile-photo">
+              <span className="avatar">
+                {profile.avatarUrl ? (
+                  <img src={profile.avatarUrl} alt="" />
+                ) : (
+                  <span>{initials(profile.displayName || session.email)}</span>
+                )}
+              </span>
+              <span
+                className={`presence-dot nav-presence ${presenceOf(session.userId)}`}
+                title={PRESENCE_LABELS[presenceOf(session.userId)]}
+              />
             </span>
-            <span
-              className={`presence-dot nav-presence ${presenceOf(session.userId)}`}
-              title={PRESENCE_LABELS[presenceOf(session.userId)]}
-            />
+            {navExpanded && <span className="nav-label">{profile.displayName || session.email}</span>}
           </button>
         }
       />
       <aside className="rail">
-        {view === "timer" ? (
+        {view === "local" ? (
+          <>
+            {chatModeSwitch}
+            <LocalChatRail local={local} />
+          </>
+        ) : view === "timer" ? (
           <SideMenu
             label="Time ranges"
             items={TIMER_RANGES.map(({ id, label }) => ({
@@ -1471,6 +1602,7 @@ export function AppShell() {
           />
         ) : (
           <>
+        {section === "chats" && chatModeSwitch}
         <div className="rail-head">
           <p className="list-label">{section === "chats" ? "Chats" : "Rooms"}</p>
           {section === "chats" && (
@@ -1661,7 +1793,9 @@ export function AppShell() {
           </>
         )}
       </aside>
-      {view === "timer" ? (
+      {view === "local" ? (
+        <LocalChatThread local={local} userId={session.userId} />
+      ) : view === "timer" ? (
         <Timer
           range={timerRange}
           zone={timerZone}

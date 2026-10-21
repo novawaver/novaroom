@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { supabase } from "./supabase"
 import { IDLE_AFTER_SECONDS, systemIdleSeconds } from "./timer"
 
@@ -39,6 +39,8 @@ export function usePresence(userId: string | null) {
   }, [userId])
 
   const [channel, setChannel] = useState<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null)
+  const selfRef = useRef(self)
+  selfRef.current = self
 
   useEffect(() => {
     setOthers(new Map())
@@ -55,7 +57,12 @@ export function usePresence(userId: string | null) {
         setOthers(next)
       })
       .subscribe((status) => {
-        if (status === "SUBSCRIBED") setChannel(joined)
+        if (status === "SUBSCRIBED") {
+          setChannel(joined)
+          // The server forgets this person when the connection drops, and the channel rejoins by
+          // itself afterwards, so say again who is here every time it joins.
+          void joined.track({ status: selfRef.current })
+        }
       })
     return () => {
       setChannel(null)

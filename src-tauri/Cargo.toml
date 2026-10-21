@@ -1,6 +1,6 @@
 [package]
 name = "novaroom-app"
-version = "0.1.6"
+version = "0.1.7"
 description = "Chat for AI trainers"
 authors = ["Novawave"]
 edition = "2021"
@@ -29,6 +29,9 @@ tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 tauri-plugin-single-instance = "2"
+snow = "0.10"
+mdns-sd = "0.21"
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt"] }
 
 # Reads how long the computer has had no keyboard or mouse input, for the Timer.
 [target.'cfg(windows)'.dependencies]

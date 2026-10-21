@@ -15,9 +15,11 @@ use tauri_plugin_dialog::DialogExt;
 const VAULT_APP: &str = "novaroom-vault";
 /// The newest Vault this app can open. New files start at 1, and a save only raises the version
 /// when the Vault needs it, so older Novaroom versions keep opening files that do not.
-const VAULT_VERSION: i64 = 2;
+const VAULT_VERSION: i64 = 3;
 /// Version 2 added List and Sub-table columns, whose cells hold arrays an older app cannot show.
 const NESTED_KINDS: [&str; 2] = ["list", "subtable"];
+/// Version 3 added List of links columns, whose cells hold row ids an older app would show as text.
+const LINK_LIST_KINDS: [&str; 1] = ["links"];
 const VAULT_EXTENSION: &str = "vault";
 
 const SCHEMA: &str = "
@@ -240,13 +242,21 @@ fn write(connection: &mut Connection, data: &VaultData) -> Result<(), String> {
             }
         }
     }
-    let nested = data
-        .tables
-        .iter()
-        .any(|table| table.columns.iter().any(|column| NESTED_KINDS.contains(&column.kind.as_str())));
+    let uses = |kinds: &[&str]| {
+        data.tables
+            .iter()
+            .any(|table| table.columns.iter().any(|column| kinds.contains(&column.kind.as_str())))
+    };
+    let version = if uses(&LINK_LIST_KINDS) {
+        "3"
+    } else if uses(&NESTED_KINDS) {
+        "2"
+    } else {
+        "1"
+    };
     tx.execute(
         "INSERT INTO vault_info (key, value) VALUES ('version', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![if nested { "2" } else { "1" }],
+        params![version],
     )
     .map_err(message)?;
     tx.commit().map_err(message)

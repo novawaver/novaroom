@@ -99,7 +99,8 @@ function Startup() {
             <div>
               <strong>Start minimized</strong>
               <p className="hint">
-                Novaroom starts minimized to the taskbar. Turn this off to open the window when Windows starts.
+                Novaroom starts in the system tray, without opening its window. Turn this off to open the window when
+                Windows starts.
               </p>
             </div>
             <button

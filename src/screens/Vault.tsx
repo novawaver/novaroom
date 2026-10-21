@@ -18,6 +18,7 @@ import {
   newTable,
   passesFilter,
   pickVaultFile,
+  linksRows,
   listItems,
   looksLikeEmail,
   webAddress,
@@ -49,6 +50,14 @@ function SaveIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M5 4h11.5L20 7.5V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a1 1 0 0 1 1-1z" />
       <path d="M8 4v4.5h7V4M7.5 20v-6h9v6" />
+    </svg>
+  )
+}
+
+function ExpandIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14 4.5h5.5V10M10 19.5H4.5V14M19.5 4.5l-6 6M4.5 19.5l6-6" />
     </svg>
   )
 }
@@ -387,22 +396,30 @@ export function useVault(userId: string | null, active: boolean) {
     if (!data) return
     const index = data.tables.findIndex((item) => item.id === id)
     const removed = data.tables[index]
-    // Links into the deleted table become Text holding the names they showed, so nothing is lost.
+    // Links into the deleted table become Text (and Lists of links become Lists) holding the names
+    // they showed, so nothing is lost.
     const rest = data.tables
       .filter((item) => item.id !== id)
       .map((item) => {
-        const orphaned = item.columns.filter((column) => column.kind === "link" && column.target === id)
+        const orphaned = item.columns.filter((column) => linksRows(column.kind) && column.target === id)
         if (orphaned.length === 0) return item
         return {
           ...item,
           columns: item.columns.map((column) =>
-            orphaned.includes(column) ? { id: column.id, name: column.name, kind: "text" as const } : column,
+            orphaned.includes(column)
+              ? { id: column.id, name: column.name, kind: column.kind === "links" ? ("list" as const) : ("text" as const) }
+              : column,
           ),
           rows: item.rows.map((row) => {
             const cells = { ...row.cells }
             for (const column of orphaned) {
               const value = cells[column.id]
-              cells[column.id] = typeof value === "string" ? rowLabel(removed, value) : null
+              if (column.kind === "links") {
+                const names = listItems(value)
+                  .map((rowId) => rowLabel(removed, rowId))
+                  .filter((name): name is string => name !== null)
+                cells[column.id] = names.length > 0 ? names : null
+              } else cells[column.id] = typeof value === "string" ? rowLabel(removed, value) : null
             }
             return { ...row, cells }
           }),
@@ -492,8 +509,12 @@ function CellEditor({
 }) {
   const label = column.name || "Cell"
   switch (column.kind) {
+    case "notes":
+      return <NotesEditor label={label} value={value} onChange={onChange} />
     case "list":
       return <ListEditor label={label} value={value} onChange={onChange} />
+    case "links":
+      return <LinksEditor label={label} value={value} onChange={onChange} link={link} />
     case "subtable":
       return <SubTableCell column={column} value={value} editing onChange={onChange} />
     case "email":
@@ -657,6 +678,11 @@ function copyText(column: VaultColumn, value: VaultCell, link?: LinkTarget) {
       return value === true ? "Yes" : "No"
     case "link":
       return typeof value === "string" ? (link?.label(value) ?? "") : ""
+    case "links":
+      return listItems(value)
+        .map((rowId) => link?.label(rowId))
+        .filter(Boolean)
+        .join("\n")
     case "date":
       return typeof value === "string" ? formatDate(value) : ""
     case "list":
@@ -719,6 +745,41 @@ function CellView({ column, value, link }: { column: VaultColumn; value: VaultCe
     )
   }
   if (column.kind === "subtable") return <SubTableCell column={column} value={value} editing={false} />
+  if (column.kind === "notes") {
+    return typeof value === "string" && value ? (
+      <NotesView title={column.name || "Notes"} text={value} />
+    ) : (
+      <span className="vault-cell-view" />
+    )
+  }
+  if (column.kind === "links") {
+    const ids = listItems(value)
+    if (!link || ids.length === 0) return <span className="vault-cell-view" />
+    return (
+      <span className="vault-cell-view vault-list">
+        {ids.map((rowId) => {
+          const name = link.label(rowId)
+          return name === null ? (
+            <span key={rowId} className="vault-no">
+              Deleted row
+            </span>
+          ) : (
+            <span key={rowId}>
+              <button
+                type="button"
+                className="vault-link"
+                title={`Open in ${link.table?.name || "its table"}`}
+                onClick={() => link.open(rowId)}
+              >
+                <LinkIcon />
+                {name}
+              </button>
+            </span>
+          )
+        })}
+      </span>
+    )
+  }
   if (column.kind === "link") {
     if (typeof value !== "string" || !link) return <span className="vault-cell-view" />
     const name = link.label(value)
@@ -813,6 +874,155 @@ function ListEditor({ label, value, onChange }: { label: string; value: VaultCel
       }}
       onBlur={() => setDraft(null)}
     />
+  )
+}
+
+/** A List of links cell in Edit: the rows it links to, each removable, and a menu to add another. */
+function LinksEditor({
+  label,
+  value,
+  onChange,
+  link,
+}: {
+  label: string
+  value: VaultCell
+  onChange: (value: VaultCell) => void
+  link?: LinkTarget
+}) {
+  const ids = listItems(value)
+  const addable = link?.table?.rows.filter((row) => !ids.includes(row.id)) ?? []
+  return (
+    <span className="vault-links">
+      {ids.map((rowId) => {
+        const name = link?.label(rowId) ?? null
+        return (
+          <span key={rowId} className="vault-link-chip">
+            {name === null ? (
+              <span className="vault-no">Deleted row</span>
+            ) : (
+              <button type="button" className="vault-link" title="Go to this row" onClick={() => link?.open(rowId)}>
+                <LinkIcon />
+                {name}
+              </button>
+            )}
+            <button
+              type="button"
+              className="vault-cell-action"
+              aria-label={`Remove ${name ?? "deleted row"} from ${label}`}
+              title="Remove"
+              onClick={() => {
+                const next = ids.filter((id) => id !== rowId)
+                onChange(next.length > 0 ? next : null)
+              }}
+            >
+              <RemoveIcon />
+            </button>
+          </span>
+        )
+      })}
+      <select
+        className="vault-link-select"
+        aria-label={`Add a link to ${label}`}
+        value=""
+        disabled={addable.length === 0}
+        onChange={(event) => {
+          if (event.target.value) onChange([...ids, event.target.value])
+        }}
+      >
+        <option value="">
+          {!link?.table
+            ? "No table to link to"
+            : addable.length > 0
+              ? "+ Add a link"
+              : ids.length > 0
+                ? "Every row is linked"
+                : "No rows to link to"}
+        </option>
+        {addable.map((row) => (
+          <option key={row.id} value={row.id}>
+            {link?.label(row.id)}
+          </option>
+        ))}
+      </select>
+    </span>
+  )
+}
+
+/** Notes cells are shown cut short in the table once they are longer than this. */
+const NOTES_PREVIEW_LINES = 3
+const NOTES_PREVIEW_CHARS = 160
+
+/** The whole text of a Notes cell in a panel, editable when onChange is given (Edit mode). */
+function NotesDialog({
+  title,
+  text,
+  onChange,
+  onClose,
+}: {
+  title: string
+  text: string
+  onChange?: (value: VaultCell) => void
+  onClose: () => void
+}) {
+  return (
+    <VaultModal title={title} wide onClose={onClose}>
+      {onChange ? (
+        <textarea
+          className="vault-notes-full"
+          aria-label={title}
+          autoFocus
+          value={text}
+          onChange={(event) => onChange(event.target.value || null)}
+        />
+      ) : (
+        <div className="vault-notes-full vault-notes-text">{text}</div>
+      )}
+    </VaultModal>
+  )
+}
+
+/** A Notes cell in Edit: a box for longer text, and a bigger one in a panel. */
+function NotesEditor({ label, value, onChange }: { label: string; value: VaultCell; onChange: (value: VaultCell) => void }) {
+  const [open, setOpen] = useState(false)
+  const text = typeof value === "string" ? value : ""
+  return (
+    <span className="vault-notes-edit">
+      <textarea
+        className="vault-list-input"
+        aria-label={label}
+        placeholder="Notes"
+        rows={Math.max(2, Math.min(text.split("\n").length, 6))}
+        value={text}
+        onChange={(event) => onChange(event.target.value || null)}
+      />
+      <button
+        type="button"
+        className="vault-cell-action"
+        aria-label={`Edit ${label} in a bigger box`}
+        title="Edit in a bigger box"
+        onClick={() => setOpen(true)}
+      >
+        <ExpandIcon />
+      </button>
+      {open && <NotesDialog title={label} text={text} onChange={onChange} onClose={() => setOpen(false)} />}
+    </span>
+  )
+}
+
+/** A Notes cell: its first few lines, and the whole text in a panel when it is longer. */
+function NotesView({ title, text }: { title: string; text: string }) {
+  const [open, setOpen] = useState(false)
+  const long = text.split("\n").length > NOTES_PREVIEW_LINES || text.length > NOTES_PREVIEW_CHARS
+  return (
+    <span className="vault-cell-view vault-notes">
+      <span className="vault-notes-preview">{text}</span>
+      {long && (
+        <button type="button" className="vault-link vault-notes-more" onClick={() => setOpen(true)}>
+          Show all
+        </button>
+      )}
+      {open && <NotesDialog title={title} text={text} onClose={() => setOpen(false)} />}
+    </span>
   )
 }
 
@@ -1289,7 +1499,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   const tables = vault.data?.tables ?? []
   /** Where a Link column points, for showing, searching, and following its cells. */
   function linkFor(column: VaultColumn): LinkTarget | undefined {
-    if (column.kind !== "link") return undefined
+    if (!linksRows(column.kind)) return undefined
     const target = tables.find((item) => item.id === column.target) ?? null
     return {
       table: target,
@@ -1473,11 +1683,25 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
       return
     }
     const label = labelIn(before)
-    // A new Link points at another table first, or at this one when it is the only table.
-    const target = kind === "link" ? (tables.find((item) => item.id !== table.id) ?? table).id : undefined
-    const convert = (value: VaultCell): VaultCell =>
-      // A Link becomes the names it showed; everything else converts by value.
-      before.kind === "link" ? convertCell(typeof value === "string" ? label(value) || null : null, kind) : convertCell(value, kind)
+    // A new Link points at another table first, or at this one when it is the only table. Switching
+    // between Link and List of links keeps the table.
+    const target = linksRows(kind)
+      ? (linksRows(before.kind) && before.target) || (tables.find((item) => item.id !== table.id) ?? table).id
+      : undefined
+    const convert = (value: VaultCell): VaultCell => {
+      // Between Link and List of links, the linked rows stay linked (a Link keeps the first one).
+      if (linksRows(before.kind) && linksRows(kind)) {
+        const ids = typeof value === "string" ? [value] : listItems(value)
+        return kind === "links" ? (ids.length > 0 ? ids : null) : (ids[0] ?? null)
+      }
+      // Links become the names they showed; everything else converts by value.
+      if (before.kind === "link") return convertCell(typeof value === "string" ? label(value) || null : null, kind)
+      if (before.kind === "links") {
+        const names = listItems(value).map(label).filter(Boolean)
+        return convertCell(names.length > 0 ? names : null, kind)
+      }
+      return convertCell(value, kind)
+    }
     change((current) => ({
       ...current,
       columns: current.columns.map((column) =>
@@ -1807,7 +2031,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         onChange={(columns, convert) => setSubColumns(column.id, columns, convert)}
                       />
                     )}
-                    {editing && column.kind === "link" && (
+                    {editing && linksRows(column.kind) && (
                       <select
                         className="vault-kind"
                         aria-label={`Table ${column.name} links to`}
@@ -2038,9 +2262,14 @@ export function Vault({ vault }: { vault: VaultState }) {
               type="button"
               className="bar-icon vault-save"
               aria-label="Save (Ctrl+S)"
-              title={vault.dirty ? "Save (Ctrl+S)" : "All changes saved"}
-              disabled={!vault.dirty || vault.saving}
-              onClick={() => void vault.save()}
+              title={vault.dirty ? "Save (Ctrl+S)" : vault.editing ? "Done editing" : "All changes saved"}
+              // In Edit it stays on, so it also leaves Edit when there is nothing to save.
+              disabled={(!vault.dirty && !vault.editing) || vault.saving}
+              onClick={() => {
+                void vault.save().then((ok) => {
+                  if (ok) vault.setEditing(false)
+                })
+              }}
             >
               <SaveIcon />
               {vault.dirty && <span className="vault-dot" aria-hidden="true" />}

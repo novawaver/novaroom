@@ -412,9 +412,11 @@ textarea:focus {
 }
 
 .shell {
+  /* The nav bar shows icons only, or labels beside them once expanded with its menu button. */
+  --nav-width: 64px;
   height: 100%;
   display: grid;
-  grid-template-columns: 76px 320px 1fr;
+  grid-template-columns: var(--nav-width) 320px 1fr;
   /* One row as tall as the window, so the nav bar, sidebar and page each scroll on their own. */
   grid-template-rows: minmax(0, 1fr);
   background: var(--paper);
@@ -422,6 +424,10 @@ textarea:focus {
 
 .shell > * {
   min-height: 0;
+}
+
+.shell.nav-open {
+  --nav-width: 200px;
 }
 
 .navbar {
@@ -432,26 +438,49 @@ textarea:focus {
   flex-direction: column;
   align-items: stretch;
   gap: 4px;
-  padding: 14px 6px;
+  padding: 12px 10px;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 .nav-item {
-  display: grid;
-  justify-items: center;
-  gap: 4px;
-  padding: 6px 0 8px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
   border: 0;
   border-radius: 12px;
   background: transparent;
   color: var(--side-muted);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
-  /* Keeps any label that is too long for the column centred if it wraps. */
-  text-align: center;
+  text-align: left;
   line-height: 1.15;
+}
+
+.nav-item.nav-toggle {
+  /* Only the icon is the button, not the rest of the row when the bar is expanded. */
+  align-self: flex-start;
+  margin-bottom: 8px;
+}
+
+.nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Collapsed, labels are hidden from sight but still read out; each button's tooltip shows it. */
+.navbar:not(.expanded) .nav-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
 }
 
 .nav-item:hover {
@@ -464,6 +493,7 @@ textarea:focus {
 
 .nav-tile {
   position: relative;
+  flex: none;
   width: 44px;
   height: 44px;
   display: grid;
@@ -923,13 +953,24 @@ textarea:focus {
 
 .nav-profile {
   margin-top: auto;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  padding: 8px 0;
+  min-width: 0;
+  padding: 6px 4px;
   border: 0;
   border-radius: 12px;
   background: transparent;
+  color: var(--side-ink);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.nav-profile-photo {
+  position: relative;
+  flex: none;
 }
 
 .nav-profile:hover,
@@ -2039,9 +2080,9 @@ code {
 }
 
 .nav-presence {
-  /* The avatar is 36px and centred in the button, so this sits on its bottom-right edge. */
-  left: calc(50% + 8px);
-  bottom: 7px;
+  /* Sits on the bottom-right edge of the 36px avatar. */
+  right: -2px;
+  bottom: -2px;
   width: 12px;
   height: 12px;
   border: 2px solid var(--side);
@@ -4026,6 +4067,91 @@ code {
   border-color: var(--line);
 }
 
+/* Vault List of links cells in Edit: the linked rows, then a menu to add another. */
+.vault-links {
+  display: grid;
+  gap: 2px;
+  min-width: 160px;
+}
+
+.vault-link-chip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding-left: 8px;
+}
+
+.vault-link-chip .vault-link,
+.vault-link-chip .vault-no {
+  flex: 1;
+  min-width: 0;
+}
+
+.vault-link-chip .vault-no,
+.vault-cell-view.vault-list .vault-no {
+  color: var(--muted);
+}
+
+/* Vault Notes cells: a few lines in the table, the whole text in a panel. */
+.vault-cell-view.vault-notes {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+}
+
+.vault-notes-preview {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+/* With "Fit to width" off, a note shows as one shortened line. */
+.vault-grid:not(.vault-fit) .vault-notes-preview {
+  display: block;
+  max-width: 320px;
+  text-overflow: ellipsis;
+}
+
+.vault-link.vault-notes-more {
+  font-size: 13px;
+}
+
+.vault-notes-edit {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.vault-grid .vault-notes-edit textarea.vault-list-input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.vault-notes-full {
+  width: 100%;
+  min-height: 50vh;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.vault-notes-full.vault-notes-text {
+  min-height: 0;
+  max-height: 70vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Vault Sub-table cells open their items in a panel over the page. */
 .vault-modal {
   display: grid;
@@ -4338,4 +4464,135 @@ code {
     animation: none;
     opacity: 0.6;
   }
+}
+
+/* Local chat: the sidebar's room and people, and the screen shown when the app opens offline. */
+.avatar.local-avatar {
+  position: relative;
+  overflow: visible;
+}
+
+.avatar.local-avatar svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.local-presence {
+  right: -2px;
+  bottom: -2px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--side);
+}
+
+.hint.local-rail-note {
+  margin: 0;
+  color: var(--side-muted);
+  font-size: 13px;
+}
+
+.chat-list.local-chat-list {
+  margin-top: 14px;
+}
+
+.list-label.local-list-label {
+  margin: 12px 0 2px;
+}
+
+.form-error.local-error {
+  margin: 12px 24px 0;
+}
+
+.offline-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.offline-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--side);
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.offline-banner .text-button {
+  margin-left: auto;
+}
+
+.shell.offline-shell-body {
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: 320px 1fr;
+}
+
+/* Chats: the Online / Local switch at the top of the sidebar. */
+.chat-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 4px;
+  border: 1px solid var(--side-line);
+  border-radius: 12px;
+  background: var(--side-soft);
+}
+
+.chat-mode-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--side-muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.chat-mode-tab:hover {
+  color: var(--side-ink);
+}
+
+.chat-mode-tab[aria-selected="true"] {
+  background: var(--brand);
+  color: #fff;
+}
+
+.chat-mode-tab:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.chat-mode-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.chat-mode-tab[aria-selected="true"] .chat-mode-count {
+  background: #fff;
+  color: var(--brand);
 }

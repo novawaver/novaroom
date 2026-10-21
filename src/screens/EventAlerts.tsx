@@ -21,6 +21,7 @@ import { useReconnectEpoch } from "../lib/network"
 export type Toast = { id: string; title: string; body: string; tab: "schedule" | "tasks" }
 
 const CHECK_EVERY_MS = 30 * 1000
+const POLL_ALERTS_MS = 60 * 1000
 const REFRESH_EVENTS_MS = 5 * 60 * 1000
 // After sleep or a long pause, skip reminders for events that started longer ago than this.
 const LATE_LIMIT_MS = 5 * 60 * 1000
@@ -91,11 +92,19 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
       }
       void markAlertsDelivered(alerts.map((alert) => alert.id)).catch(() => {})
     }
-    void undeliveredAlerts()
-      .then((alerts) => {
-        if (active) deliver(alerts)
-      })
-      .catch(() => {})
+    const fetchMissed = () =>
+      void undeliveredAlerts()
+        .then((alerts) => {
+          if (!active || alerts.length === 0) return
+          deliver(alerts)
+          if (alerts.some((alert) => alert.kind === "task_assigned")) void refreshTasks()
+          if (alerts.some((alert) => alert.kind === "event_added")) void refreshEvents()
+        })
+        .catch(() => {})
+    fetchMissed()
+    // Live alerts need the realtime connection, which can drop without the app noticing. Asking the
+    // database now and then makes sure an alert still arrives, a little later at worst.
+    const poll = window.setInterval(fetchMissed, POLL_ALERTS_MS)
     const stop = subscribeToAlerts(userId, (alert) => {
       deliver([alert])
       // The new event should also get its start-time reminder, and a new task its badge.
@@ -106,6 +115,7 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
     })
     return () => {
       active = false
+      window.clearInterval(poll)
       stop()
     }
   }, [userId, show, refreshEvents, refreshTasks, epoch])

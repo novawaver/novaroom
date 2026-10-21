@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "Novaroom",
+        "visible": false,
         "decorations": false,
         "width": 1120,
         "height": 760,

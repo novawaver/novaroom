@@ -16,7 +16,12 @@ const fetchWithTimeout: typeof fetch = (input, init) => {
   return fetch(input, { ...init, signal })
 }
 
+// Realtime's heartbeat runs in a Web Worker. Windows slows timers down to about once a minute in a
+// minimized or hidden window, which let the live connection time out: the person then showed as
+// offline to others and stopped receiving live alerts, even though the app was still running.
 export const supabase: SupabaseClient | null =
-  url && anonKey ? createClient(url, anonKey, { global: { fetch: fetchWithTimeout } }) : null
+  url && anonKey
+    ? createClient(url, anonKey, { global: { fetch: fetchWithTimeout }, realtime: { worker: true } })
+    : null
 
 export const isSupabaseConfigured = supabase !== null
