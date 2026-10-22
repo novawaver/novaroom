@@ -44,6 +44,17 @@ const ROOM_HISTORY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const ROOM_HISTORY_LIMIT: i64 = 200;
 /// Messages shown when a chat opens.
 const CHAT_LIMIT: i64 = 500;
+/// Largest file someone can send, as in the app's other chats.
+const MAX_FILE: u64 = 25 * 1024 * 1024;
+const MAX_FILE_NAME: usize = 200;
+/// File bytes per FileChunk frame. Base64 makes them a third bigger, which still fits one packet.
+const FILE_CHUNK: usize = 32 * 1024;
+/// What this app understands beyond the first version, listed in Hello. Each kind of frame only
+/// goes to apps that listed it, since older apps drop the connection on frames they do not know.
+const FEATURE_TYPING: &str = "typing";
+const FEATURE_READ: &str = "read";
+const FEATURE_FILES: &str = "files";
+const FEATURES: &[&str] = &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES];
 /// The longest Noise message, which is also the most one length-prefixed packet can hold.
 const NOISE_MAX: usize = 65535;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,6 +76,12 @@ CREATE TABLE IF NOT EXISTS messages (
   delivered INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages (chat, sent_at);
+-- How far this person has read each direct chat (the newest sent_at they have seen), so the other
+-- person can be told again after reconnecting.
+CREATE TABLE IF NOT EXISTS reads (
+  chat TEXT PRIMARY KEY,
+  up_to INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS directory (
   user_id TEXT NOT NULL,
   public_key TEXT NOT NULL,
@@ -72,6 +89,67 @@ CREATE TABLE IF NOT EXISTS directory (
   PRIMARY KEY (user_id, public_key)
 );
 ";
+
+/// Columns added to `messages` after the first version, added to older files on start.
+const ADDED_COLUMNS: &[(&str, &str)] = &[
+    ("reply_to", "TEXT"),
+    ("file_name", "TEXT"),
+    ("file_mime", "TEXT"),
+    ("file_size", "INTEGER"),
+    // 'ready' (file_path has it), 'waiting' (still to come from the sender) or 'missing'.
+    ("file_state", "TEXT"),
+    ("file_path", "TEXT"),
+    // Own direct messages: whether the other person has seen it.
+    ("read", "INTEGER NOT NULL DEFAULT 0"),
+];
+
+fn migrate(db: &Connection) -> Result<(), String> {
+    db.execute_batch(SCHEMA).map_err(message)?;
+    let existing: HashSet<String> = db
+        .prepare("PRAGMA table_info(messages)")
+        .map_err(message)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(message)?
+        .filter_map(Result::ok)
+        .collect();
+    for (name, kind) in ADDED_COLUMNS {
+        if !existing.contains(*name) {
+            db.execute_batch(&format!("ALTER TABLE messages ADD COLUMN {name} {kind}"))
+                .map_err(message)?;
+        }
+    }
+    Ok(())
+}
+
+/// A file as it travels in a Message frame.
+#[derive(Serialize, Deserialize, Clone)]
+struct FileInfo {
+    name: String,
+    mime: String,
+    size: u64,
+}
+
+/// A message's file as the app shows it.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalFile {
+    name: String,
+    mime: String,
+    size: u64,
+    /// "ready", "waiting" (still coming from the sender) or "missing" (the sender no longer has it).
+    state: String,
+}
+
+/// The message a reply answers, shown above it.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyPreview {
+    id: String,
+    sender_id: String,
+    sender_name: String,
+    body: String,
+    file_name: Option<String>,
+}
 
 /// A message as the app shows it. `chat` is from this computer's point of view: "room", or the
 /// other person's id in a direct chat, whichever of the two sent it.
@@ -82,11 +160,63 @@ pub struct LocalMessage {
     chat: String,
     sender_id: String,
     sender_name: String,
+    /// Empty when the message is only a file.
     body: String,
     /// Milliseconds since 1970, by the sender's clock.
     sent_at: i64,
     /// Own direct messages: whether the other person's app has it. Always true for room messages.
     delivered: bool,
+    /// Own direct messages: whether the other person has seen it.
+    read: bool,
+    /// The answered message, if it is on this computer. Filled in when reading from the file.
+    reply_to: Option<ReplyPreview>,
+    file: Option<LocalFile>,
+    #[serde(skip)]
+    reply_to_id: Option<String>,
+    #[serde(skip)]
+    file_path: Option<String>,
+}
+
+const MESSAGE_SELECT: &str = "SELECT m.id, m.chat, m.sender_id, m.sender_name, m.body, m.sent_at, m.delivered,
+       m.read, m.reply_to, m.file_name, m.file_mime, m.file_size, m.file_state, m.file_path,
+       r.sender_id, r.sender_name, r.body, r.file_name
+     FROM messages m LEFT JOIN messages r ON r.id = m.reply_to";
+
+fn message_row(row: &rusqlite::Row) -> rusqlite::Result<LocalMessage> {
+    let reply_to_id: Option<String> = row.get(8)?;
+    let file_name: Option<String> = row.get(9)?;
+    let reply_sender: Option<String> = row.get(14)?;
+    Ok(LocalMessage {
+        id: row.get(0)?,
+        chat: row.get(1)?,
+        sender_id: row.get(2)?,
+        sender_name: row.get(3)?,
+        body: row.get(4)?,
+        sent_at: row.get(5)?,
+        delivered: row.get(6)?,
+        read: row.get(7)?,
+        reply_to: match (&reply_to_id, reply_sender) {
+            (Some(id), Some(sender_id)) => Some(ReplyPreview {
+                id: id.clone(),
+                sender_id,
+                sender_name: row.get(15)?,
+                body: clip(&row.get::<_, String>(16)?, 200),
+                file_name: row.get(17)?,
+            }),
+            _ => None,
+        },
+        file: match file_name {
+            Some(name) => Some(LocalFile {
+                name,
+                mime: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                size: row.get::<_, Option<i64>>(11)?.unwrap_or(0).max(0) as u64,
+                state: row.get::<_, Option<String>>(12)?.unwrap_or_else(|| "missing".into()),
+            }),
+            None => None,
+        },
+        reply_to_id,
+        file_path: row.get(13)?,
+    })
 }
 
 /// Someone whose app is connected right now.
@@ -132,15 +262,39 @@ enum Frame {
         protocol: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idle: Option<bool>,
+        /// Which of FEATURES the app understands; empty for older apps.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     /// The sender is whoever is on the other end of the connection, never a field, so nobody can
     /// send a message in someone else's name. `to` is the recipient's id, or none for the room.
+    /// Older apps ignore `reply_to` and `file`; they never get a file, see `message_frame`.
     #[serde(rename_all = "camelCase")]
-    Message { id: String, to: Option<String>, name: String, body: String, sent_at: i64 },
+    Message {
+        id: String,
+        to: Option<String>,
+        name: String,
+        body: String,
+        sent_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<FileInfo>,
+    },
     Ack { id: String },
     Ping,
     /// The sender's idle status changed. Only sent to apps that said they understand it.
     Status { idle: bool },
+    /// The sender started or stopped typing in the room (no `to`) or to `to`. Needs "typing".
+    Typing { to: Option<String>, typing: bool },
+    /// The sender has seen my direct messages to them up to this sent_at. Needs "read".
+    #[serde(rename_all = "camelCase")]
+    Read { up_to: i64 },
+    /// Asks the sender of a message for its file, which comes back as FileChunks. Needs "files".
+    FileRequest { id: String },
+    FileChunk { id: String, offset: u64, data: String },
+    /// The file of message `id` can't be sent any more.
+    FileMissing { id: String },
 }
 
 struct Peer {
@@ -154,6 +308,7 @@ struct Peer {
     idle: bool,
     /// Whether the app sent its idle status in Hello, and so can be sent Status frames.
     shares_status: bool,
+    features: HashSet<String>,
     /// Dropped when this entry is removed or replaced, which ends the connection.
     _close: oneshot::Sender<()>,
 }
@@ -183,6 +338,8 @@ struct Session {
     next_connection: AtomicU64,
     /// Whether this person is idle, as the window last said.
     idle: AtomicBool,
+    /// Files sent and received, one folder per message id.
+    files_dir: PathBuf,
 }
 
 /// The running Local chat, if any. It runs for the signed-in account while the app is open.
@@ -213,6 +370,48 @@ fn valid_user_id(user_id: &str) -> bool {
     !user_id.is_empty()
         && user_id.len() <= 64
         && user_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// A file name that is safe to save on Windows, keeping as much of the original as possible.
+fn safe_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c })
+        .collect();
+    let cleaned = clip(cleaned.trim().trim_end_matches(['.', ' ']), MAX_FILE_NAME);
+    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")));
+    match cleaned.as_str() {
+        "" => "file".into(),
+        _ if reserved => format!("_{cleaned}"),
+        _ => cleaned,
+    }
+}
+
+/// The Message frame for one of this person's messages, as `features` can read it. Apps without
+/// file support get a line about the file instead, so the message still makes sense to them.
+fn message_frame(item: &LocalMessage, features: &HashSet<String>) -> Frame {
+    let files = features.contains(FEATURE_FILES);
+    let mut body = item.body.clone();
+    if let (Some(file), false) = (&item.file, files) {
+        let note = format!("[File: {} - update Novaroom to open it]", file.name);
+        body = if body.is_empty() { note } else { format!("{body}\n{note}") };
+    }
+    Frame::Message {
+        id: item.id.clone(),
+        to: (item.chat != ROOM).then(|| item.chat.clone()),
+        name: item.sender_name.clone(),
+        body,
+        sent_at: item.sent_at,
+        reply_to: item.reply_to_id.clone(),
+        file: item
+            .file
+            .as_ref()
+            .filter(|_| files)
+            .map(|file| FileInfo { name: file.name.clone(), mime: file.mime.clone(), size: file.size }),
+    }
 }
 
 /// This account's Local chat folder on this computer.
@@ -300,51 +499,90 @@ impl Session {
     /// Saves a message unless it is already here. True if it was new.
     fn store(&self, item: &LocalMessage) -> bool {
         let db = self.db.lock().unwrap();
+        let file = item.file.as_ref();
         db.execute(
-            "INSERT OR IGNORE INTO messages (id, chat, sender_id, sender_name, body, sent_at, delivered)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![item.id, item.chat, item.sender_id, item.sender_name, item.body, item.sent_at, item.delivered],
+            "INSERT OR IGNORE INTO messages
+               (id, chat, sender_id, sender_name, body, sent_at, delivered, read, reply_to,
+                file_name, file_mime, file_size, file_state, file_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                item.id,
+                item.chat,
+                item.sender_id,
+                item.sender_name,
+                item.body,
+                item.sent_at,
+                item.delivered,
+                item.reply_to_id,
+                file.map(|file| file.name.clone()),
+                file.map(|file| file.mime.clone()),
+                file.map(|file| file.size as i64),
+                file.map(|file| file.state.clone()),
+                item.file_path,
+            ],
         )
         .map(|changed| changed > 0)
         .unwrap_or(false)
     }
 
-    /// What to send someone who has just connected: this person's recent room messages, then their
-    /// direct messages to them that are still waiting.
-    fn backlog(&self, peer_user_id: &str) -> Vec<Frame> {
+    /// One message as the app shows it, with what it replies to.
+    fn message(&self, id: &str) -> Option<LocalMessage> {
         let db = self.db.lock().unwrap();
-        let read = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Vec<Frame> {
-            let Ok(mut statement) = db.prepare(sql) else { return Vec::new() };
-            statement
-                .query_map(args, |row| {
-                    let chat: String = row.get(1)?;
-                    Ok(Frame::Message {
-                        id: row.get(0)?,
-                        to: (chat != ROOM).then_some(chat),
-                        name: row.get(2)?,
-                        body: row.get(3)?,
-                        sent_at: row.get(4)?,
-                    })
-                })
-                .map(|rows| rows.filter_map(Result::ok).collect())
-                .unwrap_or_default()
-        };
+        db.query_row(&format!("{MESSAGE_SELECT} WHERE m.id = ?1"), params![id], message_row)
+            .ok()
+    }
+
+    fn messages(&self, filter: &str, args: &[&dyn rusqlite::ToSql]) -> Vec<LocalMessage> {
+        let db = self.db.lock().unwrap();
+        let Ok(mut statement) = db.prepare(&format!("{MESSAGE_SELECT} {filter}")) else { return Vec::new() };
+        statement
+            .query_map(args, message_row)
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// What to send someone who has just connected: this person's recent room messages, their
+    /// direct messages to them that are still waiting, how far I have read their messages, and
+    /// requests for their files that have not arrived yet.
+    fn backlog(&self, peer_user_id: &str, features: &HashSet<String>) -> Vec<Frame> {
         let since = now_ms() - ROOM_HISTORY_MS;
-        let mut frames = read(
-            "SELECT * FROM (
-               SELECT id, chat, sender_name, body, sent_at FROM messages
-               WHERE chat = ?1 AND sender_id = ?2 AND sent_at > ?3
-               ORDER BY sent_at DESC LIMIT ?4
-             ) ORDER BY sent_at",
+        let mut room = self.messages(
+            "WHERE m.chat = ?1 AND m.sender_id = ?2 AND m.sent_at > ?3 ORDER BY m.sent_at DESC LIMIT ?4",
             &[&ROOM, &self.user_id, &since, &ROOM_HISTORY_LIMIT],
         );
+        room.reverse();
+        let mut frames: Vec<Frame> = room.iter().map(|item| message_frame(item, features)).collect();
         // My other computers keep their own direct chats; they only share the room.
         if peer_user_id != self.user_id {
-            frames.extend(read(
-                "SELECT id, chat, sender_name, body, sent_at FROM messages
-                 WHERE chat = ?1 AND sender_id = ?2 AND delivered = 0 ORDER BY sent_at",
+            let waiting = self.messages(
+                "WHERE m.chat = ?1 AND m.sender_id = ?2 AND m.delivered = 0 ORDER BY m.sent_at",
                 &[&peer_user_id, &self.user_id],
-            ));
+            );
+            frames.extend(waiting.iter().map(|item| message_frame(item, features)));
+            if features.contains(FEATURE_READ) {
+                let db = self.db.lock().unwrap();
+                let up_to: Option<i64> = db
+                    .query_row("SELECT up_to FROM reads WHERE chat = ?1", params![peer_user_id], |row| row.get(0))
+                    .ok();
+                frames.extend(up_to.map(|up_to| Frame::Read { up_to }));
+            }
+        }
+        if features.contains(FEATURE_FILES) {
+            let ids: Vec<String> = {
+                let db = self.db.lock().unwrap();
+                let statement = db.prepare(
+                    "SELECT id FROM messages
+                     WHERE sender_id = ?1 AND file_state = 'waiting' AND (chat = ?2 OR chat = ?1)",
+                );
+                match statement {
+                    Ok(mut statement) => statement
+                        .query_map(params![peer_user_id, ROOM], |row| row.get(0))
+                        .map(|rows| rows.filter_map(Result::ok).collect())
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            };
+            frames.extend(ids.into_iter().map(|id| Frame::FileRequest { id }));
         }
         frames
     }
@@ -366,12 +604,15 @@ impl Session {
         }
     }
 
-    /// Hands a frame to every connection for these people (all of them for the room).
-    fn send_to(&self, user_id: Option<&str>, frame_for: impl Fn() -> Frame) {
+    /// Hands a frame to every connection for these people (all of them for the room), as each
+    /// can read it; None skips that connection.
+    fn send_to(&self, user_id: Option<&str>, frame_for: impl Fn(&Peer) -> Option<Frame>) {
         let peers = self.peers.lock().unwrap();
         for peer in peers.values() {
             if user_id.is_none_or(|id| id == peer.user_id) {
-                let _ = peer.outbox.send(frame_for());
+                if let Some(frame) = frame_for(peer) {
+                    let _ = peer.outbox.send(frame);
+                }
             }
         }
     }
@@ -429,10 +670,15 @@ fn seal(noise: &Mutex<snow::TransportState>, frame: &Frame) -> Result<Vec<u8>, S
     Ok(packet)
 }
 
-fn open(noise: &Mutex<snow::TransportState>, packet: &[u8]) -> Result<Frame, String> {
+fn decrypt(noise: &Mutex<snow::TransportState>, packet: &[u8]) -> Result<Vec<u8>, String> {
     let mut json = vec![0u8; packet.len()];
     let length = noise.lock().unwrap().read_message(packet, &mut json).map_err(message)?;
-    serde_json::from_slice(&json[..length]).map_err(message)
+    json.truncate(length);
+    Ok(json)
+}
+
+fn open(noise: &Mutex<snow::TransportState>, packet: &[u8]) -> Result<Frame, String> {
+    serde_json::from_slice(&decrypt(noise, packet)?).map_err(message)
 }
 
 /// Runs one connection from handshake to close. Peers that cannot prove who they are are dropped.
@@ -453,7 +699,13 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
 
     // Both sides say who they are, then each checks the other's key against the directory.
     let me = session.me();
-    let hello = Frame::Hello { user_id: me.user_id, name: me.name, protocol: PROTOCOL, idle: Some(me.idle) };
+    let hello = Frame::Hello {
+        user_id: me.user_id,
+        name: me.name,
+        protocol: PROTOCOL,
+        idle: Some(me.idle),
+        features: FEATURES.iter().map(|feature| feature.to_string()).collect(),
+    };
     let Ok(packet) = seal(&noise, &hello) else { return };
     if write_packet(&mut writer, &packet).await.is_err() {
         return;
@@ -461,7 +713,8 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
     let Ok(Ok(packet)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_packet(&mut reader)).await else {
         return;
     };
-    let Ok(Frame::Hello { user_id, name, protocol, idle }) = open(&noise, &packet) else { return };
+    let Ok(Frame::Hello { user_id, name, protocol, idle, features }) = open(&noise, &packet) else { return };
+    let features: HashSet<String> = features.into_iter().take(32).filter(|feature| feature.len() <= 32).collect();
     if protocol != PROTOCOL || session.verify(&user_id, &remote_key).is_none() {
         return;
     }
@@ -492,12 +745,13 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
                 outbox: outbox.clone(),
                 idle: idle.unwrap_or(false),
                 shares_status: idle.is_some(),
+                features: features.clone(),
                 _close: close,
             },
         );
     }
     session.emit_peers();
-    for frame in session.backlog(&user_id) {
+    for frame in session.backlog(&user_id, &features) {
         let _ = outbox.send(frame);
     }
 
@@ -506,7 +760,9 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
     let reader_noise = noise.clone();
     let reading = tauri::async_runtime::spawn(async move {
         while let Ok(packet) = read_packet(&mut reader).await {
-            let Ok(frame) = open(&reader_noise, &packet) else { break };
+            let Ok(json) = decrypt(&reader_noise, &packet) else { break };
+            // A frame from a newer app that this one does not know is skipped, not a broken connection.
+            let Ok(frame) = serde_json::from_slice::<Frame>(&json) else { continue };
             if incoming_tx.send(frame).is_err() {
                 break;
             }
@@ -561,10 +817,33 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
     }
 }
 
+/// Something the window shows about a chat: someone typing, or how far they have read.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TypingEvent {
+    chat: String,
+    user_id: String,
+    typing: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ReadEvent {
+    chat: String,
+    up_to: i64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FileEvent {
+    id: String,
+    state: String,
+}
+
 /// Handles one frame from `from` (already verified).
 fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>, frame: Frame) {
     match frame {
-        Frame::Message { id, to, name, body, sent_at } => {
+        Frame::Message { id, to, name, body, sent_at, reply_to, file } => {
             let chat = match to {
                 None => ROOM.to_string(),
                 // A direct message to me, from someone else.
@@ -572,9 +851,17 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 _ => return,
             };
             let body = body.trim();
-            if id.is_empty() || id.len() > 64 || body.is_empty() || body.chars().count() > MAX_BODY {
+            // Ids become folder names for files, so they must look like real ids.
+            if !valid_user_id(&id) || (body.is_empty() && file.is_none()) || body.chars().count() > MAX_BODY {
                 return;
             }
+            let file = file.filter(|file| file.size <= MAX_FILE).map(|file| LocalFile {
+                name: safe_file_name(&file.name),
+                mime: clip(file.mime.trim(), 100),
+                size: file.size,
+                state: "waiting".into(),
+            });
+            let wants_file = file.is_some();
             let item = LocalMessage {
                 id: id.clone(),
                 sender_id: from.to_string(),
@@ -582,10 +869,20 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 body: body.to_string(),
                 sent_at,
                 delivered: true,
+                read: false,
+                reply_to: None,
+                file,
+                reply_to_id: reply_to.filter(|reply| valid_user_id(reply)),
+                file_path: None,
                 chat: chat.clone(),
             };
             if session.store(&item) {
-                let _ = session.app.emit("local-chat-message", &item);
+                if let Some(stored) = session.message(&id) {
+                    let _ = session.app.emit("local-chat-message", &stored);
+                }
+                if wants_file {
+                    let _ = outbox.send(Frame::FileRequest { id: id.clone() });
+                }
             }
             // Even a message already here is confirmed, since the sender may have missed the last ack.
             if chat != ROOM {
@@ -605,9 +902,129 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 let _ = session.app.emit("local-chat-delivered", id);
             }
         }
+        Frame::Typing { to, typing } => {
+            let chat = match to {
+                None => ROOM.to_string(),
+                Some(to) if to == session.user_id && from != session.user_id => from.to_string(),
+                _ => return,
+            };
+            if from != session.user_id {
+                let event = TypingEvent { chat, user_id: from.to_string(), typing };
+                let _ = session.app.emit("local-chat-typing", event);
+            }
+        }
+        Frame::Read { up_to } => {
+            if from == session.user_id {
+                return;
+            }
+            let changed = {
+                let db = session.db.lock().unwrap();
+                db.execute(
+                    "UPDATE messages SET read = 1, delivered = 1
+                     WHERE chat = ?1 AND sender_id = ?2 AND sent_at <= ?3 AND read = 0",
+                    params![from, session.user_id, up_to],
+                )
+                .unwrap_or(0)
+            };
+            if changed > 0 {
+                let _ = session.app.emit("local-chat-read", ReadEvent { chat: from.to_string(), up_to });
+            }
+        }
+        Frame::FileRequest { id } => send_file(session, from, outbox, id),
+        Frame::FileChunk { id, offset, data } => receive_chunk(session, from, &id, offset, &data),
+        Frame::FileMissing { id } => {
+            let changed = {
+                let db = session.db.lock().unwrap();
+                db.execute(
+                    "UPDATE messages SET file_state = 'missing' WHERE id = ?1 AND sender_id = ?2 AND file_state = 'waiting'",
+                    params![id, from],
+                )
+                .unwrap_or(0)
+            };
+            if changed > 0 {
+                let _ = session.app.emit("local-chat-file", FileEvent { id, state: "missing".into() });
+            }
+        }
         // Status needs the connection, so the connection loop handles it.
         Frame::Hello { .. } | Frame::Ping | Frame::Status { .. } => {}
     }
+}
+
+/// Sends the file of one of my messages to `to`, if they may have it: anyone for the room, only
+/// the other person for a direct chat.
+fn send_file(session: &Session, to: &str, outbox: &mpsc::UnboundedSender<Frame>, id: String) {
+    use base64::Engine;
+    let path: Option<String> = {
+        let db = session.db.lock().unwrap();
+        db.query_row(
+            "SELECT file_path FROM messages
+             WHERE id = ?1 AND sender_id = ?2 AND file_state = 'ready' AND (chat = ?3 OR chat = ?4)",
+            params![id, session.user_id, ROOM, to],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten()
+    };
+    let Some(bytes) = path.and_then(|path| std::fs::read(path).ok()) else {
+        let _ = outbox.send(Frame::FileMissing { id });
+        return;
+    };
+    for (index, chunk) in bytes.chunks(FILE_CHUNK).enumerate() {
+        let data = base64::engine::general_purpose::STANDARD.encode(chunk);
+        let _ = outbox.send(Frame::FileChunk { id: id.clone(), offset: (index * FILE_CHUNK) as u64, data });
+    }
+}
+
+/// Adds one piece of a file someone sent. Pieces arrive in order on one connection; anything else
+/// (a gap, a file nobody asked for) is ignored.
+fn receive_chunk(session: &Session, from: &str, id: &str, offset: u64, data: &str) {
+    use base64::Engine;
+    use std::io::Write;
+    let expected: Option<(String, i64)> = {
+        let db = session.db.lock().unwrap();
+        db.query_row(
+            "SELECT file_name, file_size FROM messages WHERE id = ?1 AND sender_id = ?2 AND file_state = 'waiting'",
+            params![id, from],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()
+    };
+    let Some((name, size)) = expected else { return };
+    let size = size.max(0) as u64;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else { return };
+    if !valid_user_id(id) || offset + bytes.len() as u64 > size {
+        return;
+    }
+    let folder = session.files_dir.join(id);
+    if std::fs::create_dir_all(&folder).is_err() {
+        return;
+    }
+    let part = folder.join("download.part");
+    let opened = if offset == 0 {
+        std::fs::File::create(&part)
+    } else {
+        std::fs::OpenOptions::new().append(true).open(&part)
+    };
+    let Ok(mut file) = opened else { return };
+    if file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX) != offset || file.write_all(&bytes).is_err() {
+        return;
+    }
+    drop(file);
+    if offset + bytes.len() as u64 != size {
+        return;
+    }
+    let path = folder.join(safe_file_name(&name));
+    if std::fs::rename(&part, &path).is_err() {
+        return;
+    }
+    {
+        let db = session.db.lock().unwrap();
+        let _ = db.execute(
+            "UPDATE messages SET file_state = 'ready', file_path = ?2 WHERE id = ?1",
+            params![id, path.to_string_lossy()],
+        );
+    }
+    let _ = session.app.emit("local-chat-file", FileEvent { id: id.to_string(), state: "ready".into() });
 }
 
 /// Connects to an app found on the network, unless it is already connected or being dialled.
@@ -737,7 +1154,8 @@ pub async fn local_chat_start(
     let (private_key, public_key) = load_keys(&dir)?;
     let public_key = to_hex(&public_key);
     let db = Connection::open(dir.join("chat.db")).map_err(message)?;
-    db.execute_batch(SCHEMA).map_err(message)?;
+    migrate(&db)?;
+    let files_dir = dir.join("files");
 
     // Any free port; the mDNS announcement tells others which one.
     let listener = TcpListener::bind("0.0.0.0:0").await.map_err(message)?;
@@ -774,6 +1192,7 @@ pub async fn local_chat_start(
         stop,
         next_connection: AtomicU64::new(0),
         idle: AtomicBool::new(false),
+        files_dir,
     });
     tauri::async_runtime::spawn(accept_loop(session.clone(), listener));
     tauri::async_runtime::spawn(discovery_loop(session.clone(), events));
@@ -836,7 +1255,7 @@ pub fn local_chat_chats(state: tauri::State<'_, LocalChat>) -> Result<Vec<LocalC
     let db = session.db.lock().unwrap();
     let mut statement = db
         .prepare(
-            "SELECT m.chat, m.body, m.sent_at,
+            "SELECT m.chat, COALESCE(NULLIF(m.body, ''), m.file_name, ''), m.sent_at,
                COALESCE(
                  (SELECT d.name FROM directory d WHERE d.user_id = m.chat LIMIT 1),
                  (SELECT o.sender_name FROM messages o WHERE o.chat = m.chat AND o.sender_id = m.chat
@@ -867,78 +1286,193 @@ pub fn local_chat_chats(state: tauri::State<'_, LocalChat>) -> Result<Vec<LocalC
 #[tauri::command]
 pub fn local_chat_messages(state: tauri::State<'_, LocalChat>, chat: String) -> Result<Vec<LocalMessage>, String> {
     let session = running(&state)?;
-    let db = session.db.lock().unwrap();
-    let mut statement = db
-        .prepare(
-            "SELECT * FROM (
-               SELECT id, chat, sender_id, sender_name, body, sent_at, delivered, rowid FROM messages
-               WHERE chat = ?1 ORDER BY sent_at DESC, rowid DESC LIMIT ?2
-             ) ORDER BY sent_at, rowid",
-        )
-        .map_err(message)?;
-    let messages = statement
-        .query_map(params![chat, CHAT_LIMIT], |row| {
-            Ok(LocalMessage {
-                id: row.get(0)?,
-                chat: row.get(1)?,
-                sender_id: row.get(2)?,
-                sender_name: row.get(3)?,
-                body: row.get(4)?,
-                sent_at: row.get(5)?,
-                delivered: row.get(6)?,
-            })
-        })
-        .map_err(message)?
-        .collect::<Result<_, _>>()
-        .map_err(message)?;
+    let mut messages = session.messages(
+        "WHERE m.chat = ?1 ORDER BY m.sent_at DESC, m.rowid DESC LIMIT ?2",
+        &[&chat, &CHAT_LIMIT],
+    );
+    messages.reverse();
     Ok(messages)
 }
 
+/// A file to send with a message, already handed over with `local_chat_stage_file`.
+#[derive(Deserialize)]
+pub struct OutgoingFile {
+    name: String,
+    mime: String,
+}
+
+/// Where a file waits between `local_chat_stage_file` and `local_chat_send`.
+fn staged_path(session: &Session, id: &str) -> PathBuf {
+    session.files_dir.join(id).join("upload.part")
+}
+
+/// Takes the bytes of a file to send (the request body), for the message with id `x-id`.
+#[tauri::command]
+pub async fn local_chat_stage_file(
+    state: tauri::State<'_, LocalChat>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let session = running(&state)?;
+    let id = request
+        .headers()
+        .get("x-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !valid_user_id(&id) {
+        return Err("That message id is not valid.".into());
+    }
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("No file was sent.".into());
+    };
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(format!("Files can be up to {} MB.", MAX_FILE / 1024 / 1024));
+    }
+    let path = staged_path(&session, &id);
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder).map_err(message)?;
+    }
+    std::fs::write(path, bytes).map_err(message)
+}
+
 /// Saves a message and sends it to whoever is connected. A direct message to someone who is not
-/// connected waits here until they are.
+/// connected waits here until they are. A file has to be staged first under the same id.
 #[tauri::command]
 pub fn local_chat_send(
     state: tauri::State<'_, LocalChat>,
     chat: String,
     id: String,
     body: String,
+    reply_to: Option<String>,
+    file: Option<OutgoingFile>,
 ) -> Result<LocalMessage, String> {
     let session = running(&state)?;
     let body = body.trim().to_string();
-    if body.is_empty() {
+    if body.is_empty() && file.is_none() {
         return Err("Write a message first.".into());
     }
     if body.chars().count() > MAX_BODY {
         return Err(format!("Messages can be up to {MAX_BODY} characters."));
     }
-    if id.is_empty() || id.len() > 64 {
+    if !valid_user_id(&id) {
         return Err("That message id is not valid.".into());
     }
     if chat != ROOM && (!valid_user_id(&chat) || chat == session.user_id) {
         return Err("That chat is not valid.".into());
     }
+    let (file, file_path) = match file {
+        Some(file) => {
+            let staged = staged_path(&session, &id);
+            let size = std::fs::metadata(&staged).map_err(|_| "Add the file again.".to_string())?.len();
+            let name = safe_file_name(&file.name);
+            let path = session.files_dir.join(&id).join(&name);
+            std::fs::rename(&staged, &path).map_err(message)?;
+            let shown = LocalFile { name, mime: clip(file.mime.trim(), 100), size, state: "ready".into() };
+            (Some(shown), Some(path.to_string_lossy().into_owned()))
+        }
+        None => (None, None),
+    };
     let item = LocalMessage {
-        id,
+        id: id.clone(),
         sender_id: session.user_id.clone(),
         sender_name: session.name.lock().unwrap().clone(),
         body,
         sent_at: now_ms(),
         delivered: chat == ROOM,
+        read: false,
+        reply_to: None,
+        file,
+        reply_to_id: reply_to.filter(|reply| valid_user_id(reply)),
+        file_path,
         chat,
     };
     if !session.store(&item) {
         return Err("That message was already sent.".into());
     }
     let to = (item.chat != ROOM).then(|| item.chat.clone());
-    let frame = || Frame::Message {
-        id: item.id.clone(),
-        to: to.clone(),
-        name: item.sender_name.clone(),
-        body: item.body.clone(),
-        sent_at: item.sent_at,
+    session.send_to(to.as_deref(), |peer| Some(message_frame(&item, &peer.features)));
+    Ok(session.message(&id).unwrap_or(item))
+}
+
+/// The bytes of a message's file, for showing an image.
+#[tauri::command]
+pub async fn local_chat_file(state: tauri::State<'_, LocalChat>, id: String) -> Result<tauri::ipc::Response, String> {
+    let session = running(&state)?;
+    let path = session
+        .message(&id)
+        .filter(|item| item.file.as_ref().is_some_and(|file| file.state == "ready"))
+        .and_then(|item| item.file_path)
+        .ok_or("That file is not on this computer.")?;
+    let bytes = std::fs::read(path).map_err(|_| "That file is not on this computer any more.".to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Asks where to save a message's file and copies it there. False if the person cancelled.
+#[tauri::command]
+pub async fn local_chat_save_file(
+    app: AppHandle,
+    state: tauri::State<'_, LocalChat>,
+    id: String,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let session = running(&state)?;
+    let item = session.message(&id).ok_or("That message is not on this computer.")?;
+    let (Some(file), Some(source)) = (item.file, item.file_path) else {
+        return Err("That file is not on this computer.".into());
     };
-    session.send_to(to.as_deref(), frame);
-    Ok(item)
+    let picked = app.dialog().file().set_title("Save file").set_file_name(&file.name).blocking_save_file();
+    let Some(picked) = picked else { return Ok(false) };
+    let target = picked.into_path().map_err(message)?;
+    std::fs::copy(source, target).map_err(message)?;
+    Ok(true)
+}
+
+/// Tells the room, or the other person in a direct chat, that this person started or stopped typing.
+#[tauri::command]
+pub fn local_chat_typing(state: tauri::State<'_, LocalChat>, chat: String, typing: bool) -> Result<(), String> {
+    let session = running(&state)?;
+    let to = (chat != ROOM).then_some(chat);
+    session.send_to(to.as_deref(), |peer| {
+        peer.features.contains(FEATURE_TYPING).then(|| Frame::Typing { to: to.clone(), typing })
+    });
+    Ok(())
+}
+
+/// Records that this person has seen a direct chat up to its newest message from the other
+/// person, and tells them so their double checks show.
+#[tauri::command]
+pub fn local_chat_mark_read(state: tauri::State<'_, LocalChat>, chat: String) -> Result<(), String> {
+    let session = running(&state)?;
+    if chat == ROOM || !valid_user_id(&chat) {
+        return Ok(());
+    }
+    let up_to = {
+        let db = session.db.lock().unwrap();
+        let newest: Option<i64> = db
+            .query_row(
+                "SELECT MAX(sent_at) FROM messages WHERE chat = ?1 AND sender_id = ?1",
+                params![chat],
+                |row| row.get(0),
+            )
+            .map_err(message)?;
+        let Some(newest) = newest else { return Ok(()) };
+        let before: Option<i64> = db
+            .query_row("SELECT up_to FROM reads WHERE chat = ?1", params![chat], |row| row.get(0))
+            .ok();
+        if before.is_some_and(|before| before >= newest) {
+            return Ok(());
+        }
+        db.execute(
+            "INSERT INTO reads (chat, up_to) VALUES (?1, ?2) ON CONFLICT (chat) DO UPDATE SET up_to = excluded.up_to",
+            params![chat, newest],
+        )
+        .map_err(message)?;
+        newest
+    };
+    session.send_to(Some(&chat), |peer| {
+        peer.features.contains(FEATURE_READ).then_some(Frame::Read { up_to })
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -972,7 +1506,15 @@ mod tests {
         let noise = handshake(&alice.private, &mut reader, &mut writer, true).await.unwrap();
         assert_eq!(noise.get_remote_static().unwrap(), bob.public.as_slice());
         let noise = Mutex::new(noise);
-        let hello = Frame::Message { id: "m1".into(), to: None, name: "Alice".into(), body: "Hi".into(), sent_at: 1 };
+        let hello = Frame::Message {
+            id: "m1".into(),
+            to: None,
+            name: "Alice".into(),
+            body: "Hi".into(),
+            sent_at: 1,
+            reply_to: None,
+            file: None,
+        };
         write_packet(&mut writer, &seal(&noise, &hello).unwrap()).await.unwrap();
         let reply = open(&noise, &read_packet(&mut reader).await.unwrap()).unwrap();
         assert!(matches!(reply, Frame::Ack { id } if id == "m1"));
@@ -1008,6 +1550,49 @@ mod tests {
         assert!(other.read_message(&packet, &mut payload).is_err());
         drop(writer);
         assert!(!responder.await.unwrap());
+    }
+
+    #[test]
+    fn file_names_are_made_safe() {
+        assert_eq!(safe_file_name("report.pdf"), "report.pdf");
+        assert_eq!(safe_file_name("..\\..\\evil.exe"), "evil.exe");
+        assert_eq!(safe_file_name("a<b>:c?.txt"), "a_b__c_.txt");
+        assert_eq!(safe_file_name("CON.txt"), "_CON.txt");
+        assert_eq!(safe_file_name("..."), "file");
+    }
+
+    /// Apps from before features existed, and newer apps with fields this one lacks, still parse.
+    #[test]
+    fn frames_from_other_versions() {
+        let old = r#"{"t":"hello","userId":"u1","name":"A","protocol":1}"#;
+        assert!(matches!(
+            serde_json::from_str::<Frame>(old).unwrap(),
+            Frame::Hello { idle: None, features, .. } if features.is_empty()
+        ));
+        let newer = r#"{"t":"message","id":"m1","to":null,"name":"A","body":"Hi","sentAt":1,"later":true}"#;
+        assert!(matches!(
+            serde_json::from_str::<Frame>(newer).unwrap(),
+            Frame::Message { reply_to: None, file: None, .. }
+        ));
+        let mut plain = HashSet::new();
+        let item = LocalMessage {
+            id: "m2".into(),
+            chat: ROOM.into(),
+            sender_id: "u1".into(),
+            sender_name: "A".into(),
+            body: String::new(),
+            sent_at: 1,
+            delivered: true,
+            read: false,
+            reply_to: None,
+            file: Some(LocalFile { name: "a.png".into(), mime: "image/png".into(), size: 3, state: "ready".into() }),
+            reply_to_id: None,
+            file_path: None,
+        };
+        // An app without files gets a note in the body instead of the file.
+        assert!(matches!(message_frame(&item, &plain), Frame::Message { file: None, body, .. } if body.contains("a.png")));
+        plain.insert(FEATURE_FILES.to_string());
+        assert!(matches!(message_frame(&item, &plain), Frame::Message { file: Some(_), body, .. } if body.is_empty()));
     }
 
     #[test]

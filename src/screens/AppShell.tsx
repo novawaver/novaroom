@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from "react"
 import { useAuth } from "../auth"
-import { notifyIncoming, onNotificationClick, setTaskbarBadge, windowIsActive } from "../lib/desktop"
+import { notifyIncoming, onNotificationClick, setUnreadBadge, windowIsActive } from "../lib/desktop"
 import { useReconnectEpoch } from "../lib/network"
 import { readUnread, unreadTotal, writeUnread } from "../lib/unread"
 import {
@@ -25,8 +25,14 @@ import {
   readChatPermissions,
   type ChatPermissions,
   subscribeToMessages,
+  isMessageRead,
+  loadReadStates,
+  markConversationRead,
+  subscribeToProfileChanges,
+  subscribeToReadStates,
   type ChatMessage,
   type ChatSummary,
+  type ReadStates,
 } from "../lib/chats"
 import { PEOPLE_FILTERS, People, matchesFilter, type PeopleFilter } from "./People"
 import { LEADDESK_TABS, LeadDesk, leadDeskHints, useLeadDesk, type LeadDeskTab } from "./LeadDesk"
@@ -945,13 +951,19 @@ export function AppShell({ local }: { local: LocalChatState }) {
     setMessages([])
     if (!session) {
       setUnread({})
-      void setTaskbarBadge(0)
       return
     }
-    const counts = readUnread(session.userId)
-    setUnread(counts)
-    void setTaskbarBadge(unreadTotal(counts))
+    setUnread(readUnread(session.userId))
   }, [session?.userId])
+
+  // Everything unread (messages here and in Local chat, tasks, events) shows on the taskbar and
+  // tray icons, and goes away when this screen does (signing out, or going offline).
+  const unreadEverything =
+    unreadTotal(unread) + local.unreadTotal + unreadDeskEvents.length + unreadDeskTasks.length
+  useEffect(() => {
+    void setUnreadBadge(unreadEverything)
+  }, [unreadEverything])
+  useEffect(() => () => void setUnreadBadge(0), [])
 
   useEffect(() => {
     if (!selectedId) {
@@ -1057,7 +1069,6 @@ export function AppShell({ local }: { local: LocalChatState }) {
                 [message.conversationId]: (current[message.conversationId] ?? 0) + 1,
               }
               writeUnread(session.userId, next)
-              void setTaskbarBadge(unreadTotal(next))
               return next
             })
             void notifyIncoming(message.senderName || "Novaroom", messageLabel(message), `chat:${message.conversationId}`)
@@ -1133,6 +1144,59 @@ export function AppShell({ local }: { local: LocalChatState }) {
   // Who else is typing in the open chat. People this person blocked are never shown.
   const typing = useTyping(selectedId, session?.userId ?? null, profile?.displayName ?? "")
   const typingNow = typingText(typing.typists.filter((typist) => !blockedIds.includes(typist.userId)))
+
+  // Messages keep the name and picture their sender had when they loaded; show changes right away.
+  useEffect(
+    () =>
+      subscribeToProfileChanges(({ userId: changedId, displayName, avatarUrl }) => {
+        setMessages((current) =>
+          current.some((message) => message.senderId === changedId)
+            ? current.map((message) =>
+                message.senderId === changedId
+                  ? { ...message, senderName: displayName || message.senderName, senderAvatarUrl: avatarUrl }
+                  : message,
+              )
+            : current,
+        )
+        setChats((current) =>
+          current.map((chat) => (chat.kind === "direct" && chat.otherUserId === changedId ? { ...chat, avatarUrl } : chat)),
+        )
+      }),
+    [],
+  )
+
+  // How far everyone in the open chat has read, for the double check on sent messages.
+  const [readStates, setReadStates] = useState<ReadStates>({})
+  useEffect(() => {
+    setReadStates({})
+    if (!selectedId) return
+    let active = true
+    void loadReadStates(selectedId)
+      .then((loaded) => {
+        if (active) setReadStates(loaded)
+      })
+      .catch(() => {})
+    const stop = subscribeToReadStates(selectedId, (memberId, lastReadAt) =>
+      setReadStates((current) => ({ ...current, [memberId]: lastReadAt })),
+    )
+    return () => {
+      active = false
+      stop()
+    }
+  }, [selectedId])
+
+  // While a chat is on screen in the focused window, tell the others how far this person has read.
+  const newestSeenAt = [...messages].reverse().find((message) => !sendingIds.has(message.id))?.createdAt
+  useEffect(() => {
+    if (view !== "chats" || !selectedId || !newestSeenAt) return
+    const mark = () => {
+      if (document.hasFocus()) void markConversationRead(selectedId, newestSeenAt).catch(() => {})
+    }
+    mark()
+    window.addEventListener("focus", mark)
+    return () => window.removeEventListener("focus", mark)
+  }, [view, selectedId, newestSeenAt])
+
   if (!session || !profile) return null
 
   const selected = chats.find((chat) => chat.id === selectedId) ?? null
@@ -1373,7 +1437,6 @@ export function AppShell({ local }: { local: LocalChatState }) {
       if (!current[chatId]) return current
       const next = { ...current, [chatId]: 0 }
       writeUnread(session!.userId, next)
-      void setTaskbarBadge(unreadTotal(next))
       return next
     })
   }
@@ -1960,8 +2023,15 @@ export function AppShell({ local }: { local: LocalChatState }) {
                               {message.senderId === session.userId &&
                                 (sendingIds.has(message.id) ? (
                                   <span className="bubble-status sending" role="img" aria-label="Sending" />
+                                ) : isMessageRead(readStates, session.userId, selected.kind, message.createdAt) ? (
+                                  <svg className="bubble-status double read" viewBox="0 0 20 16" role="img" aria-label="Read">
+                                    <title>Read</title>
+                                    <path d="M1.5 8.5l3 3 7-7" />
+                                    <path d="M8.5 11.5l7-7" />
+                                  </svg>
                                 ) : (
                                   <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label="Sent">
+                                    <title>Sent</title>
                                     <path d="M3 8.5l3 3 7-7" />
                                   </svg>
                                 ))}

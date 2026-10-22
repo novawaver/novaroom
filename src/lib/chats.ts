@@ -727,3 +727,90 @@ export async function readChatPermissions(session: Session): Promise<ChatPermiss
   const row = data as { can_start_direct: boolean; can_start_group: boolean } | null
   return { direct: Boolean(row?.can_start_direct), group: Boolean(row?.can_start_group) }
 }
+
+// Read receipts -----------------------------------------------------------------
+
+/** How far each member has read a chat: their id, then the created_at of the newest message seen. */
+export type ReadStates = Record<string, string | null>
+
+export async function loadReadStates(conversationId: string): Promise<ReadStates> {
+  if (!supabase) return {}
+  const { data, error } = await supabase
+    .from("conversation_members")
+    .select("user_id, last_read_at")
+    .eq("conversation_id", conversationId)
+  if (error) throw new Error(error.message)
+  const rows = data as Array<{ user_id: string; last_read_at: string | null }>
+  return Object.fromEntries(rows.map((row) => [row.user_id, row.last_read_at]))
+}
+
+// The newest message already reported as read in each chat, so the same one is not sent twice.
+const reportedRead = new Map<string, number>()
+
+/** Tells the others in a chat that this person has seen it up to the message sent at `upTo`. */
+export async function markConversationRead(conversationId: string, upTo: string) {
+  if (!supabase) return
+  const at = Date.parse(upTo)
+  if ((reportedRead.get(conversationId) ?? 0) >= at) return
+  reportedRead.set(conversationId, at)
+  const { error } = await supabase.rpc("mark_conversation_read", { cid: conversationId, read_up_to: upTo })
+  if (error) {
+    reportedRead.delete(conversationId)
+    throw new Error(error.message)
+  }
+}
+
+/** Calls onChange whenever someone in the chat reads further. Returns a function that stops it. */
+export function subscribeToReadStates(conversationId: string, onChange: (userId: string, lastReadAt: string | null) => void) {
+  if (!supabase) return () => {}
+  const client = supabase
+  const channel = client
+    .channel(`chat-reads:${conversationId}:${crypto.randomUUID()}`)
+    .on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "conversation_members", filter: `conversation_id=eq.${conversationId}` },
+      (payload) => {
+        const row = payload.new as { user_id: string; last_read_at: string | null }
+        onChange(row.user_id, row.last_read_at)
+      },
+    )
+    .subscribe()
+  return () => {
+    void client.removeChannel(channel)
+  }
+}
+
+/**
+ * Whether one of this person's messages has been read: by the other person in a direct chat, by
+ * everyone else in a group, and by anyone else in a room, where people come and go.
+ */
+export function isMessageRead(states: ReadStates, selfId: string, kind: ChatSummary["kind"], createdAt: string) {
+  const sent = Date.parse(createdAt)
+  const others = Object.entries(states).filter(([id]) => id !== selfId)
+  if (others.length === 0) return false
+  const seen = ([, at]: [string, string | null]) => at !== null && Date.parse(at) >= sent
+  return kind === "room" ? others.some(seen) : others.every(seen)
+}
+
+// Profile changes ---------------------------------------------------------------
+
+export type ProfileChange = { userId: string; displayName: string; avatarUrl: string | null }
+
+/**
+ * Calls onChange when anyone changes their name or profile picture, so messages already on screen
+ * can show the new one. Returns a function that stops listening.
+ */
+export function subscribeToProfileChanges(onChange: (change: ProfileChange) => void) {
+  if (!supabase) return () => {}
+  const client = supabase
+  const channel = client
+    .channel(`profile-changes:${crypto.randomUUID()}`)
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, (payload) => {
+      const row = payload.new as { id: string; display_name: string | null; avatar_url: string | null }
+      onChange({ userId: row.id, displayName: row.display_name ?? "", avatarUrl: row.avatar_url })
+    })
+    .subscribe()
+  return () => {
+    void client.removeChannel(channel)
+  }
+}

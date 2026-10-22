@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { onNotificationClick } from "../lib/desktop"
+import { onNotificationClick, setUnreadBadge } from "../lib/desktop"
 import type { Session } from "../types"
 import { VaultRail } from "./AppShell"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
@@ -44,6 +44,12 @@ export function OfflineShell({
       }),
     [],
   )
+
+  // Only Local chat can have unread messages offline.
+  useEffect(() => {
+    void setUnreadBadge(local.unreadTotal)
+  }, [local.unreadTotal])
+  useEffect(() => () => void setUnreadBadge(0), [])
 
   const tabs: Array<{ id: OfflineView; label: string; hint: string; count: number }> = [
     { id: "local", label: "Local chat", hint: "Chats with people on this network", count: local.unreadTotal },

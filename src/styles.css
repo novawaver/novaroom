@@ -30,6 +30,7 @@
   --chip-soft-ink: #a63a15;
   --stat-cool: linear-gradient(135deg, #fd791e, #ffb27a);
   --stat-warm: linear-gradient(135deg, #d14a1d, #fd791e);
+  --read-tick: #1d5fc4;
 }
 
 :root[data-theme="dark"] {
@@ -57,6 +58,7 @@
   --chip-soft-ink: #1c1915;
   --stat-cool: linear-gradient(135deg, #fd791e, #ffb27a);
   --stat-warm: linear-gradient(135deg, #d14a1d, #fd791e);
+  --read-tick: #8cc0ff;
 }
 
 * {
@@ -4722,4 +4724,282 @@ code {
 .chat-mode-tab[aria-selected="true"] .chat-mode-count {
   background: #fff;
   color: var(--brand);
+}
+
+/* Local chat: replies, files, and dropping files onto the chat. */
+.local-thread {
+  position: relative;
+}
+
+.bubble-reply {
+  position: absolute;
+  top: 50%;
+  z-index: 5;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--muted);
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.12s;
+}
+
+.bubble-reply.mine {
+  right: calc(100% + 6px);
+}
+
+.bubble-reply.theirs {
+  left: calc(100% + 6px);
+}
+
+.bubble:hover .bubble-reply,
+.bubble-reply:focus-visible {
+  opacity: 1;
+}
+
+.bubble-reply:hover {
+  color: var(--ink);
+}
+
+.bubble-reply:disabled {
+  display: none;
+}
+
+.bubble-reply svg,
+.attach-button svg,
+.local-file-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The answered message, above a reply. */
+.bubble-quote {
+  display: grid;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 5px 9px;
+  border: 0;
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper) 55%, transparent);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bubble-quote span {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-row.flash .bubble {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 2px;
+}
+
+.bubble-status.double {
+  width: 15px;
+}
+
+.bubble-status.read {
+  color: var(--read-tick);
+}
+
+.local-image {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+
+.local-image-placeholder {
+  display: block;
+  width: 180px;
+  height: 120px;
+  margin-bottom: 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--paper) 55%, transparent);
+}
+
+.local-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 220px;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--paper) 55%, transparent);
+}
+
+.local-file-icon {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--muted);
+}
+
+.local-file-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  font-size: 13px;
+}
+
+.local-file-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-file-text span,
+.local-file-note {
+  color: var(--muted);
+}
+
+.local-file-error {
+  color: var(--danger) !important;
+}
+
+.local-file-note {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+/* A reply or a file waiting to be sent, above the message box. */
+.composer-extra {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 10px;
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.composer-extra-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  font-size: 13px;
+}
+
+.composer-extra-text span {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-extra-image {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.composer-extra-close {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.composer-extra-close:hover {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.attach-button {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.attach-button svg {
+  width: 20px;
+  height: 20px;
+}
+
+.attach-button:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--brand);
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 8px;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--brand);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  color: var(--ink);
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.image-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background: rgba(0, 0, 0, 0.82);
+  animation: drawer-fade 0.15s ease-out;
+}
+
+.image-viewer img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.image-viewer-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
 }

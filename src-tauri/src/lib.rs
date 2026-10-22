@@ -52,15 +52,36 @@ fn request_quit(app: &tauri::AppHandle) {
     }
 }
 
+/// The large logo and the banner across the top of every toast. Toasts can only show images from
+/// files, so these are written next to the app's other local data the first time they are needed.
+#[cfg(windows)]
+fn toast_images(app: &tauri::AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    const LOGO: &[u8] = include_bytes!("../icons/128x128@2x.png");
+    const BANNER: &[u8] = include_bytes!("../icons/notification-banner.png");
+    let dir = app.path().app_local_data_dir().ok()?.join("notification");
+    std::fs::create_dir_all(&dir).ok()?;
+    let write = |name: &str, bytes: &[u8]| {
+        let path = dir.join(name);
+        // Rewritten when an update changes the picture.
+        if std::fs::metadata(&path).map(|meta| meta.len()).ok() != Some(bytes.len() as u64) {
+            std::fs::write(&path, bytes).ok()?;
+        }
+        Some(path)
+    };
+    Some((write("logo.png", LOGO)?, write("banner.png", BANNER)?))
+}
+
 /// Shows a Windows toast that brings the window forward when clicked. The notification plugin's
 /// toasts have no click handler on desktop, so clicking them did nothing.
 /// target says what the click should open (for example "chat:<id>"); it is sent back to the window
 /// as a "notification-clicked" event.
+/// Every toast has the Novaroom banner and a large logo, and stays up longer than Windows' default.
+/// LeadDesk alerts ("desk:" targets) stay until dismissed, since they are things to act on.
 #[tauri::command]
 fn notify(app: tauri::AppHandle, title: String, body: String, target: Option<String>) -> Result<(), String> {
     #[cfg(windows)]
     {
-        use tauri_winrt_notification::Toast;
+        use tauri_winrt_notification::{Duration, IconCrop, Scenario, Toast};
         // Only the installed app has a Start menu shortcut carrying our app ID; a build run straight
         // from target\ borrows PowerShell's so the toast still appears (same rule as the plugin).
         let exe_dir = tauri::utils::platform::current_exe()
@@ -74,12 +95,20 @@ fn notify(app: tauri::AppHandle, title: String, body: String, target: Option<Str
         } else {
             app.config().identifier.clone()
         };
+        let images = toast_images(&app);
+        let lasting = target.as_deref().is_some_and(|target| target.starts_with("desk:"));
         // Toast::show waits briefly, so keep it off the command thread.
         std::thread::spawn(move || {
             let clicked = app.clone();
-            let _ = Toast::new(&app_id)
-                .title(&title)
-                .text1(&body)
+            let mut toast = Toast::new(&app_id).title(&title).text1(&body).duration(Duration::Long);
+            if let Some((logo, banner)) = &images {
+                toast = toast.hero(banner, "Novaroom").icon(logo, IconCrop::Square, "Novaroom");
+            }
+            if lasting {
+                // A reminder only stays on screen when it has a button.
+                toast = toast.scenario(Scenario::Reminder).add_button("Open", "open");
+            }
+            let _ = toast
                 .on_activated(move |_| {
                     show_main(&clicked);
                     if let Some(target) = &target {
@@ -96,6 +125,24 @@ fn notify(app: tauri::AppHandle, title: String, body: String, target: Option<Str
         let _ = (app, title, body, target);
         Err("Clickable notifications are only built for Windows.".into())
     }
+}
+
+/// Shows how many unread things there are on the tray icon: the window draws the icon with its
+/// badge (32 by 32, RGBA) and sends it here. A count of 0 puts the plain icon back.
+#[tauri::command]
+fn set_tray_badge(app: tauri::AppHandle, count: u32, icon: Option<Vec<u8>>) -> Result<(), String> {
+    let tray = app.tray_by_id("novaroom").ok_or("The tray icon is not ready yet.")?;
+    let image = match icon {
+        Some(rgba) if count > 0 && rgba.len() == 32 * 32 * 4 => Some(tauri::image::Image::new_owned(rgba, 32, 32)),
+        _ => app.default_window_icon().cloned(),
+    };
+    tray.set_icon(image).map_err(|error| error.to_string())?;
+    let tooltip = match count {
+        0 => "Novaroom".to_string(),
+        1 => "Novaroom - 1 unread".to_string(),
+        _ => format!("Novaroom - {count} unread"),
+    };
+    tray.set_tooltip(Some(tooltip)).map_err(|error| error.to_string())
 }
 
 /// Seconds since the last keyboard or mouse input anywhere on the computer, for the Timer.
@@ -243,6 +290,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             idle_seconds,
             notify,
+            set_tray_badge,
             startup_settings,
             set_startup_settings,
             set_unsaved_changes,
@@ -260,7 +308,12 @@ pub fn run() {
             localchat::local_chat_chats,
             localchat::local_chat_messages,
             localchat::local_chat_send,
-            localchat::local_chat_set_idle
+            localchat::local_chat_set_idle,
+            localchat::local_chat_stage_file,
+            localchat::local_chat_file,
+            localchat::local_chat_save_file,
+            localchat::local_chat_typing,
+            localchat::local_chat_mark_read
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

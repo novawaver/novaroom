@@ -1,14 +1,21 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { notifyIncoming, windowIsActive } from "../lib/desktop"
 import { useIdle } from "../lib/presence"
+import { typingText } from "../lib/typing"
 import {
+  LOCAL_FILE_LIMIT,
   LOCAL_ROOM,
   localChatAvailable,
+  localFileUrl,
   localChats,
+  localMessageLabel,
   localMessages,
   localPeers,
+  markLocalRead,
   onLocalChat,
+  saveLocalFile,
   sendLocalMessage,
+  sendLocalTyping,
   setLocalIdle,
   startLocalChat,
   stopLocalChat,
@@ -23,6 +30,9 @@ import type { Session } from "../types"
 // since can be recognised on the network.
 const DIRECTORY_EVERY_MS = 15 * 60 * 1000
 const MAX_BODY = 4000
+// As in the other chats: how often "still typing" is sent, and how long it lasts without one.
+const TYPING_EVERY_MS = 2500
+const TYPING_LASTS_MS = 6000
 
 export type LocalChatState = ReturnType<typeof useLocalChat>
 
@@ -47,6 +57,9 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
   selectedRef.current = selected
   const visibleRef = useRef(visible)
   visibleRef.current = visible
+  // Who is typing where: chat, then person, then when it runs out.
+  const [typing, setTyping] = useState<Record<string, Record<string, number>>>({})
+  const lastTypingRef = useRef<{ chat: string; at: number } | null>(null)
 
   const reloadChats = useCallback(() => {
     void localChats()
@@ -136,15 +149,75 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
           if (active && visibleRef.current && message.chat === selectedRef.current) return
           setUnread((current) => ({ ...current, [message.chat]: (current[message.chat] ?? 0) + 1 }))
           const where = message.chat === LOCAL_ROOM ? " (local network)" : " (local)"
-          void notifyIncoming(`${message.senderName || "Someone"}${where}`, message.body, `local:${message.chat}`)
+          void notifyIncoming(`${message.senderName || "Someone"}${where}`, localMessageLabel(message), `local:${message.chat}`)
         })
       },
       delivered(id) {
         setMessages((current) => current.map((item) => (item.id === id ? { ...item, delivered: true } : item)))
       },
       peers: setPeers,
+      typing({ chat, userId: typist, typing: on }) {
+        setTyping((current) => {
+          const people = { ...current[chat] }
+          if (on) people[typist] = Date.now() + TYPING_LASTS_MS
+          else delete people[typist]
+          return { ...current, [chat]: people }
+        })
+      },
+      read({ chat, upTo }) {
+        if (chat !== selectedRef.current) return
+        setMessages((current) =>
+          current.map((item) =>
+            item.senderId === userId && item.sentAt <= upTo ? { ...item, delivered: true, read: true } : item,
+          ),
+        )
+      },
+      file({ id, state }) {
+        setMessages((current) =>
+          current.map((item) => (item.id === id && item.file ? { ...item, file: { ...item.file, state } } : item)),
+        )
+      },
     })
   }, [publicKey, userId, reloadChats])
+
+  // A message from someone ends their typing, as does time without a "still typing".
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now()
+      setTyping((current) => {
+        let changed = false
+        const next: typeof current = {}
+        for (const [chat, people] of Object.entries(current)) {
+          next[chat] = Object.fromEntries(Object.entries(people).filter(([, until]) => until > now))
+          changed ||= Object.keys(next[chat]).length !== Object.keys(people).length
+        }
+        return changed ? next : current
+      })
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  useEffect(() => {
+    const last = messages[messages.length - 1]
+    if (!last) return
+    setTyping((current) => {
+      if (!current[last.chat]?.[last.senderId]) return current
+      const people = { ...current[last.chat] }
+      delete people[last.senderId]
+      return { ...current, [last.chat]: people }
+    })
+  }, [messages])
+
+  // While a direct chat is on screen in the focused window, tell the other person it has been read.
+  const newestTheirs = [...messages].reverse().find((item) => item.senderId !== userId)?.sentAt
+  useEffect(() => {
+    if (!publicKey || !visible || selected === LOCAL_ROOM || newestTheirs === undefined) return
+    const mark = () => {
+      if (document.hasFocus()) void markLocalRead(selected).catch(() => {})
+    }
+    mark()
+    window.addEventListener("focus", mark)
+    return () => window.removeEventListener("focus", mark)
+  }, [publicKey, visible, selected, newestTheirs])
 
   const select = useCallback(
     (chat: string) => {
@@ -161,11 +234,32 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     [publicKey, loadMessages],
   )
 
-  async function send(body: string) {
-    const sent = await sendLocalMessage(selected, body)
+  async function send(body: string, replyTo: string | null, file: File | null) {
+    const sent = await sendLocalMessage(selected, body, replyTo, file)
+    onType(false)
     setMessages((current) => [...current, sent])
     reloadChats()
   }
+
+  /** Call on every change to the message box; hasText is false once it is empty or sent. */
+  function onType(hasText: boolean) {
+    if (!publicKey) return
+    const last = lastTypingRef.current
+    if (!hasText || (last && last.chat !== selected)) {
+      if (last) void sendLocalTyping(last.chat, false).catch(() => {})
+      lastTypingRef.current = null
+      if (!hasText) return
+    }
+    const now = Date.now()
+    if (lastTypingRef.current && now - lastTypingRef.current.at < TYPING_EVERY_MS) return
+    lastTypingRef.current = { chat: selected, at: now }
+    void sendLocalTyping(selected, true).catch(() => {})
+  }
+
+  // Names of others typing in the open chat.
+  const typists = Object.keys(typing[selected] ?? {})
+    .filter((id) => id !== userId)
+    .map((id) => peers.find((peer) => peer.userId === id)?.name || "Someone")
 
   /** The name to show for a chat: the room's, or the other person's. */
   function chatName(chat: string) {
@@ -191,6 +285,8 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     setVisible,
     select,
     send,
+    onType,
+    typists,
     chatName,
   }
 }
@@ -287,12 +383,175 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
   )
 }
 
+function AttachIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 11.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.1 8.1a1.7 1.7 0 0 1-2.4-2.4l7.4-7.4" />
+    </svg>
+  )
+}
+
+function ReplyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9.5 6.5L4 12l5.5 5.5" />
+      <path d="M4.5 12H14a6 6 0 0 1 6 6v.5" />
+    </svg>
+  )
+}
+
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-10z" />
+      <path d="M14 3.5v5h5" />
+    </svg>
+  )
+}
+
+function isImage(mime: string) {
+  return mime.startsWith("image/") && mime !== "image/svg+xml"
+}
+
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** One check when sent or delivered, two when the other person has seen it. */
+function LocalStatus({ message, isRoom }: { message: LocalMessage; isRoom: boolean }) {
+  if (!isRoom && !message.delivered) {
+    return (
+      <span
+        className="bubble-status sending"
+        role="img"
+        aria-label="Waiting for them to come on the network"
+        title="Waiting for them to come on the network"
+      />
+    )
+  }
+  if (!isRoom && message.read) {
+    return (
+      <svg className="bubble-status double read" viewBox="0 0 20 16" role="img" aria-label="Read">
+        <title>Read</title>
+        <path d="M1.5 8.5l3 3 7-7" />
+        <path d="M8.5 11.5l7-7" />
+      </svg>
+    )
+  }
+  const label = isRoom ? "Sent" : "Delivered"
+  return (
+    <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label={label}>
+      <title>{label}</title>
+      <path d="M3 8.5l3 3 7-7" />
+    </svg>
+  )
+}
+
+/** A message's image, read from this computer once it has arrived. */
+function LocalImage({ id, name, mime, onOpen }: { id: string; name: string; mime: string; onOpen: (url: string) => void }) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void localFileUrl(id, mime)
+      .then((loaded) => {
+        if (active) setUrl(loaded)
+      })
+      .catch(() => {
+        if (active) setFailed(true)
+      })
+    return () => {
+      active = false
+    }
+  }, [id, mime])
+
+  if (failed) return <p className="local-file-note">This image is no longer on this computer.</p>
+  if (!url) return <span className="local-image-placeholder" aria-label="Loading image" />
+  return (
+    <button type="button" className="local-image" title="View larger" onClick={() => onOpen(url)}>
+      <img className="bubble-image" src={url} alt={name} />
+    </button>
+  )
+}
+
+/** A message's file: the image itself, or a card to save it, or a note while it is on its way. */
+function LocalFileView({ message, onOpenImage }: { message: LocalMessage; onOpenImage: (url: string, name: string) => void }) {
+  const [error, setError] = useState("")
+  const file = message.file
+  if (!file) return null
+  if (file.state === "ready" && isImage(file.mime)) {
+    return <LocalImage id={message.id} name={file.name} mime={file.mime} onOpen={(url) => onOpenImage(url, file.name)} />
+  }
+  return (
+    <div className="local-file">
+      <span className="local-file-icon">
+        <FileIcon />
+      </span>
+      <span className="local-file-text">
+        <strong>{file.name}</strong>
+        <span>
+          {formatBytes(file.size)}
+          {file.state === "waiting" && " · Arriving when they are on the network"}
+          {file.state === "missing" && " · No longer available"}
+        </span>
+        {error && <span className="local-file-error">{error}</span>}
+      </span>
+      {file.state === "ready" && (
+        <button
+          type="button"
+          className="text-button"
+          onClick={() => {
+            setError("")
+            void saveLocalFile(message.id).catch((caught) =>
+              setError(caught instanceof Error ? caught.message : "Could not save the file."),
+            )
+          }}
+        >
+          Save
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** Shows an image over the app at a larger size. Esc or a click outside it closes it. */
+function ImageViewer({ url, name, onClose }: { url: string; name: string; onClose: () => void }) {
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose()
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  return (
+    <div className="image-viewer" role="dialog" aria-label={name} onClick={onClose}>
+      <img src={url} alt={name} onClick={(event) => event.stopPropagation()} />
+      <button type="button" className="image-viewer-close" aria-label="Close" onClick={onClose}>
+        ×
+      </button>
+    </div>
+  )
+}
+
 /** The open Local chat: its messages and the box to write one. */
 export function LocalChatThread({ local, userId }: { local: LocalChatState; userId: string }) {
   const [body, setBody] = useState("")
   const [sendError, setSendError] = useState("")
+  const [sending, setSending] = useState(false)
+  const [replyTo, setReplyTo] = useState<LocalMessage | null>(null)
+  const [file, setFile] = useState<File | null>(null)
+  const [filePreview, setFilePreview] = useState<string | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [viewing, setViewing] = useState<{ url: string; name: string } | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
+  const bodyRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const { setVisible, selected } = local
+  const closeViewer = useCallback(() => setViewing(null), [])
 
   useEffect(() => {
     setVisible(true)
@@ -302,6 +561,8 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   useEffect(() => {
     setBody("")
     setSendError("")
+    setReplyTo(null)
+    setFile(null)
   }, [selected])
 
   useEffect(() => {
@@ -309,19 +570,55 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     if (log) log.scrollTop = log.scrollHeight
   }, [local.messages])
 
+  // A small picture of an image about to be sent.
+  useEffect(() => {
+    if (!file || !isImage(file.type)) {
+      setFilePreview(null)
+      return
+    }
+    const url = URL.createObjectURL(file)
+    setFilePreview(url)
+    return () => URL.revokeObjectURL(url)
+  }, [file])
+
   const here = local.peers.some((peer) => peer.userId === selected)
   const isRoom = selected === LOCAL_ROOM
+  const nameOf = (id: string, fallback: string) => (id === userId ? "You" : fallback || "Someone")
+
+  function attach(next: File | undefined) {
+    if (!next) return
+    if (next.size > LOCAL_FILE_LIMIT) {
+      setSendError("Files can be up to 25 MB.")
+      return
+    }
+    setSendError("")
+    setFile(next)
+    bodyRef.current?.focus()
+  }
+
+  function showMessage(id: string) {
+    const target = document.getElementById(`local-message-${id}`)
+    if (!target) return
+    target.scrollIntoView({ block: "center", behavior: "smooth" })
+    target.classList.add("flash")
+    window.setTimeout(() => target.classList.remove("flash"), 1200)
+  }
 
   async function onSend(event: FormEvent) {
     event.preventDefault()
     const text = body.trim()
-    if (!text) return
+    if ((!text && !file) || sending) return
     setSendError("")
+    setSending(true)
     try {
-      await local.send(text)
+      await local.send(text, replyTo?.id ?? null, file)
       setBody("")
+      setReplyTo(null)
+      setFile(null)
     } catch (caught) {
       setSendError(caught instanceof Error ? caught.message : "Could not send that message.")
+    } finally {
+      setSending(false)
     }
   }
 
@@ -336,8 +633,26 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     )
   }
 
+  const typingNow = typingText(local.typists.map((name) => ({ userId: name, name })))
+
   return (
-    <section className="thread">
+    <section
+      className={dragging ? "thread local-thread dragging" : "thread local-thread"}
+      onDragOver={(event) => {
+        if (!local.running || !event.dataTransfer.types.includes("Files")) return
+        event.preventDefault()
+        setDragging(true)
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false)
+      }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return
+        event.preventDefault()
+        setDragging(false)
+        attach(event.dataTransfer.files[0])
+      }}
+    >
       <header className="thread-bar">
         <div>
           <h1>{local.chatName(selected)}</h1>
@@ -371,30 +686,39 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                 <span>{initials(name)}</span>
               </span>
             )
+            const reply = message.replyTo
             return (
               <Fragment key={message.id}>
                 {newDay && <p className="message-system-note">{day}</p>}
-                <div className={mine ? "message-row mine" : "message-row theirs"}>
+                <div id={`local-message-${message.id}`} className={mine ? "message-row mine" : "message-row theirs"}>
                   {!mine && avatar}
                   <article className={mine ? "bubble mine" : "bubble theirs"}>
                     {isRoom && !mine && <p className="sender-name">{name}</p>}
-                    <p>{message.body}</p>
+                    {reply && (
+                      <button type="button" className="bubble-quote" onClick={() => showMessage(reply.id)}>
+                        <strong>{nameOf(reply.senderId, reply.senderName)}</strong>
+                        <span>{reply.body || (reply.fileName ? `File: ${reply.fileName}` : "")}</span>
+                      </button>
+                    )}
+                    <LocalFileView message={message} onOpenImage={(url, imageName) => setViewing({ url, name: imageName })} />
+                    {message.body && <p>{message.body}</p>}
                     <span className="bubble-meta">
                       <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>
-                      {mine &&
-                        (message.delivered ? (
-                          <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label={isRoom ? "Sent" : "Delivered"}>
-                            <path d="M3 8.5l3 3 7-7" />
-                          </svg>
-                        ) : (
-                          <span
-                            className="bubble-status sending"
-                            role="img"
-                            aria-label="Waiting for them to come on the network"
-                            title="Waiting for them to come on the network"
-                          />
-                        ))}
+                      {mine && <LocalStatus message={message} isRoom={isRoom} />}
                     </span>
+                    <button
+                      type="button"
+                      className={mine ? "bubble-reply mine" : "bubble-reply theirs"}
+                      aria-label="Reply"
+                      title="Reply"
+                      disabled={!local.running}
+                      onClick={() => {
+                        setReplyTo(message)
+                        bodyRef.current?.focus()
+                      }}
+                    >
+                      <ReplyIcon />
+                    </button>
                   </article>
                   {mine && avatar}
                 </div>
@@ -403,33 +727,116 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           })
         )}
       </div>
+      {/* Always there, so the composer does not jump when someone starts or stops typing. */}
+      <p className="typing-status" aria-live="polite">
+        {typingNow && (
+          <>
+            <span className="typing-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+            {typingNow}…
+          </>
+        )}
+      </p>
       <form className="composer" onSubmit={(event) => void onSend(event)}>
         {sendError && (
           <p className="form-error" role="alert">
             {sendError}
           </p>
         )}
+        {replyTo && (
+          <div className="composer-extra">
+            <span className="composer-extra-text">
+              <strong>Replying to {nameOf(replyTo.senderId, replyTo.senderName)}</strong>
+              <span>{localMessageLabel(replyTo)}</span>
+            </span>
+            <button type="button" className="composer-extra-close" aria-label="Cancel reply" onClick={() => setReplyTo(null)}>
+              ×
+            </button>
+          </div>
+        )}
+        {file && (
+          <div className="composer-extra">
+            {filePreview ? (
+              <img className="composer-extra-image" src={filePreview} alt="" />
+            ) : (
+              <span className="local-file-icon">
+                <FileIcon />
+              </span>
+            )}
+            <span className="composer-extra-text">
+              <strong>{file.name || "Pasted image"}</strong>
+              <span>{formatBytes(file.size)}</span>
+            </span>
+            <button type="button" className="composer-extra-close" aria-label="Remove file" onClick={() => setFile(null)}>
+              ×
+            </button>
+          </div>
+        )}
         <div className="composer-row">
+          <input
+            ref={fileInputRef}
+            type="file"
+            hidden
+            onChange={(event) => {
+              attach(event.target.files?.[0])
+              event.target.value = ""
+            }}
+          />
+          <button
+            type="button"
+            className="attach-button"
+            aria-label="Attach a file"
+            title="Attach a file"
+            disabled={!local.running}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <AttachIcon />
+          </button>
           <textarea
+            ref={bodyRef}
             value={body}
             maxLength={MAX_BODY}
             rows={1}
             placeholder={isRoom ? "Write to everyone on this network" : "Write a message"}
             aria-label="Message"
             disabled={!local.running}
-            onChange={(event) => setBody(event.target.value)}
+            onChange={(event) => {
+              setBody(event.target.value)
+              local.onType(event.target.value.trim() !== "")
+            }}
+            onPaste={(event) => {
+              const pasted = event.clipboardData.files[0]
+              if (!pasted) return
+              event.preventDefault()
+              attach(pasted)
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault()
                 event.currentTarget.form?.requestSubmit()
               }
+              if (event.key === "Escape" && replyTo) setReplyTo(null)
             }}
           />
-          <button type="submit" className="button send-button" aria-label="Send" disabled={!local.running || !body.trim()}>
+          <button
+            type="submit"
+            className="button send-button"
+            aria-label="Send"
+            disabled={!local.running || sending || (!body.trim() && !file)}
+          >
             <SendIcon />
           </button>
         </div>
       </form>
+      {dragging && (
+        <div className="drop-overlay" aria-hidden="true">
+          Drop a file to send it
+        </div>
+      )}
+      {viewing && <ImageViewer url={viewing.url} name={viewing.name} onClose={closeViewer} />}
     </section>
   )
 }

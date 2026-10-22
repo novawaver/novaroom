@@ -57,8 +57,7 @@ function drawBadge(count: number) {
   return new Uint8Array(context.getImageData(0, 0, size, size).data)
 }
 
-export async function setTaskbarBadge(count: number) {
-  if (!inTauri()) return
+async function setTaskbarBadge(count: number) {
   const { getCurrentWindow } = await import("@tauri-apps/api/window")
   const { Image } = await import("@tauri-apps/api/image")
   const windowHandle = getCurrentWindow()
@@ -74,6 +73,66 @@ export async function setTaskbarBadge(count: number) {
   await windowHandle.setOverlayIcon(image)
   if (overlay) await overlay.close()
   overlay = image
+}
+
+let trayLogo: Promise<HTMLImageElement> | null = null
+
+function loadTrayLogo() {
+  trayLogo ??= new Promise((resolve, reject) => {
+    const image = new window.Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => {
+      trayLogo = null
+      reject(new Error("Could not load the logo."))
+    }
+    image.src = "/logo.png"
+  })
+  return trayLogo
+}
+
+/** The tray icon with a count in a red circle at its lower right, as 32 by 32 RGBA. */
+async function drawTrayIcon(count: number) {
+  const size = 32
+  const canvas = document.createElement("canvas")
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext("2d")
+  if (!context) return null
+  context.drawImage(await loadTrayLogo(), 0, 0, size, size)
+  const label = count > 9 ? "9+" : String(count)
+  // A ring in the clear area around the circle keeps it readable on any taskbar colour.
+  context.fillStyle = "#fff"
+  context.beginPath()
+  context.arc(22, 22, 10.5, 0, Math.PI * 2)
+  context.fill()
+  context.fillStyle = "#d32f2f"
+  context.beginPath()
+  context.arc(22, 22, 9, 0, Math.PI * 2)
+  context.fill()
+  context.fillStyle = "#fff"
+  context.font = `700 ${label.length > 1 ? 10 : 13}px Segoe UI, sans-serif`
+  context.textAlign = "center"
+  context.textBaseline = "middle"
+  context.fillText(label, 22, 23)
+  return Array.from(context.getImageData(0, 0, size, size).data)
+}
+
+async function setTrayBadge(count: number) {
+  const { invoke } = await import("@tauri-apps/api/core")
+  const icon = count > 0 ? await drawTrayIcon(count) : null
+  await invoke("set_tray_badge", { count: Math.max(0, count), icon })
+}
+
+let shownCount = -1
+
+/** Shows how many unread things there are (messages, tasks, events) on the taskbar and tray icons. */
+export async function setUnreadBadge(count: number) {
+  if (!inTauri() || count === shownCount) return
+  shownCount = count
+  await Promise.all([setTaskbarBadge(count), setTrayBadge(count)]).catch(() => {
+    // Shown again with the next change.
+    shownCount = -1
+  })
 }
 
 // target: what clicking the notification opens, such as "chat:<id>" or "desk:tasks". It comes back
