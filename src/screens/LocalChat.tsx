@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react"
-import { notifyIncoming, onNotificationClick, windowIsActive } from "../lib/desktop"
+import { notifyIncoming, windowIsActive } from "../lib/desktop"
+import { useIdle } from "../lib/presence"
 import {
   LOCAL_ROOM,
   localChatAvailable,
@@ -8,6 +9,7 @@ import {
   localPeers,
   onLocalChat,
   sendLocalMessage,
+  setLocalIdle,
   startLocalChat,
   stopLocalChat,
   syncLocalDirectory,
@@ -84,6 +86,12 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     if (publicKey && userId) void startLocalChat(userId, name).catch(() => {})
   }, [publicKey, userId, name])
 
+  // Share whether this person is idle, again whenever Local chat (re)starts.
+  const idle = useIdle(available && userId !== null) === "idle"
+  useEffect(() => {
+    if (publicKey) void setLocalIdle(idle).catch(() => {})
+  }, [publicKey, idle])
+
   // Register this computer and download everyone's keys whenever the server can be reached.
   useEffect(() => {
     if (!publicKey || !userId || offline) return
@@ -138,11 +146,20 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     })
   }, [publicKey, userId, reloadChats])
 
-  const select = useCallback((chat: string) => {
-    setSelected(chat)
-    setMessages([])
-    setUnread((current) => (current[chat] ? { ...current, [chat]: 0 } : current))
-  }, [])
+  const select = useCallback(
+    (chat: string) => {
+      setUnread((current) => (current[chat] ? { ...current, [chat]: 0 } : current))
+      if (chat === selectedRef.current) {
+        // Already selected (say, from a notification), so the load above won't run again. Reload
+        // rather than clear, in case anything changed while the page was closed.
+        if (publicKey) loadMessages(chat)
+        return
+      }
+      setSelected(chat)
+      setMessages([])
+    },
+    [publicKey, loadMessages],
+  )
 
   async function send(body: string) {
     const sent = await sendLocalMessage(selected, body)
@@ -214,7 +231,7 @@ function SendIcon() {
 
 /** The sidebar: the room, then everyone on the network and earlier direct chats. */
 export function LocalChatRail({ local }: { local: LocalChatState }) {
-  const online = new Set(local.peers.map((peer) => peer.userId))
+  const online = new Map(local.peers.map((peer) => [peer.userId, peer]))
   const summaries = new Map(local.chats.map((chat) => [chat.chat, chat]))
   // People here now first, then earlier chats, newest first.
   const direct = [
@@ -223,7 +240,8 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
   ]
   const room = summaries.get(LOCAL_ROOM)
 
-  const row = (chat: string, hint: string, here: boolean | null) => (
+  // here: null for the room, else whether they are on the network and whether they are idle.
+  const row = (chat: string, hint: string, here: { idle: boolean } | false | null) => (
     <button
       key={chat}
       type="button"
@@ -233,7 +251,10 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
       <span className="avatar local-avatar">
         {chat === LOCAL_ROOM ? <NetworkIcon /> : <span>{initials(local.chatName(chat))}</span>}
         {here !== null && (
-          <span className={`presence-dot local-presence ${here ? "online" : "offline"}`} title={here ? "On this network" : "Not on the network"} />
+          <span
+            className={`presence-dot local-presence ${!here ? "offline" : here.idle ? "idle" : "online"}`}
+            title={!here ? "Not on the network" : here.idle ? "Idle, on this network" : "On this network"}
+          />
         )}
       </span>
       <span className="profile-chip-text">
@@ -260,7 +281,7 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
           null,
         )}
         {direct.length > 0 && <p className="list-label local-list-label">People</p>}
-        {direct.map((chat) => row(chat, summaries.get(chat)?.lastBody || "On this network", online.has(chat)))}
+        {direct.map((chat) => row(chat, summaries.get(chat)?.lastBody || "On this network", online.get(chat) ?? false))}
       </div>
     </>
   )
@@ -410,40 +431,5 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
         </div>
       </form>
     </section>
-  )
-}
-
-/**
- * The whole app when it opened without internet: Local chat only, until the server is reached
- * again and the full app takes over.
- */
-export function OfflineShell({ local, session, onSignOut }: { local: LocalChatState; session: Session; onSignOut: () => void }) {
-  const { select } = local
-
-  // Clicking a Local chat notification opens that chat.
-  useEffect(
-    () =>
-      onNotificationClick((target) => {
-        if (target.startsWith("local:")) select(target.slice("local:".length))
-      }),
-    [select],
-  )
-
-  return (
-    <div className="offline-shell">
-      <p className="offline-banner" role="status">
-        <strong>No internet connection.</strong> Local chat works with people on this network. Everything else comes back
-        once Novaroom reaches the server again.
-        <button type="button" className="text-button" onClick={onSignOut}>
-          Sign out
-        </button>
-      </p>
-      <div className="shell offline-shell-body">
-        <aside className="rail">
-          <LocalChatRail local={local} />
-        </aside>
-        <LocalChatThread local={local} userId={session.userId} />
-      </div>
-    </div>
   )
 }

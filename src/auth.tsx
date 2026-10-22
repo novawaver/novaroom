@@ -22,6 +22,9 @@ const ROLE_KEY = (userId: string) => `novaroom.role.${userId}`
 // Who was last signed in on this computer and their profile, so the app can still open (for Local
 // chat) when it starts without internet.
 const OFFLINE_KEY = "novaroom.offline-identity"
+// Every account that has signed in on this computer, newest first. Unlike OFFLINE_KEY this outlasts
+// signing out, so the sign-in screen can offer to continue offline as one of them.
+const ACCOUNTS_KEY = "novaroom.offline-accounts"
 // While offline, how often to try reaching the server again.
 const RECONNECT_EVERY_MS = 15 * 1000
 
@@ -30,9 +33,16 @@ export type RoleChange = { from: string; to: string }
 type AuthContextValue = {
   configured: boolean
   ready: boolean
-  // True when the app opened without reaching the server, from what this computer remembers.
-  // Only Local chat works then; it turns false once the server is reached.
+  // True when the app opened without reaching the server, from what this computer remembers, or
+  // the person chose to continue offline. Only Local chat and Vault work then.
   offline: boolean
+  // True when offline was chosen on the sign-in screen. There is no sign-in with the server behind
+  // it, so it stays offline until the person signs in; otherwise it ends once the server answers.
+  offlineChosen: boolean
+  // Accounts that have signed in on this computer and so can continue offline.
+  offlineAccounts: OfflineIdentity[]
+  signInOffline: (userId: string) => void
+  forgetOfflineAccount: (userId: string) => void
   session: Session | null
   profile: Profile | null
   // Set when someone else (an admin) changed this person's role; cleared with dismissRoleChange.
@@ -98,7 +108,7 @@ function writeKnownRole(userId: string, role: string) {
   }
 }
 
-type OfflineIdentity = { session: Session; profile: Profile }
+export type OfflineIdentity = { session: Session; profile: Profile }
 
 function readOfflineIdentity(): OfflineIdentity | null {
   try {
@@ -115,6 +125,23 @@ function writeOfflineIdentity(identity: OfflineIdentity | null) {
     else localStorage.removeItem(OFFLINE_KEY)
   } catch {
     // Not remembered; without internet the app shows the sign-in screen instead.
+  }
+}
+
+function readOfflineAccounts(): OfflineIdentity[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ACCOUNTS_KEY) ?? "[]") as OfflineIdentity[]
+    return Array.isArray(parsed) ? parsed.filter((item) => item?.session?.userId && item.profile) : []
+  } catch {
+    return []
+  }
+}
+
+function writeOfflineAccounts(accounts: OfflineIdentity[]) {
+  try {
+    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts))
+  } catch {
+    // Not remembered; the sign-in screen just won't offer this account offline.
   }
 }
 
@@ -162,6 +189,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [roleChange, setRoleChange] = useState<RoleChange | null>(null)
   const [offline, setOffline] = useState(false)
+  const [offlineChosen, setOfflineChosen] = useState(false)
+  // Starts with the last account to sign in here, which may predate the list of accounts.
+  const [offlineAccounts, setOfflineAccounts] = useState<OfflineIdentity[]>(() => {
+    const accounts = readOfflineAccounts()
+    const last = readOfflineIdentity()
+    if (!last || accounts.some((item) => item.session.userId === last.session.userId)) return accounts
+    return [last, ...accounts]
+  })
 
   // Takes a profile read from the database. Your own role edits are recorded before they are saved,
   // so a role that differs from the last one seen here was changed by someone else.
@@ -209,6 +244,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(next)
       applyLoaded(next.userId, loaded)
       setOffline(false)
+      setOfflineChosen(false)
     }
 
     /** Reads the saved sign-in; refreshing an expired one needs the server. */
@@ -249,7 +285,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // While offline, keep trying the server; the full app opens again once it answers.
   useEffect(() => {
-    if (!offline || !supabase) return
+    if (!offline || offlineChosen || !supabase) return
     const client = supabase
     const retry = async () => {
       const { data, error } = await client.auth.getSession()
@@ -279,12 +315,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.clearInterval(timer)
       window.removeEventListener("online", retry)
     }
-  }, [offline, applyLoaded])
+  }, [offline, offlineChosen, applyLoaded])
 
   // Remember who is signed in, for opening without internet next time.
   useEffect(() => {
-    if (supabase && session && profile && !offline) writeOfflineIdentity({ session, profile })
+    if (!supabase || !session || !profile || offline) return
+    writeOfflineIdentity({ session, profile })
+    setOfflineAccounts((current) => [
+      { session, profile },
+      ...current.filter((item) => item.session.userId !== session.userId),
+    ])
   }, [session, profile, offline])
+
+  useEffect(() => writeOfflineAccounts(offlineAccounts), [offlineAccounts])
 
   // Keep the profile current while signed in: live updates, plus a reload whenever the window gets
   // focus in case the live connection dropped.
@@ -322,6 +365,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       configured: isSupabaseConfigured,
       ready,
       offline,
+      offlineChosen,
+      offlineAccounts,
+      signInOffline(userId: string) {
+        const account = offlineAccounts.find((item) => item.session.userId === userId)
+        if (!account) return
+        setSession(account.session)
+        setProfile(account.profile)
+        setOfflineChosen(true)
+        setOffline(true)
+      },
+      forgetOfflineAccount(userId: string) {
+        setOfflineAccounts((current) => current.filter((item) => item.session.userId !== userId))
+      },
       session,
       profile,
       roleChange,
@@ -414,12 +470,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (error) throw safetyError(error)
         writeUnread(session.userId, {})
         writeOfflineIdentity(null)
+        setOfflineAccounts((current) => current.filter((item) => item.session.userId !== session.userId))
         await supabase.auth.signOut().catch(() => undefined)
         setSession(null)
         setProfile(null)
       },
       async signOut() {
-        if (supabase) {
+        // Offline by choice has no sign-in with the server to end.
+        if (supabase && !offlineChosen) {
           // Without internet, only this computer can forget the sign-in.
           const { error } = await supabase.auth.signOut(offline ? { scope: "local" } : undefined)
           if (error) throw error
@@ -429,9 +487,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSession(null)
         setProfile(null)
         setOffline(false)
+        setOfflineChosen(false)
       },
     }
-  }, [applyLoaded, offline, profile, ready, roleChange, session])
+  }, [applyLoaded, offline, offlineAccounts, offlineChosen, profile, ready, roleChange, session])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }

@@ -6,6 +6,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 mod localchat;
+mod shortcut;
 mod vault;
 
 /// The argument Windows passes when it starts Novaroom at sign-in, so we can tell that launch apart.
@@ -221,6 +222,16 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        // Only the "open Novaroom" shortcut is ever registered (see shortcut.rs), so any press opens the window.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        show_main(app);
+                    }
+                })
+                .build(),
+        )
         .manage(UnsavedChanges::default())
         .manage(localchat::LocalChat::default())
         .plugin(
@@ -236,6 +247,8 @@ pub fn run() {
             set_startup_settings,
             set_unsaved_changes,
             quit_app,
+            shortcut::open_shortcut,
+            shortcut::set_open_shortcut,
             vault::vault_create,
             vault::vault_pick,
             vault::vault_read,
@@ -246,7 +259,8 @@ pub fn run() {
             localchat::local_chat_peers,
             localchat::local_chat_chats,
             localchat::local_chat_messages,
-            localchat::local_chat_send
+            localchat::local_chat_send,
+            localchat::local_chat_set_idle
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -266,6 +280,8 @@ pub fn run() {
             // window that was already showing did not stick: it could still open at sign-in. Now a
             // minimized start never shows it, and Novaroom waits in the tray as it does after the
             // window is closed.
+            shortcut::register_saved(app.handle());
+
             let launched_at_login = std::env::args().any(|arg| arg == AUTOSTART_ARG);
             if !(launched_at_login && startup.start_minimized) {
                 show_main(app.handle());

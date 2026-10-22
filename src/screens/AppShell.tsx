@@ -42,7 +42,7 @@ import { PROFILE_TABS, Profile, type ProfileTab } from "./Profile"
 import { SETTINGS_TABS, Settings, type SettingsTab } from "./Settings"
 import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
 import { groupTables } from "../lib/vault"
-import { Vault, VaultLeaveDialog, useVault } from "./Vault"
+import { Vault, VaultLeaveDialog, useVault, type VaultState } from "./Vault"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
 
 function NewChatIcon() {
@@ -338,6 +338,15 @@ function AppearanceIcon() {
   )
 }
 
+function ShortcutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="2.5" y="6" width="19" height="12" rx="2" />
+      <path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M8 14h8" />
+    </svg>
+  )
+}
+
 function StartupIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -464,6 +473,7 @@ const PEOPLE_ICONS: Record<PeopleFilter, ComponentType> = {
 const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
   appearance: AppearanceIcon,
   startup: StartupIcon,
+  shortcut: ShortcutIcon,
   updates: UpdatesIcon,
   about: AboutIcon,
   safety: SafetyIcon,
@@ -472,6 +482,7 @@ const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
 const SETTINGS_HINTS: Record<SettingsTab, string> = {
   appearance: "Light, dark, or system",
   startup: "Open when Windows starts",
+  shortcut: "Open Novaroom from anywhere",
   updates: "Check and install new versions",
   about: "Version, privacy, terms",
   safety: "Blocked people",
@@ -528,6 +539,40 @@ function SideMenu<T extends string>({
       ])}
       {footer && <div className="side-menu-footer">{footer}</div>}
     </nav>
+  )
+}
+
+/** The Vault's tables, grouped by category, for the sidebar. Also used by the offline app. */
+export function VaultRail({ vault }: { vault: VaultState }) {
+  return (
+    <SideMenu
+      label="Vault tables"
+      plain
+      items={groupTables(vault.data?.tables ?? []).flatMap(({ category, tables }) =>
+        tables.map((table) => ({
+          id: table.id,
+          label: table.name || "Untitled",
+          hint: table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`,
+          icon: VaultTableIcon,
+          group: category,
+        })),
+      )}
+      active={vault.table?.id ?? ""}
+      onSelect={vault.selectTable}
+      footer={
+        vault.data && vault.editing ? (
+          <button type="button" className="side-menu-item" onClick={vault.addTable}>
+            <span className="side-menu-icon">
+              <NewTableIcon />
+            </span>
+            <span className="side-menu-text">
+              <strong>New table</strong>
+              <span>Add a table to this Vault</span>
+            </span>
+          </button>
+        ) : undefined
+      }
+    />
   )
 }
 
@@ -1537,34 +1582,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
             onSelect={setPeopleFilter}
           />
         ) : view === "vault" ? (
-          <SideMenu
-            label="Vault tables"
-            plain
-            items={groupTables(vault.data?.tables ?? []).flatMap(({ category, tables }) =>
-              tables.map((table) => ({
-                id: table.id,
-                label: table.name || "Untitled",
-                hint: table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`,
-                icon: VaultTableIcon,
-                group: category,
-              })),
-            )}
-            active={vault.table?.id ?? ""}
-            onSelect={vault.selectTable}
-            footer={
-              vault.data && vault.editing ? (
-                <button type="button" className="side-menu-item" onClick={vault.addTable}>
-                  <span className="side-menu-icon">
-                    <NewTableIcon />
-                  </span>
-                  <span className="side-menu-text">
-                    <strong>New table</strong>
-                    <span>Add a table to this Vault</span>
-                  </span>
-                </button>
-              ) : undefined
-            }
-          />
+          <VaultRail vault={vault} />
         ) : view === "settings" ? (
           <SideMenu
             label="Settings sections"

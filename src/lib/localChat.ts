@@ -20,7 +20,9 @@ export type LocalMessage = {
   delivered: boolean
 }
 
-export type LocalPeer = { userId: string; name: string }
+// idle: no keyboard or mouse input on their computer for a while. Apps from before this was shared
+// never say, so they always show as active.
+export type LocalPeer = { userId: string; name: string; idle: boolean }
 
 export type LocalChatSummary = { chat: string; name: string; lastBody: string; lastAt: number }
 
@@ -39,6 +41,9 @@ async function call<T>(command: string, args?: Record<string, unknown>) {
 export const startLocalChat = (userId: string, name: string) => call<string>("local_chat_start", { userId, name })
 
 export const stopLocalChat = () => call<void>("local_chat_stop")
+
+/** Tells everyone on the network whether this person is idle. */
+export const setLocalIdle = (idle: boolean) => call<void>("local_chat_set_idle", { idle })
 
 export const localPeers = () => call<LocalPeer[]>("local_chat_peers")
 

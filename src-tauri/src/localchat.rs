@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -95,6 +95,9 @@ pub struct LocalMessage {
 pub struct LocalPeer {
     user_id: String,
     name: String,
+    /// No keyboard or mouse input on any of their computers for a while. Apps from before idle
+    /// status was shared never say, so they always count as active.
+    idle: bool,
 }
 
 /// A chat with messages, for the list of chats.
@@ -120,14 +123,24 @@ pub struct DirectoryEntry {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 enum Frame {
+    /// `idle` is left out by apps from before idle status was shared, which would drop the
+    /// connection on a Status frame. Sending it at all says the app understands Status frames.
     #[serde(rename_all = "camelCase")]
-    Hello { user_id: String, name: String, protocol: u32 },
+    Hello {
+        user_id: String,
+        name: String,
+        protocol: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle: Option<bool>,
+    },
     /// The sender is whoever is on the other end of the connection, never a field, so nobody can
     /// send a message in someone else's name. `to` is the recipient's id, or none for the room.
     #[serde(rename_all = "camelCase")]
     Message { id: String, to: Option<String>, name: String, body: String, sent_at: i64 },
     Ack { id: String },
     Ping,
+    /// The sender's idle status changed. Only sent to apps that said they understand it.
+    Status { idle: bool },
 }
 
 struct Peer {
@@ -138,6 +151,9 @@ struct Peer {
     opened_by: String,
     connection: u64,
     outbox: mpsc::UnboundedSender<Frame>,
+    idle: bool,
+    /// Whether the app sent its idle status in Hello, and so can be sent Status frames.
+    shares_status: bool,
     /// Dropped when this entry is removed or replaced, which ends the connection.
     _close: oneshot::Sender<()>,
 }
@@ -165,6 +181,8 @@ struct Session {
     service_name: String,
     stop: watch::Sender<bool>,
     next_connection: AtomicU64,
+    /// Whether this person is idle, as the window last said.
+    idle: AtomicBool,
 }
 
 /// The running Local chat, if any. It runs for the signed-in account while the app is open.
@@ -239,6 +257,7 @@ impl Session {
         LocalPeer {
             user_id: self.user_id.clone(),
             name: self.name.lock().unwrap().clone(),
+            idle: self.idle.load(Ordering::Relaxed),
         }
     }
 
@@ -254,18 +273,22 @@ impl Session {
         .ok()
     }
 
-    /// Everyone connected, once each, without this person's own other computers.
+    /// Everyone connected, once each, without this person's own other computers. Someone on
+    /// several computers is idle only if all of them are.
     fn peer_list(&self) -> Vec<LocalPeer> {
         let peers = self.peers.lock().unwrap();
-        let mut seen = HashSet::new();
-        let mut list: Vec<LocalPeer> = peers
-            .values()
-            .filter(|peer| peer.user_id != self.user_id && seen.insert(peer.user_id.clone()))
-            .map(|peer| LocalPeer {
-                user_id: peer.user_id.clone(),
-                name: peer.name.clone(),
-            })
-            .collect();
+        let mut people: HashMap<&str, LocalPeer> = HashMap::new();
+        for peer in peers.values().filter(|peer| peer.user_id != self.user_id) {
+            people
+                .entry(&peer.user_id)
+                .and_modify(|person| person.idle &= peer.idle)
+                .or_insert_with(|| LocalPeer {
+                    user_id: peer.user_id.clone(),
+                    name: peer.name.clone(),
+                    idle: peer.idle,
+                });
+        }
+        let mut list: Vec<LocalPeer> = people.into_values().collect();
         list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         list
     }
@@ -324,6 +347,23 @@ impl Session {
             ));
         }
         frames
+    }
+
+    /// Records a connected app's new idle status and tells the window if it changed.
+    fn set_peer_idle(&self, key: &str, connection: u64, idle: bool) {
+        let changed = {
+            let mut peers = self.peers.lock().unwrap();
+            match peers.get_mut(key) {
+                Some(peer) if peer.connection == connection && peer.idle != idle => {
+                    peer.idle = idle;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.emit_peers();
+        }
     }
 
     /// Hands a frame to every connection for these people (all of them for the room).
@@ -413,7 +453,7 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
 
     // Both sides say who they are, then each checks the other's key against the directory.
     let me = session.me();
-    let hello = Frame::Hello { user_id: me.user_id, name: me.name, protocol: PROTOCOL };
+    let hello = Frame::Hello { user_id: me.user_id, name: me.name, protocol: PROTOCOL, idle: Some(me.idle) };
     let Ok(packet) = seal(&noise, &hello) else { return };
     if write_packet(&mut writer, &packet).await.is_err() {
         return;
@@ -421,7 +461,7 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
     let Ok(Ok(packet)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_packet(&mut reader)).await else {
         return;
     };
-    let Ok(Frame::Hello { user_id, name, protocol }) = open(&noise, &packet) else { return };
+    let Ok(Frame::Hello { user_id, name, protocol, idle }) = open(&noise, &packet) else { return };
     if protocol != PROTOCOL || session.verify(&user_id, &remote_key).is_none() {
         return;
     }
@@ -444,7 +484,16 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
         // Replacing an entry drops its close handle, which ends the older connection.
         peers.insert(
             remote_key.clone(),
-            Peer { user_id: user_id.clone(), name, opened_by, connection, outbox: outbox.clone(), _close: close },
+            Peer {
+                user_id: user_id.clone(),
+                name,
+                opened_by,
+                connection,
+                outbox: outbox.clone(),
+                idle: idle.unwrap_or(false),
+                shares_status: idle.is_some(),
+                _close: close,
+            },
         );
     }
     session.emit_peers();
@@ -472,7 +521,11 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
             frame = incoming.recv() => {
                 let Some(frame) = frame else { break };
                 last_heard = Instant::now();
-                receive(&session, &user_id, &outbox, frame);
+                if let Frame::Status { idle } = frame {
+                    session.set_peer_idle(&remote_key, connection, idle);
+                } else {
+                    receive(&session, &user_id, &outbox, frame);
+                }
             }
             frame = outgoing.recv() => {
                 let Some(frame) = frame else { break };
@@ -552,7 +605,8 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 let _ = session.app.emit("local-chat-delivered", id);
             }
         }
-        Frame::Hello { .. } | Frame::Ping => {}
+        // Status needs the connection, so the connection loop handles it.
+        Frame::Hello { .. } | Frame::Ping | Frame::Status { .. } => {}
     }
 }
 
@@ -719,6 +773,7 @@ pub async fn local_chat_start(
         service_name,
         stop,
         next_connection: AtomicU64::new(0),
+        idle: AtomicBool::new(false),
     });
     tauri::async_runtime::spawn(accept_loop(session.clone(), listener));
     tauri::async_runtime::spawn(discovery_loop(session.clone(), events));
@@ -752,6 +807,20 @@ pub fn local_chat_set_directory(state: tauri::State<'_, LocalChat>, entries: Vec
         }
     }
     tx.commit().map_err(message)
+}
+
+/// Shares whether this person is idle with everyone connected whose app understands it.
+#[tauri::command]
+pub fn local_chat_set_idle(state: tauri::State<'_, LocalChat>, idle: bool) -> Result<(), String> {
+    let session = running(&state)?;
+    if session.idle.swap(idle, Ordering::Relaxed) == idle {
+        return Ok(());
+    }
+    let peers = session.peers.lock().unwrap();
+    for peer in peers.values().filter(|peer| peer.shares_status) {
+        let _ = peer.outbox.send(Frame::Status { idle });
+    }
+    Ok(())
 }
 
 #[tauri::command]

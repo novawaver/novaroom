@@ -9,11 +9,12 @@ export type DeskTask = {
   title: string
   // Shown as "Description". The column is still called notes in the database.
   notes: string
-  // Written by the assignee about the result.
+  // Written by the assignees about the result.
   assigneeNotes: string
   status: TaskStatus
   priority: TaskPriority
-  assigneeId: string | null
+  // Everyone the task is assigned to; empty when no one is.
+  assigneeIds: string[]
   dueDate: string | null
   createdBy: string | null
   createdAt: string
@@ -118,7 +119,7 @@ type TaskRow = {
   assignee_notes: string
   status: TaskStatus
   priority: TaskPriority
-  assignee_id: string | null
+  assignee_ids: string[] | null
   due_date: string | null
   created_by: string | null
   created_at: string
@@ -131,7 +132,7 @@ const toTask = (row: TaskRow): DeskTask => ({
   assigneeNotes: row.assignee_notes,
   status: row.status,
   priority: row.priority,
-  assigneeId: row.assignee_id,
+  assigneeIds: row.assignee_ids ?? [],
   dueDate: row.due_date,
   createdBy: row.created_by,
   createdAt: row.created_at,
@@ -139,21 +140,23 @@ const toTask = (row: TaskRow): DeskTask => ({
 
 export async function listTasks(): Promise<DeskTask[]> {
   if (!supabase) {
-    return readPreview().tasks.map((task) => ({
+    // Tasks saved before several assignees were possible have a single assigneeId.
+    return readPreview().tasks.map(({ assigneeId, ...task }: DeskTask & { assigneeId?: string | null }) => ({
       ...task,
+      assigneeIds: task.assigneeIds ?? (assigneeId ? [assigneeId] : []),
       assigneeNotes: task.assigneeNotes ?? "",
       createdBy: task.createdBy ?? null,
     }))
   }
   const { data, error } = await supabase
     .from("leaddesk_tasks")
-    .select("id, title, notes, assignee_notes, status, priority, assignee_id, due_date, created_by, created_at")
+    .select("id, title, notes, assignee_notes, status, priority, assignee_ids, due_date, created_by, created_at")
     .order("created_at")
   fail(error)
   return (data as TaskRow[]).map(toTask)
 }
 
-// Leaves assigneeNotes alone; only the assignee changes those, through saveAssigneeNotes.
+// Leaves assigneeNotes alone; only assignees change those, through saveAssigneeNotes.
 export async function saveTask(task: Omit<DeskTask, "id" | "createdAt" | "assigneeNotes"> & { id?: string }) {
   // createdBy is only used by the preview store; the database sets created_by itself.
   const fields = {
@@ -161,7 +164,7 @@ export async function saveTask(task: Omit<DeskTask, "id" | "createdAt" | "assign
     notes: task.notes.trim(),
     status: task.status,
     priority: task.priority,
-    assignee_id: task.assigneeId,
+    assignee_ids: [...new Set(task.assigneeIds)],
     due_date: task.dueDate,
   }
   if (!fields.title) throw new Error("Give the task a title.")
@@ -172,6 +175,7 @@ export async function saveTask(task: Omit<DeskTask, "id" | "createdAt" | "assign
       ...task,
       title: fields.title,
       notes: fields.notes,
+      assigneeIds: fields.assignee_ids,
       assigneeNotes: existing?.assigneeNotes ?? "",
       id: task.id ?? crypto.randomUUID(),
       createdAt: existing?.createdAt ?? new Date().toISOString(),
@@ -436,9 +440,9 @@ export async function markTasksRead(userId: string, taskIds: string[]) {
 }
 
 // Unread: assigned to this person and not opened since. The database clears the read when someone
-// else assigns it to them, and marks it read when they assign it to themselves.
+// else adds them to it, and marks it read when they add themselves.
 export function unreadTasks(tasks: DeskTask[], readIds: Set<string>, userId: string) {
-  return tasks.filter((task) => task.assigneeId === userId && !readIds.has(task.id))
+  return tasks.filter((task) => task.assigneeIds.includes(userId) && !readIds.has(task.id))
 }
 
 // Calls onChange whenever an event or task this person can see is added, changed or removed.

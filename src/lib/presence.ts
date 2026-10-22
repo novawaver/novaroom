@@ -8,15 +8,15 @@ export const PRESENCE_LABELS: Record<PresenceStatus, string> = { online: "Online
 
 const CHECK_EVERY_MS = 15 * 1000
 
-// Everyone with the app open joins one Realtime presence channel and shares whether they are
-// online or idle. Anyone not in the channel is offline. Nothing is stored in the database.
-export function usePresence(userId: string | null) {
-  const [self, setSelf] = useState<Exclude<PresenceStatus, "offline">>("online")
-  const [others, setOthers] = useState<Map<string, PresenceStatus>>(new Map())
+/**
+ * "idle" after a minute without keyboard or mouse input (the Timer's rule, but always on), else
+ * "online". Used for the dot on profile pictures, online and in Local chat.
+ */
+export function useIdle(enabled: boolean) {
+  const [status, setStatus] = useState<Exclude<PresenceStatus, "offline">>("online")
 
-  // Same idle rule as the Timer, but always on: no input for a minute counts as idle.
   useEffect(() => {
-    if (!userId) return
+    if (!enabled) return
     let lastInput = Date.now()
     let stopped = false
     // In a browser (no system idle time), count input inside the app window instead.
@@ -27,7 +27,7 @@ export function usePresence(userId: string | null) {
     for (const name of inputEvents) window.addEventListener(name, onInput, { passive: true })
     const check = async () => {
       const idle = (await systemIdleSeconds()) ?? Math.floor((Date.now() - lastInput) / 1000)
-      if (!stopped) setSelf(idle >= IDLE_AFTER_SECONDS ? "idle" : "online")
+      if (!stopped) setStatus(idle >= IDLE_AFTER_SECONDS ? "idle" : "online")
     }
     void check()
     const timer = window.setInterval(() => void check(), CHECK_EVERY_MS)
@@ -36,7 +36,16 @@ export function usePresence(userId: string | null) {
       window.clearInterval(timer)
       for (const name of inputEvents) window.removeEventListener(name, onInput)
     }
-  }, [userId])
+  }, [enabled])
+
+  return status
+}
+
+// Everyone with the app open joins one Realtime presence channel and shares whether they are
+// online or idle. Anyone not in the channel is offline. Nothing is stored in the database.
+export function usePresence(userId: string | null) {
+  const self = useIdle(userId !== null)
+  const [others, setOthers] = useState<Map<string, PresenceStatus>>(new Map())
 
   const [channel, setChannel] = useState<ReturnType<NonNullable<typeof supabase>["channel"]> | null>(null)
   const selfRef = useRef(self)

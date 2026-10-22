@@ -261,6 +261,7 @@ export function LeadDesk({
       {editing?.kind === "tasks" && (
         <TaskEditor
           task={editing.item as DeskTask | null}
+          users={data?.users ?? []}
           leaders={data?.leaders ?? []}
           selfId={session.userId}
           onClose={() => setEditing(null)}
@@ -289,7 +290,7 @@ export function LeadDesk({
 // Leaders see tasks assigned to them plus unassigned ones, not other people's. Admins see every task.
 export function visibleTasks(tasks: DeskTask[], selfId: string, isAdmin: boolean) {
   if (isAdmin) return tasks
-  return tasks.filter((task) => task.assigneeId === null || task.assigneeId === selfId)
+  return tasks.filter((task) => task.assigneeIds.length === 0 || task.assigneeIds.includes(selfId))
 }
 
 function TaskBoard({
@@ -366,9 +367,11 @@ function TaskBoard({
                           {formatShortDate(task.dueDate)}
                         </span>
                       )}
-                      {task.assigneeId && (
+                      {task.assigneeIds.length > 0 && (
                         <span className="task-assignee">
-                          <PersonAvatar users={users} id={task.assigneeId} />
+                          {task.assigneeIds.map((id) => (
+                            <PersonAvatar key={id} users={users} id={id} />
+                          ))}
                         </span>
                       )}
                     </div>
@@ -465,8 +468,18 @@ function TaskDrawer({
           <dd className={overdue ? "task-due overdue" : undefined}>
             {task.dueDate ? `${formatShortDate(task.dueDate)}${overdue ? " · Overdue" : ""}` : "No due date"}
           </dd>
-          <dt>Assignee</dt>
-          <dd>{task.assigneeId ? <PersonAvatar users={users} id={task.assigneeId} /> : "No one yet"}</dd>
+          <dt>{task.assigneeIds.length > 1 ? "Assignees" : "Assignee"}</dt>
+          <dd>
+            {task.assigneeIds.length > 0 ? (
+              <span className="event-avatars">
+                {task.assigneeIds.map((id) => (
+                  <PersonAvatar key={id} users={users} id={id} />
+                ))}
+              </span>
+            ) : (
+              "No one yet"
+            )}
+          </dd>
           <dt>Created by</dt>
           <dd>
             <PersonAvatar users={users} id={task.createdBy} />
@@ -476,13 +489,13 @@ function TaskDrawer({
           <h3>Description</h3>
           {task.notes ? <p className="event-notes">{task.notes}</p> : <p className="hint">No description.</p>}
         </div>
-        <AssigneeNotes key={task.id} task={task} canWrite={task.assigneeId === selfId || isAdmin} onSaved={onSaved} />
+        <AssigneeNotes key={task.id} task={task} canWrite={task.assigneeIds.includes(selfId) || isAdmin} onSaved={onSaved} />
       </aside>
     </div>
   )
 }
 
-// The assignee (or an admin) writes about the result here; everyone else only reads it.
+// Assignees (or an admin) write about the result here; everyone else only reads it.
 function AssigneeNotes({
   task,
   canWrite,
@@ -492,7 +505,7 @@ function AssigneeNotes({
   canWrite: boolean
   onSaved: () => Promise<void>
 }) {
-  // null until the assignee starts typing, so saved changes from elsewhere still show.
+  // null until an assignee starts typing, so saved changes from elsewhere still show.
   const [draft, setDraft] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
@@ -550,7 +563,9 @@ function AssigneeNotes({
       ) : task.assigneeNotes ? (
         <p className="event-notes">{task.assigneeNotes}</p>
       ) : (
-        <p className="hint">{task.assigneeId ? "The assignee hasn't added notes yet." : "Assign someone to get their notes."}</p>
+        <p className="hint">
+          {task.assigneeIds.length > 0 ? "No notes from the assignees yet." : "Assign someone to get their notes."}
+        </p>
       )}
     </div>
   )
@@ -558,12 +573,14 @@ function AssigneeNotes({
 
 function TaskEditor({
   task,
+  users,
   leaders,
   selfId,
   onClose,
   onSaved,
 }: {
   task: DeskTask | null
+  users: RegisteredUser[]
   leaders: RegisteredUser[]
   selfId: string
   onClose: () => void
@@ -573,8 +590,13 @@ function TaskEditor({
   const [notes, setNotes] = useState(task?.notes ?? "")
   const [status, setStatus] = useState<TaskStatus>(task?.status ?? "todo")
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? "normal")
-  const [assigneeId, setAssigneeId] = useState(task?.assigneeId ?? "")
+  const [assigneeIds, setAssigneeIds] = useState<string[]>(task?.assigneeIds ?? [])
   const [dueDate, setDueDate] = useState(task?.dueDate ?? "")
+  // Leaders who later lost the role stay listed so they are not silently removed.
+  const choices = [
+    ...leaders,
+    ...users.filter((user) => assigneeIds.includes(user.userId) && !leaders.includes(user)),
+  ]
 
   return (
     <DeskModal
@@ -587,7 +609,7 @@ function TaskEditor({
           notes,
           status,
           priority,
-          assigneeId: assigneeId || null,
+          assigneeIds,
           dueDate: dueDate || null,
           createdBy: task?.createdBy ?? selfId,
         })
@@ -633,23 +655,32 @@ function TaskEditor({
           </select>
         </label>
       </div>
-      <div className="desk-form-row">
-        <label>
-          Assignee
-          <select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)}>
-            <option value="">No one</option>
-            {leaders.map((leader) => (
-              <option key={leader.userId} value={leader.userId}>
-                {leader.displayName || "Unnamed"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Due date
-          <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} />
-        </label>
-      </div>
+      <label>
+        Due date
+        <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} />
+      </label>
+      <fieldset className="desk-people">
+        <legend>Assignees</legend>
+        {choices.length === 0 ? (
+          <p className="hint">No Leadership members yet.</p>
+        ) : (
+          choices.map((user) => (
+            <label key={user.userId} className="desk-check">
+              <input
+                type="checkbox"
+                checked={assigneeIds.includes(user.userId)}
+                onChange={(change) =>
+                  setAssigneeIds((current) =>
+                    change.target.checked ? [...current, user.userId] : current.filter((id) => id !== user.userId),
+                  )
+                }
+              />
+              {user.displayName || "Unnamed"}
+              {user.userId === selfId && <span className="hint"> (you)</span>}
+            </label>
+          ))
+        )}
+      </fieldset>
     </DeskModal>
   )
 }
