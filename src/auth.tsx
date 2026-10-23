@@ -11,7 +11,7 @@ import { emptyProfile, type Profile, type Session } from "./types"
 import { isAuthRetryableFetchError } from "@supabase/supabase-js"
 import { isSupabaseConfigured, supabase } from "./lib/supabase"
 import { PREVIEW_CODE, PREVIEW_PROFILES_KEY, PREVIEW_SESSION_KEY, previewUserId } from "./lib/preview"
-import { deletePreviewAccount, safetyError } from "./lib/safety"
+import { deletePreviewAccount, removeStorageFiles, safetyError, type StorageFile } from "./lib/safety"
 import { writeUnread } from "./lib/unread"
 
 const SESSION_KEY = PREVIEW_SESSION_KEY
@@ -466,8 +466,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setProfile(null)
           return
         }
-        const { error } = await supabase.rpc("delete_own_account")
+        const { data, error } = await supabase.rpc("delete_own_account")
         if (error) throw safetyError(error)
+        // Still signed in with this session's token until signOut below, which the storage policies use.
+        await removeStorageFiles(data as StorageFile[] | null)
         writeUnread(session.userId, {})
         writeOfflineIdentity(null)
         setOfflineAccounts((current) => current.filter((item) => item.session.userId !== session.userId))

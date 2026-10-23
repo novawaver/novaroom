@@ -316,8 +316,24 @@ export async function deleteOwnMessage(session: Session, messageId: string) {
     return
   }
 
-  const { error } = await supabase.rpc("delete_own_message", { message_id: messageId })
+  const { data, error } = await supabase.rpc("delete_own_message", { message_id: messageId })
   if (error) throw safetyError(error)
+  await removeStorageFiles(data as StorageFile[] | null)
+}
+
+/** A file a delete function cleared from the database, for removing through the Storage API. */
+export type StorageFile = { bucket: string; path: string }
+
+// Supabase only lets files go through the Storage API, so the delete functions hand them back for
+// this. The rows are already gone; a file that can't be removed is only logged.
+export async function removeStorageFiles(files: StorageFile[] | null) {
+  if (!supabase || !files?.length) return
+  const byBucket = new Map<string, string[]>()
+  for (const { bucket, path } of files) byBucket.set(bucket, [...(byBucket.get(bucket) ?? []), path])
+  for (const [bucket, paths] of byBucket) {
+    const { error } = await supabase.storage.from(bucket).remove(paths)
+    if (error) console.warn(`Could not remove files from ${bucket}:`, error.message)
+  }
 }
 
 export function deletePreviewAccount(userId: string) {
