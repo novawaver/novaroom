@@ -2989,42 +2989,6 @@ code {
   background: color-mix(in srgb, var(--brand-bright) 8%, var(--card));
 }
 
-/* Schedule fills the window: the event list scrolls on its own and the details panel stays put. */
-.settings.desk-fixed {
-  overflow: hidden;
-}
-
-.schedule-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  padding-bottom: 20px;
-}
-
-.schedule-split {
-  --schedule-heading: 28px; /* .schedule-day h2 height plus the gap under it */
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: 380px minmax(0, 1fr);
-  gap: 24px;
-}
-
-.schedule-list {
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 6px;
-}
-
-.schedule-list .schedule-day {
-  max-width: none;
-}
-
-.schedule-list .schedule-day:last-child {
-  margin-bottom: 0;
-}
-
 .schedule-item {
   position: relative;
 }
@@ -3055,9 +3019,152 @@ code {
   stroke-linejoin: round;
 }
 
+/* Event cards: a status ring and the title, the description, a date tile on the right, and the time,
+   status and people along the bottom. One tone per status, shared by the ring and the label. */
+.schedule-item.event-card {
+  display: block;
+  padding: 0;
+  border-left-width: 1px;
+  border-radius: 14px;
+  cursor: default;
+}
+
+.event-card-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 64px;
+  column-gap: 12px;
+  row-gap: 12px;
+  width: 100%;
+  padding: 14px 16px 12px;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.event-card-main:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.event-card-ring.upcoming,
+.event-card-state.upcoming {
+  --tone: #e5484d;
+}
+
+.event-card-ring.ongoing,
+.event-card-state.ongoing {
+  --tone: #1fa64a;
+}
+
+.event-card-ring.ended,
+.event-card-state.ended {
+  --tone: var(--muted);
+}
+
+.event-card-ring {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border: 2.5px solid var(--tone);
+  border-radius: 50%;
+}
+
+.event-card-text {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  padding-right: 4px;
+}
+
+.event-card-text strong {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  font-size: 15px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.event-card-text .new-tag {
+  margin-left: 8px;
+}
+
+.event-card-text .schedule-lock {
+  margin-left: 8px;
+}
+
+.event-card-description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* Stands in for a picture: the event's month, day and weekday, or "Every day". */
+.event-card-tile {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  height: 64px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--brand-bright) 16%, var(--card));
+  color: var(--brand-ink);
+  line-height: 1.1;
+}
+
+.event-card-tile b {
+  font-size: 22px;
+  font-weight: 750;
+}
+
+.event-card-tile small {
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.event-card-foot {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.event-card-foot b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.event-card-foot .event-card-state {
+  color: var(--tone);
+}
+
+.event-card-people {
+  margin-left: auto;
+}
+
+.event-card-people .avatar.event-avatar {
+  width: 22px;
+  height: 22px;
+  font-size: 9px;
+  cursor: default;
+}
+
 .event-detail {
   min-height: 0;
-  margin-top: var(--schedule-heading);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -3468,6 +3575,32 @@ code {
   line-height: 1.5;
 }
 
+.task-form-card select {
+  height: 42px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 14px;
+}
+
+/* Date and times share a row in the event form, so they keep less padding. */
+.task-form-card .desk-form-row input {
+  padding: 0 14px;
+}
+
+.task-form-hint {
+  margin: -2px 4px 0;
+  font-size: 12px;
+}
+
+/* Who can see an event: two pills in the brand colour, picked like a task's priority. */
+.task-form-visibility {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.task-form-visibility button {
+  --tone: var(--brand);
+}
+
 .task-form-priority {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -3669,36 +3802,6 @@ code {
 @media (max-width: 1000px) {
   .task-board {
     grid-template-columns: 1fr;
-  }
-}
-
-/* The main area is the window minus the nav bar and sidebar (about 400px). Above this width the
-   panel keeps at least ~260px beside the 380px list; the default 1120px window gives it ~320px. */
-@media (max-width: 1060px) {
-  .schedule-split {
-    grid-template-columns: 1fr;
-  }
-
-  /* Narrow windows stack the panel under the list and scroll the whole page again. */
-  .settings.desk-fixed {
-    overflow: auto;
-  }
-
-  .schedule-body,
-  .schedule-split,
-  .schedule-list,
-  .event-detail {
-    flex: none;
-    min-height: auto;
-    overflow: visible;
-  }
-
-  .event-detail {
-    margin-top: 0;
-  }
-
-  .event-detail.empty {
-    display: none;
   }
 }
 
@@ -5828,7 +5931,110 @@ code {
   line-height: 1;
 }
 
-/* LeadDesk tasks: a list grouped by due date, with a status filter on top. */
+/* LeadDesk tasks: sort and day picker, then a status filter, then the list in groups by day. */
+/* Two pills of the same height, lined up along the top. */
+.task-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.task-sort,
+.task-day {
+  position: relative;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+}
+
+.task-sort {
+  gap: 2px;
+  padding-left: 12px;
+  color: var(--muted);
+}
+
+.task-sort:focus-within {
+  border-color: var(--brand-bright);
+}
+
+/* The browser's arrow is swapped for a chevron with room after it. */
+.task-sort select {
+  width: auto;
+  height: 100%;
+  padding: 0 34px 0 6px;
+  border: 0;
+  border-radius: 999px;
+  outline: none;
+  appearance: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236d655c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")
+    no-repeat right 14px center / 14px 14px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.task-day.picked {
+  border-color: var(--brand-bright);
+  background: color-mix(in srgb, var(--brand-bright) 12%, var(--card));
+}
+
+.task-day-button,
+.task-day-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.task-day-button {
+  padding: 6px 12px;
+}
+
+.task-day.picked .task-day-button {
+  padding-right: 4px;
+}
+
+.task-day-clear {
+  padding: 4px 8px 4px 4px;
+  color: var(--muted);
+}
+
+.task-day-clear:hover {
+  color: var(--ink);
+}
+
+.task-day-clear svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* Only there to open the browser's date picker under the button. */
+.task-day input {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
 .task-filters {
   display: flex;
   flex-wrap: wrap;
@@ -5974,6 +6180,11 @@ code {
 .task-drawer-bar .event-detail-icon svg {
   width: 20px;
   height: 20px;
+}
+
+/* The event panel uses the task drawer; a locked event shows its lock beside the title. */
+.task-drawer-bar .schedule-lock {
+  align-self: center;
 }
 
 .task-drawer-main {

@@ -182,12 +182,14 @@ export async function listTasks(): Promise<DeskTask[]> {
 
 /**
  * The status a task gets from its assignees' results: failed when anyone failed it, done when all
- * of them signed done. Taking back the result that finished it puts it back in progress.
+ * of them signed done, and in progress while only some have. Taking back the result that finished
+ * it puts it back in progress.
  */
 export function settledStatus(task: Pick<DeskTask, "status" | "assigneeIds" | "signoffs">): TaskStatus {
   const results = task.assigneeIds.map((id) => task.signoffs[id]?.result)
   if (results.includes("failed")) return "failed"
   if (results.length > 0 && results.every((result) => result === "done")) return "done"
+  if (results.includes("done")) return "doing"
   return task.status === "done" || task.status === "failed" ? "doing" : task.status
 }
 
@@ -250,6 +252,11 @@ export async function saveTask(
       id: task.id ?? crypto.randomUUID(),
       createdAt: existing?.createdAt ?? new Date().toISOString(),
     }
+    // Changing the assignees works the status out again from the results left, as the database does.
+    const before = existing?.assigneeIds ?? []
+    const reassigned =
+      before.length !== saved.assigneeIds.length || before.some((id) => !saved.assigneeIds.includes(id))
+    if (reassigned && saved.assigneeIds.length > 0) saved.status = settledStatus(saved)
     desk.tasks = task.id ? desk.tasks.map((item) => (item.id === task.id ? saved : item)) : [...desk.tasks, saved]
     writePreview(desk)
     return

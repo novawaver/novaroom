@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react"
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
 import { useAuth } from "../auth"
 import {
   LEADERSHIP,
@@ -218,7 +218,7 @@ export function LeadDesk({
   const newBlocked = tab === "tasks" && !canEditTasks
 
   return (
-    <section className={tab === "schedule" ? "settings desk-fixed" : "settings"}>
+    <section className="settings">
       <header className="thread-bar profile-bar">
         <h1>{label}</h1>
         <button
@@ -260,6 +260,7 @@ export function LeadDesk({
           users={data.users}
           newEventIds={newEventIds}
           isAdmin={isAdmin}
+          covered={editing !== null}
           onSelect={(event) => onEventOpened(event.id)}
           onEdit={(event) => setEditing({ kind: "schedule", item: event })}
         />
@@ -335,8 +336,17 @@ function dueLabel(key: string) {
   }).format(date)
 }
 
-// Tasks grouped by due date, earliest first, then the ones with no due date. The filter row narrows
-// them by status.
+type TaskSort = "newest" | "oldest" | "due"
+
+const TASK_SORTS: Array<{ id: TaskSort; label: string }> = [
+  { id: "newest", label: "Newest first" },
+  { id: "oldest", label: "Oldest first" },
+  { id: "due", label: "Due date" },
+]
+
+// Tasks grouped by the day they were added, newest first unless another order is picked; sorted by
+// due date they are grouped by due date, earliest first, then the ones with no due date. The filter
+// row narrows them by status, and the calendar to the tasks due on one day.
 function TaskList({
   tasks,
   users,
@@ -355,33 +365,93 @@ function TaskList({
   onSelect: (task: DeskTask) => void
 }) {
   const [filter, setFilter] = useState<TaskFilter>("all")
+  const [sort, setSort] = useState<TaskSort>("newest")
+  // A due date to show only that day's tasks; empty shows every task.
+  const [day, setDay] = useState("")
+  const dayInput = useRef<HTMLInputElement>(null)
   // Ticks so the time left on each card counts down.
   const [now, setNow] = useState(Date.now)
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30 * 1000)
     return () => window.clearInterval(timer)
   }, [])
-  const shown = visibleTasks(tasks, selfId, isAdmin)
+  const shown = visibleTasks(tasks, selfId, isAdmin).filter((task) => !day || task.dueDate === day)
   const today = todayKey()
   const rank: Record<TaskPriority, number> = { high: 0, normal: 1, low: 2 }
+  const byDue = sort === "due"
   const matching = shown
     .filter((task) => filter === "all" || task.status === filter)
-    .sort(
-      (a, b) =>
-        (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999") ||
-        rank[a.priority] - rank[b.priority] ||
-        a.createdAt.localeCompare(b.createdAt),
+    .sort((a, b) =>
+      byDue
+        ? (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999") ||
+          rank[a.priority] - rank[b.priority] ||
+          a.createdAt.localeCompare(b.createdAt)
+        : sort === "newest"
+          ? b.createdAt.localeCompare(a.createdAt)
+          : a.createdAt.localeCompare(b.createdAt),
     )
   const groups: Array<{ key: string; label: string; tasks: DeskTask[] }> = []
   for (const task of matching) {
-    const key = task.dueDate ?? "none"
+    const key = byDue ? (task.dueDate ?? "none") : localDate(new Date(task.createdAt))
+    const label = byDue ? (task.dueDate ? dueLabel(task.dueDate) : "No due date") : dueLabel(key)
     const last = groups[groups.length - 1]
     if (last?.key === key) last.tasks.push(task)
-    else groups.push({ key, label: task.dueDate ? dueLabel(task.dueDate) : "No due date", tasks: [task] })
+    else groups.push({ key, label, tasks: [task] })
+  }
+
+  function pickDay() {
+    const input = dayInput.current
+    if (!input) return
+    try {
+      input.showPicker()
+    } catch {
+      input.focus()
+    }
   }
 
   return (
     <div className="desk-body">
+      <div className="task-toolbar">
+        <label className="task-sort" title="Sort tasks">
+          <svg className="fact-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 4.5v15M3.5 16l3.5 3.5 3.5-3.5M17 19.5v-15M13.5 8L17 4.5 20.5 8" />
+          </svg>
+          <select value={sort} aria-label="Sort tasks" onChange={(change) => setSort(change.target.value as TaskSort)}>
+            {TASK_SORTS.map(({ id, label }) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className={day ? "task-day picked" : "task-day"}>
+          <button
+            type="button"
+            className="task-day-button"
+            title="Show the tasks due on one day"
+            aria-label={day ? `Due ${formatShortDate(day)}. Pick another day` : "Pick a day"}
+            onClick={pickDay}
+          >
+            <FactIcon kind="due" />
+            {day ? `Due ${dueLabel(day)}` : "All dates"}
+          </button>
+          <input
+            ref={dayInput}
+            type="date"
+            value={day}
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={(change) => setDay(change.target.value)}
+          />
+          {day && (
+            <button type="button" className="task-day-clear" aria-label="Show all dates" title="Show all dates" onClick={() => setDay("")}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 7l10 10M17 7L7 17" />
+              </svg>
+            </button>
+          )}
+        </span>
+      </div>
       <div className="task-filters" role="tablist" aria-label="Show tasks">
         {TASK_FILTERS.map(({ id, label }) => {
           const count = id === "all" ? shown.length : shown.filter((task) => task.status === id).length
@@ -402,10 +472,13 @@ function TaskList({
         })}
       </div>
       {groups.length === 0 ? (
-        <p className="task-empty">{filter === "all" ? "No tasks yet." : "No tasks here."}</p>
+        <p className="task-empty">
+          {day ? `No tasks due ${dueLabel(day)}.` : filter === "all" ? "No tasks yet." : "No tasks here."}
+        </p>
       ) : (
         groups.map((group) => {
-          const past = group.key !== "none" && group.key < today
+          // Only due dates go past; the day a task was added always has.
+          const past = byDue && group.key !== "none" && group.key < today
           return (
             <section key={group.key} className="task-group">
               <h2 className={past && group.key !== addDays(today, -1) ? "task-group-head past" : "task-group-head"}>
@@ -580,9 +653,31 @@ function BoardIcon() {
 }
 
 // Small line icons for the labels in the task panel.
-function FactIcon({ kind }: { kind: "status" | "priority" | "due" | "assignees" | "creator" | "description" }) {
+function FactIcon({
+  kind,
+}: {
+  kind: "status" | "priority" | "due" | "assignees" | "creator" | "description" | "location" | "visibility" | "zone"
+}) {
   return (
     <svg className="fact-icon" viewBox="0 0 24 24" aria-hidden="true">
+      {kind === "location" && (
+        <>
+          <path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z" />
+          <circle cx="12" cy="10" r="2.4" />
+        </>
+      )}
+      {kind === "visibility" && (
+        <>
+          <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
+          <circle cx="12" cy="12" r="2.8" />
+        </>
+      )}
+      {kind === "zone" && (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M3.5 12h17M12 3.5c2.4 2.4 3.5 5.2 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.2-3.5-8.5s1.1-6.1 3.5-8.5z" />
+        </>
+      )}
       {kind === "description" && (
         <>
           <rect x="5" y="3.5" width="14" height="17" rx="2" />
@@ -970,10 +1065,6 @@ function TaskEditor({
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? "normal")
   const [assigneeIds, setAssigneeIds] = useState<string[]>(task?.assigneeIds ?? [])
   const [dueDate, setDueDate] = useState(task?.dueDate ?? "")
-  // True while the list of people to add is open under the avatars.
-  const [picking, setPicking] = useState(false)
-  // Leaders not yet on the task. Assignees who later lost the role stay on it until removed.
-  const addable = leaders.filter((user) => !assigneeIds.includes(user.userId))
 
   return (
     <DeskModal
@@ -1033,65 +1124,101 @@ function TaskEditor({
           ))}
         </fieldset>
       </div>
-      <fieldset className="task-form-card task-form-people">
-        <legend>Assign to</legend>
-        <div className="task-form-avatars">
-          {assigneeIds.map((id) => {
-            const name = id === selfId ? "you" : nameOf(users, id)
-            return (
-              <button
-                key={id}
-                type="button"
-                className="task-form-avatar"
-                aria-label={`Remove ${name}`}
-                title={`Remove ${name}`}
-                onClick={() => setAssigneeIds((current) => current.filter((item) => item !== id))}
-              >
-                <PersonAvatar users={users} id={id} />
-                <svg className="task-form-remove" viewBox="0 0 24 24" aria-hidden="true">
-                  <circle cx="12" cy="12" r="10" />
-                  <path d="M8.5 8.5l7 7M15.5 8.5l-7 7" />
-                </svg>
-              </button>
-            )
-          })}
-          {addable.length > 0 && (
+      <PeoplePicker
+        legend="Assign to"
+        addLabel="Add assignee"
+        ids={assigneeIds}
+        onChange={setAssigneeIds}
+        users={users}
+        leaders={leaders}
+        selfId={selfId}
+      />
+    </DeskModal>
+  )
+}
+
+// The people on a task or event as a row of avatars (click one to remove it), then a "+" that opens
+// a list of the leaders not on it yet. People who later lost the role stay until removed.
+function PeoplePicker({
+  legend,
+  addLabel,
+  ids,
+  onChange,
+  users,
+  leaders,
+  selfId,
+}: {
+  legend: string
+  addLabel: string
+  ids: string[]
+  onChange: (update: (current: string[]) => string[]) => void
+  users: RegisteredUser[]
+  leaders: RegisteredUser[]
+  selfId: string
+}) {
+  // True while the list of people to add is open under the avatars.
+  const [picking, setPicking] = useState(false)
+  const addable = leaders.filter((user) => !ids.includes(user.userId))
+
+  return (
+    <fieldset className="task-form-card task-form-people">
+      <legend>{legend}</legend>
+      <div className="task-form-avatars">
+        {ids.map((id) => {
+          const name = id === selfId ? "you" : nameOf(users, id)
+          return (
             <button
+              key={id}
               type="button"
-              className="task-form-add"
-              aria-label={picking ? "Close the list" : "Add assignee"}
-              title={picking ? "Close the list" : "Add assignee"}
-              aria-expanded={picking}
-              onClick={() => setPicking((open) => !open)}
+              className="task-form-avatar"
+              aria-label={`Remove ${name}`}
+              title={`Remove ${name}`}
+              onClick={() => onChange((current) => current.filter((item) => item !== id))}
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 5v14M5 12h14" />
+              <PersonAvatar users={users} id={id} />
+              <svg className="task-form-remove" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M8.5 8.5l7 7M15.5 8.5l-7 7" />
               </svg>
             </button>
-          )}
-        </div>
-        {assigneeIds.length === 0 && addable.length === 0 && <p className="hint">No Leadership members yet.</p>}
-        {picking && addable.length > 0 && (
-          <ul className="task-form-picker">
-            {addable.map((user) => (
-              <li key={user.userId}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAssigneeIds((current) => [...current, user.userId])
-                    if (addable.length === 1) setPicking(false)
-                  }}
-                >
-                  <PersonAvatar users={users} id={user.userId} />
-                  {user.displayName || "Unnamed"}
-                  {user.userId === selfId && <span className="hint">(you)</span>}
-                </button>
-              </li>
-            ))}
-          </ul>
+          )
+        })}
+        {addable.length > 0 && (
+          <button
+            type="button"
+            className="task-form-add"
+            aria-label={picking ? "Close the list" : addLabel}
+            title={picking ? "Close the list" : addLabel}
+            aria-expanded={picking}
+            onClick={() => setPicking((open) => !open)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
         )}
-      </fieldset>
-    </DeskModal>
+      </div>
+      {ids.length === 0 && addable.length === 0 && <p className="hint">No Leadership members yet.</p>}
+      {picking && addable.length > 0 && (
+        <ul className="task-form-picker">
+          {addable.map((user) => (
+            <li key={user.userId}>
+              <button
+                type="button"
+                onClick={() => {
+                  onChange((current) => [...current, user.userId])
+                  if (addable.length === 1) setPicking(false)
+                }}
+              >
+                <PersonAvatar users={users} id={user.userId} />
+                {user.displayName || "Unnamed"}
+                {user.userId === selfId && <span className="hint">(you)</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </fieldset>
   )
 }
 
@@ -1135,6 +1262,7 @@ function Schedule({
   users,
   newEventIds,
   isAdmin,
+  covered,
   onSelect,
   onEdit,
 }: {
@@ -1142,11 +1270,14 @@ function Schedule({
   users: RegisteredUser[]
   newEventIds: Set<string>
   isAdmin: boolean
+  // True while the editor is open over the event panel.
+  covered: boolean
   onSelect: (event: DeskEvent) => void
   onEdit: (event: DeskEvent) => void
 }) {
   const [view, setView] = useState<ScheduleView>("daily")
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const closeEvent = useCallback(() => setSelectedId(null), [])
   // Ticks so an event that ends while the page is open shows as past without a reload.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -1179,63 +1310,86 @@ function Schedule({
     days.set(key, [...(days.get(key) ?? []), item])
   }
 
+  // A card per event: a status ring, the title and description, a date tile on the right, then the
+  // time, status and people along the bottom.
   const item = ({ event, startsAt, endsAt }: Occurrence, past: boolean) => {
     const original = originalTime(event, startsAt)
+    const isNew = newEventIds.has(event.id)
+    const state = past ? "ended" : new Date(startsAt).getTime() <= now ? "ongoing" : "upcoming"
+    const stateLabel = state === "ended" ? "Ended" : state === "ongoing" ? "Ongoing" : "Not started"
+    const start = new Date(startsAt)
+    const description = [event.notes, event.location].filter(Boolean).join(" · ")
     const classes = [
       "schedule-item",
+      "event-card",
       past ? "past" : "",
-      newEventIds.has(event.id) ? "new" : "",
+      isNew ? "new" : "",
       event.id === selectedId ? "selected" : "",
     ]
     return (
-      <button
-        key={`${event.id}:${startsAt}`}
-        type="button"
-        className={classes.filter(Boolean).join(" ")}
-        aria-current={event.id === selectedId ? "true" : undefined}
-        onClick={() => {
-          setSelectedId(event.id)
-          onSelect(event)
-        }}
-      >
-        <span className="schedule-time">
-          {formatTime(startsAt)}
-          <span>{formatTime(endsAt)}</span>
-          <span>{zoneAbbreviation(localTimeZone(), new Date(startsAt))}</span>
-        </span>
-        <span className="schedule-text">
-          <strong>
-            {event.title}
-            {newEventIds.has(event.id) && <span className="new-tag">New</span>}
-          </strong>
-          {event.location && <span>{event.location}</span>}
-          {original && <span className="schedule-zone">Set for {original}</span>}
-          <span className="schedule-people">
-            <PersonAvatar users={users} id={event.createdBy} prefix="Created by " />
-            {event.participantIds.length > 0 && (
-              <>
-                <span className="schedule-people-divider" aria-hidden="true" />
-                <span className="schedule-participants">
-                  {event.participantIds.map((id) => (
-                    <PersonAvatar key={id} users={users} id={id} />
-                  ))}
+      <div key={`${event.id}:${startsAt}`} className={classes.filter(Boolean).join(" ")}>
+        <button
+          type="button"
+          className="event-card-main"
+          aria-current={event.id === selectedId ? "true" : undefined}
+          onClick={() => {
+            setSelectedId(event.id)
+            onSelect(event)
+          }}
+        >
+          <span className={`event-card-ring ${state}`} aria-hidden="true" />
+          <span className="event-card-text">
+            <strong>
+              {event.title}
+              {isNew && <span className="new-tag">New</span>}
+              {event.locked && (
+                <span className="schedule-lock" title="Locked by an admin" aria-label="Locked">
+                  <LockIcon />
                 </span>
+              )}
+            </strong>
+            {description && <span className="event-card-description">{description}</span>}
+          </span>
+          <span className="event-card-tile" aria-hidden="true">
+            {event.repeat === "daily" ? (
+              <>
+                <small>Every</small>
+                <b>Day</b>
+              </>
+            ) : (
+              <>
+                <small>{new Intl.DateTimeFormat(undefined, { month: "short" }).format(start)}</small>
+                <b>{start.getDate()}</b>
+                <small>{new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(start)}</small>
               </>
             )}
           </span>
-          {event.notes && <span className="schedule-notes">{event.notes}</span>}
-        </span>
-        {event.locked && (
-          <span className="schedule-lock" title="Locked by an admin" aria-label="Locked">
-            <LockIcon />
+          <span className="event-card-foot">
+            <span title={original ? `Set for ${original}` : undefined}>
+              Time:{" "}
+              <b>
+                {formatTime(startsAt)} – {formatTime(endsAt)} {zoneAbbreviation(localTimeZone(), start)}
+              </b>
+            </span>
+            <span>
+              Status: <b className={`event-card-state ${state}`}>{stateLabel}</b>
+            </span>
+            <span className="schedule-participants event-card-people">
+              <PersonAvatar users={users} id={event.createdBy} prefix="Created by " />
+              {event.participantIds
+                .filter((id) => id !== event.createdBy)
+                .map((id) => (
+                  <PersonAvatar key={id} users={users} id={id} />
+                ))}
+            </span>
           </span>
-        )}
-      </button>
+        </button>
+      </div>
     )
   }
 
   return (
-    <div className="desk-body schedule-body">
+    <div className="desk-body">
       <div className="desk-toolbar">
         <div className="desk-segmented" role="group" aria-label="Show events">
           <button type="button" aria-pressed={view === "daily"} onClick={() => switchView("daily")}>
@@ -1252,44 +1406,37 @@ function Schedule({
           Times in your time zone, {localTimeZone()} ({zoneAbbreviation(localTimeZone())})
         </span>
       </div>
-      <div className="schedule-split">
-        <div className="schedule-list">
-          {view === "daily" ? (
-            daily.length === 0 ? (
-              <p className="hint">No daily events yet. Admins can set an event to repeat every day.</p>
-            ) : (
-              <section className="schedule-day">
-                <h2>Every day</h2>
-                {/* Today's run of a daily event is past once it has ended. */}
-                {daily.map((occurrence) => item(occurrence, new Date(occurrence.endsAt).getTime() < now))}
-              </section>
-            )
-          ) : days.size === 0 ? (
-            <p className="hint">{view === "all" ? "No one-off events yet." : "Nothing coming up."}</p>
-          ) : (
-            [...days.entries()].map(([day, items]) => (
-              <section key={day} className="schedule-day">
-                <h2 className={day < todayKey() ? "past" : undefined}>{formatDay(day)}</h2>
-                {items.map((occurrence) => item(occurrence, new Date(occurrence.endsAt).getTime() < now))}
-              </section>
-            ))
-          )}
-        </div>
-        {selected ? (
-          <EventDetail
-            event={selected}
-            users={users}
-            canEdit={!selected.locked || isAdmin}
-            isAdmin={isAdmin}
-            onEdit={() => onEdit(selected)}
-            onClose={() => setSelectedId(null)}
-          />
+      {view === "daily" ? (
+        daily.length === 0 ? (
+          <p className="hint">No daily events yet. Admins can set an event to repeat every day.</p>
         ) : (
-          <aside className="event-detail empty">
-            <p className="hint">Select an event to see its details.</p>
-          </aside>
-        )}
-      </div>
+          <section className="schedule-day">
+            <h2>Every day</h2>
+            {/* Today's run of a daily event is past once it has ended. */}
+            {daily.map((occurrence) => item(occurrence, new Date(occurrence.endsAt).getTime() < now))}
+          </section>
+        )
+      ) : days.size === 0 ? (
+        <p className="hint">{view === "all" ? "No one-off events yet." : "Nothing coming up."}</p>
+      ) : (
+        [...days.entries()].map(([day, items]) => (
+          <section key={day} className="schedule-day">
+            <h2 className={day < todayKey() ? "past" : undefined}>{formatDay(day)}</h2>
+            {items.map((occurrence) => item(occurrence, new Date(occurrence.endsAt).getTime() < now))}
+          </section>
+        ))
+      )}
+      {selected && (
+        <EventDetail
+          event={selected}
+          users={users}
+          canEdit={!selected.locked || isAdmin}
+          isAdmin={isAdmin}
+          covered={covered}
+          onEdit={() => onEdit(selected)}
+          onClose={closeEvent}
+        />
+      )}
     </div>
   )
 }
@@ -1310,6 +1457,7 @@ function EventDetail({
   users,
   canEdit,
   isAdmin,
+  covered,
   onEdit,
   onClose,
 }: {
@@ -1319,9 +1467,20 @@ function EventDetail({
   canEdit: boolean
   // Only admins see who an event is visible to.
   isAdmin: boolean
+  // True while the editor is open on top, so Esc closes only the editor.
+  covered: boolean
   onEdit: () => void
   onClose: () => void
 }) {
+  useEffect(() => {
+    if (covered) return
+    function onKey(key: KeyboardEvent) {
+      if (key.key === "Escape") onClose()
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [covered, onClose])
+
   const occurrence =
     event.repeat === "daily"
       ? todayOf(event)
@@ -1330,74 +1489,117 @@ function EventDetail({
         : null
   const original = occurrence ? originalTime(event, occurrence.startsAt) : null
 
+  // Slides in from the right like the task panel: a bar with close and edit, the facts in two columns,
+  // then the notes in a box.
   return (
-    <aside className="event-detail" aria-label="Event details">
-      <div className="event-detail-head">
-        <h2>{event.title}</h2>
-        {event.locked && (
-          <span className="schedule-lock" title="Locked by an admin" aria-label="Locked">
-            <LockIcon />
-          </span>
-        )}
-        {canEdit && (
-          <button type="button" className="event-detail-icon" aria-label="Edit event" title="Edit" onClick={onEdit}>
+    <div className="drawer-backdrop" onPointerDown={(down) => down.target === down.currentTarget && onClose()}>
+      <aside className="event-detail drawer task-drawer" role="dialog" aria-label="Event details">
+        <div className="task-drawer-bar">
+          <button type="button" className="event-detail-icon" aria-label="Close" title="Close" onClick={onClose}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M11 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V13" />
-              <path d="M17.6 3.9a2 2 0 0 1 2.8 2.8L12.5 14.6 9 15.5l.9-3.5 7.7-8.1z" />
+              <path d="M6 6l12 12M18 6L6 18" />
             </svg>
           </button>
-        )}
-        <button type="button" className="event-detail-close" aria-label="Close" onClick={onClose}>
-          ×
-        </button>
-      </div>
-      <dl className="event-facts">
-        <dt>When</dt>
-        <dd>
-          {occurrence ? (
-            <>
-              {event.repeat !== "daily" && `${formatDay(localDate(new Date(occurrence.startsAt)))}, `}
-              {formatTime(occurrence.startsAt)} – {formatTime(occurrence.endsAt)}{" "}
-              {zoneAbbreviation(localTimeZone(), new Date(occurrence.startsAt))}
-              <span className="event-fact-note">
-                {original ? `Set for ${original} · ${event.timeZone}` : event.timeZone}
-              </span>
-            </>
-          ) : (
-            "—"
-          )}
-        </dd>
-        {event.location && (
-          <>
-            <dt>Location</dt>
-            <dd>{event.location}</dd>
-          </>
-        )}
-        <dt>Participants</dt>
-        <dd>
-          {event.participantIds.length > 0 ? (
-            <span className="event-avatars">
-              {event.participantIds.map((id) => (
-                <PersonAvatar key={id} users={users} id={id} />
-              ))}
+          <h2>{event.title}</h2>
+          {event.locked && (
+            <span className="schedule-lock" title="Locked by an admin" aria-label="Locked">
+              <LockIcon />
             </span>
-          ) : (
-            "No one yet"
           )}
-        </dd>
-        <dt>Created by</dt>
-        <dd>
-          <PersonAvatar users={users} id={event.createdBy} />
-        </dd>
-        {isAdmin && (
-          <>
-            <dt>Who can see it</dt>
-            <dd>{event.visibility === "participants" ? "Only participants and the creator" : "All leaders"}</dd>
-          </>
-        )}
-      </dl>
-      {event.notes && <p className="event-notes">{event.notes}</p>}
-    </aside>
+          {canEdit && (
+            <button type="button" className="event-detail-icon" aria-label="Edit event" title="Edit" onClick={onEdit}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M11 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V13" />
+                <path d="M17.6 3.9a2 2 0 0 1 2.8 2.8L12.5 14.6 9 15.5l.9-3.5 7.7-8.1z" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <div className="task-drawer-main">
+          <dl className="task-facts">
+            <dt>
+              <FactIcon kind="due" />
+              Date
+            </dt>
+            <dd>
+              {event.repeat === "daily"
+                ? "Every day"
+                : occurrence
+                  ? new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(
+                      new Date(occurrence.startsAt),
+                    )
+                  : "—"}
+            </dd>
+            <dt>
+              <ClockIcon />
+              Time
+            </dt>
+            <dd>
+              {occurrence ? (
+                <>
+                  {formatTime(occurrence.startsAt)} – {formatTime(occurrence.endsAt)}
+                  <span className="task-fact-muted">{zoneAbbreviation(localTimeZone(), new Date(occurrence.startsAt))}</span>
+                </>
+              ) : (
+                "—"
+              )}
+            </dd>
+            <dt>
+              <FactIcon kind="zone" />
+              Time zone
+            </dt>
+            <dd>
+              {event.timeZone}
+              {original && <span className="task-fact-muted">Set for {original}</span>}
+            </dd>
+            <dt>
+              <FactIcon kind="location" />
+              Location
+            </dt>
+            <dd>{event.location || <span className="task-fact-muted">None</span>}</dd>
+            <dt>
+              <FactIcon kind="creator" />
+              Created by
+            </dt>
+            <dd className="task-fact-person">
+              <PersonAvatar users={users} id={event.createdBy} />
+              {nameOf(users, event.createdBy)}
+            </dd>
+            <dt>
+              <FactIcon kind="assignees" />
+              Participants
+            </dt>
+            <dd>
+              {event.participantIds.length > 0 ? (
+                <span className="task-assignee">
+                  {event.participantIds.map((id) => (
+                    <PersonAvatar key={id} users={users} id={id} />
+                  ))}
+                </span>
+              ) : (
+                "No one yet"
+              )}
+            </dd>
+            {isAdmin && (
+              <>
+                <dt>
+                  <FactIcon kind="visibility" />
+                  Who can see it
+                </dt>
+                <dd>{event.visibility === "participants" ? "Participants and the creator" : "All leaders"}</dd>
+              </>
+            )}
+          </dl>
+          <div className="task-drawer-description">
+            <h3>
+              <FactIcon kind="description" />
+              Notes
+            </h3>
+            {event.notes ? <p>{event.notes}</p> : <p className="empty">No notes.</p>}
+          </div>
+        </div>
+      </aside>
+    </div>
   )
 }
 
@@ -1428,11 +1630,6 @@ function EventEditor({
   const [notes, setNotes] = useState(event?.notes ?? "")
   const [participantIds, setParticipantIds] = useState<string[]>(event?.participantIds ?? [])
   const [visibility, setVisibility] = useState<EventVisibility>(event?.visibility ?? "leaders")
-  // Leaders who later lost the role stay listed so they are not silently removed.
-  const choices = [
-    ...leaders,
-    ...users.filter((user) => participantIds.includes(user.userId) && !leaders.includes(user)),
-  ]
 
   return (
     <DeskModal
@@ -1468,79 +1665,83 @@ function EventEditor({
           : undefined
       }
       deleteText="Delete this event?"
+      className="task-form"
     >
-      <label>
-        Title
-        <input value={title} maxLength={120} required autoFocus onChange={(change) => setTitle(change.target.value)} />
-      </label>
-      <p className="hint">
-        Created by {event ? nameOf(users, event.createdBy) : "you"}
-        {daily && " · Repeats every day. Admins can change the repeat."}
-      </p>
-      <div className={daily ? "desk-form-row" : "desk-form-row three"}>
-        {!daily && (
-          <label>
-            Date
-            <input type="date" value={date} required onChange={(change) => setDate(change.target.value)} />
-          </label>
-        )}
+      <div className="task-form-card">
         <label>
-          Starts
-          <input type="time" value={startTime} required onChange={(change) => setStartTime(change.target.value)} />
+          Event name
+          <input value={title} maxLength={120} required autoFocus onChange={(change) => setTitle(change.target.value)} />
+        </label>
+        <p className="hint task-form-hint">
+          Created by {event ? nameOf(users, event.createdBy) : "you"}
+          {daily && " · Repeats every day. Admins can change the repeat."}
+        </p>
+        <label>
+          Notes
+          <textarea value={notes} rows={3} maxLength={2000} onChange={(change) => setNotes(change.target.value)} />
         </label>
         <label>
-          Ends
-          <input type="time" value={endTime} required onChange={(change) => setEndTime(change.target.value)} />
+          Location or link
+          <input value={location} maxLength={120} onChange={(change) => setLocation(change.target.value)} />
         </label>
       </div>
-      <label>
-        Time zone
-        <select value={zone} onChange={(change) => setZone(change.target.value)}>
-          {timeZoneOptions(zone).map((item) => (
-            <option key={item} value={item}>
-              {item} ({zoneAbbreviation(item)})
-              {item === localTimeZone() ? " · yours" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      <fieldset className="desk-people">
-        <legend>Participants</legend>
-        {choices.length === 0 ? (
-          <p className="hint">No Leadership members yet.</p>
-        ) : (
-          choices.map((user) => (
-            <label key={user.userId} className="desk-check">
-              <input
-                type="checkbox"
-                checked={participantIds.includes(user.userId)}
-                onChange={(change) =>
-                  setParticipantIds((current) =>
-                    change.target.checked ? [...current, user.userId] : current.filter((id) => id !== user.userId),
-                  )
-                }
-              />
-              {user.displayName || "Unnamed"}
-              {user.userId === selfId && <span className="hint"> (you)</span>}
+      <div className="task-form-card">
+        <div className={daily ? "desk-form-row" : "desk-form-row three"}>
+          {!daily && (
+            <label>
+              Date
+              <input type="date" value={date} required onChange={(change) => setDate(change.target.value)} />
             </label>
-          ))
-        )}
-      </fieldset>
-      <label>
-        Who can see it
-        <select value={visibility} onChange={(change) => setVisibility(change.target.value as EventVisibility)}>
-          <option value="leaders">All leaders</option>
-          <option value="participants">Only participants and the creator</option>
-        </select>
-      </label>
-      <label>
-        Location or link
-        <input value={location} maxLength={120} onChange={(change) => setLocation(change.target.value)} />
-      </label>
-      <label>
-        Notes
-        <textarea value={notes} rows={3} maxLength={2000} onChange={(change) => setNotes(change.target.value)} />
-      </label>
+          )}
+          <label>
+            Starts
+            <input type="time" value={startTime} required onChange={(change) => setStartTime(change.target.value)} />
+          </label>
+          <label>
+            Ends
+            <input type="time" value={endTime} required onChange={(change) => setEndTime(change.target.value)} />
+          </label>
+        </div>
+        <label>
+          Time zone
+          <select value={zone} onChange={(change) => setZone(change.target.value)}>
+            {timeZoneOptions(zone).map((item) => (
+              <option key={item} value={item}>
+                {item} ({zoneAbbreviation(item)})
+                {item === localTimeZone() ? " · yours" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <fieldset className="task-form-priority task-form-visibility">
+          <legend>Who can see it</legend>
+          {(
+            [
+              { id: "leaders", label: "All leaders" },
+              { id: "participants", label: "Participants only" },
+            ] as Array<{ id: EventVisibility; label: string }>
+          ).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={visibility === item.id}
+              title={item.id === "participants" ? "Only the participants and the creator" : undefined}
+              onClick={() => setVisibility(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </fieldset>
+      </div>
+      <PeoplePicker
+        legend="Participants"
+        addLabel="Add participant"
+        ids={participantIds}
+        onChange={setParticipantIds}
+        users={users}
+        leaders={leaders}
+        selfId={selfId}
+      />
     </DeskModal>
   )
 }

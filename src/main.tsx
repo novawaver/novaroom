@@ -2,6 +2,7 @@ import React from "react"
 import ReactDOM from "react-dom/client"
 import App from "./App"
 import { AuthProvider } from "./auth"
+import { inTauri } from "./lib/desktop"
 import { applyStoredTheme } from "./lib/theme"
 import "./styles.css"
 
@@ -48,6 +49,16 @@ document.addEventListener(
   },
   { passive: false },
 )
+
+// Tells the watchdog (src-tauri/src/watchdog.rs) the page is still responding. If these stop while
+// the window is showing, Novaroom restarts itself.
+if (inTauri()) {
+  void import("@tauri-apps/api/core").then(({ invoke }) => {
+    const beat = () => void invoke("watchdog_beat").catch(() => {})
+    beat()
+    window.setInterval(beat, 5000)
+  })
+}
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

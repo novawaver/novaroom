@@ -8,6 +8,7 @@ use tauri_plugin_autostart::ManagerExt;
 mod localchat;
 mod shortcut;
 mod vault;
+mod watchdog;
 
 /// The argument Windows passes when it starts Novaroom at sign-in, so we can tell that launch apart.
 const AUTOSTART_ARG: &str = "--autostart";
@@ -310,6 +311,9 @@ fn log_panics() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log_panics();
+    // After the watchdog restarts a stuck Novaroom, wait for the old one to end before the single
+    // instance check below, which would otherwise close this one.
+    watchdog::wait_for_previous();
     tauri::Builder::default()
         // Must be registered first. Clicking a Windows notification (or the Start menu shortcut)
         // launches Novaroom.exe again; that second launch exits and brings this window forward.
@@ -331,6 +335,7 @@ pub fn run() {
         )
         .manage(UnsavedChanges::default())
         .manage(localchat::LocalChat::default())
+        .manage(watchdog::Watchdog::new())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name(AUTOSTART_NAME)
@@ -364,7 +369,8 @@ pub fn run() {
             localchat::local_chat_file,
             localchat::local_chat_save_file,
             localchat::local_chat_typing,
-            localchat::local_chat_mark_read
+            localchat::local_chat_mark_read,
+            watchdog::watchdog_beat
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -387,9 +393,12 @@ pub fn run() {
             shortcut::register_saved(app.handle());
 
             let launched_at_login = std::env::args().any(|arg| arg == AUTOSTART_ARG);
-            if !(launched_at_login && startup.start_minimized) {
+            // A restart after getting stuck keeps the window as it was: hidden if it was in the tray.
+            let restarted_hidden = std::env::args().any(|arg| arg == watchdog::RESTART_HIDDEN_ARG);
+            if !(launched_at_login && startup.start_minimized) && !restarted_hidden {
                 show_main(app.handle());
             }
+            watchdog::start(app.handle());
 
             let show = MenuItem::with_id(app, "show", "Show Novaroom", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
