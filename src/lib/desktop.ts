@@ -135,15 +135,79 @@ export async function setUnreadBadge(count: number) {
   })
 }
 
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new window.Image()
+    // Lets the canvas be read afterwards; profile pictures are served with CORS allowed.
+    image.crossOrigin = "anonymous"
+    const timer = window.setTimeout(() => reject(new Error("Timed out")), 4000)
+    image.onload = () => {
+      window.clearTimeout(timer)
+      resolve(image)
+    }
+    image.onerror = () => {
+      window.clearTimeout(timer)
+      reject(new Error("Could not load the picture."))
+    }
+    image.src = src
+  })
+}
+
+/**
+ * The sender's profile picture as a PNG (base64), for the notification's round icon. Their initials
+ * on the brand colour when there is no picture, or it can't be loaded (for example offline).
+ */
+async function senderPicture(from: { name: string; avatarUrl: string | null }) {
+  const size = 128
+  const canvas = document.createElement("canvas")
+  canvas.width = size
+  canvas.height = size
+  const context = canvas.getContext("2d")
+  if (!context) return null
+  const drawInitials = () => {
+    const parts = from.name.split(/\s+/).filter(Boolean)
+    const letters = (parts.length >= 2 ? `${parts[0][0]}${parts[1][0]}` : from.name.slice(0, 2)).toUpperCase() || "?"
+    context.clearRect(0, 0, size, size)
+    context.fillStyle = "#d14a1d"
+    context.fillRect(0, 0, size, size)
+    context.fillStyle = "#fff"
+    context.font = "700 52px Segoe UI, sans-serif"
+    context.textAlign = "center"
+    context.textBaseline = "middle"
+    context.fillText(letters, size / 2, size / 2 + 3)
+  }
+  if (from.avatarUrl) {
+    try {
+      const image = await loadImage(from.avatarUrl)
+      // Fill the square, cropping the longer side, as profile pictures show elsewhere.
+      const scale = Math.max(size / image.naturalWidth, size / image.naturalHeight)
+      const width = image.naturalWidth * scale
+      const height = image.naturalHeight * scale
+      context.drawImage(image, (size - width) / 2, (size - height) / 2, width, height)
+      return canvas.toDataURL("image/png").split(",")[1] ?? null
+    } catch {
+      // Fall through to initials; toDataURL also throws if the picture could not be read.
+    }
+  }
+  drawInitials()
+  return canvas.toDataURL("image/png").split(",")[1] ?? null
+}
+
 // target: what clicking the notification opens, such as "chat:<id>" or "desk:tasks". It comes back
-// through onNotificationClick.
-export async function notifyIncoming(title: string, body: string, target?: string) {
+// through onNotificationClick. from: who it is from, whose picture the notification shows.
+export async function notifyIncoming(
+  title: string,
+  body: string,
+  target?: string,
+  from?: { name: string; avatarUrl: string | null } | null,
+) {
   if (!inTauri()) return
   const text = { title: title || "Novaroom", body: body.slice(0, 180) }
   // On Windows the app shows its own toast, which opens the window when clicked.
   try {
     const { invoke } = await import("@tauri-apps/api/core")
-    await invoke("notify", { ...text, target: target ?? null })
+    const picture = from ? await senderPicture(from).catch(() => null) : null
+    await invoke("notify", { ...text, target: target ?? null, picture })
     return
   } catch {
     // Not Windows, or the toast could not be built; fall back to the plugin's notification.

@@ -82,6 +82,32 @@ button {
   cursor: pointer;
 }
 
+/* Thin rounded scrollbars everywhere: a pill-shaped thumb inset from the edge, on no track. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 40%, transparent) padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--muted) 65%, transparent);
+}
+
+/* Kept clear of a modal's rounded corners. */
+.desk-modal::-webkit-scrollbar-track {
+  margin: 14px 0;
+}
+
 .frame {
   height: 100%;
   display: grid;
@@ -131,37 +157,112 @@ button {
 }
 
 .network-status {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
+  height: 100%;
+  padding: 0 8px;
   color: var(--side-muted);
-  white-space: nowrap;
+  outline: none;
 }
 
-.network-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--side-muted);
+/* Four bars rising left to right; the lit ones take the quality's colour. */
+.network-signal {
+  width: 16px;
+  height: 14px;
 }
 
-.network-status.good .network-dot {
-  background: #2f9e5b;
+.network-signal rect {
+  fill: currentColor;
+  opacity: 0.25;
 }
 
-.network-status.slow .network-dot {
-  background: #d99a1e;
+.network-signal rect.on {
+  opacity: 1;
 }
 
-.network-status.offline {
+.network-status.good .network-signal {
+  color: #2f9e5b;
+}
+
+.network-status.fair .network-signal {
+  color: #d99a1e;
+}
+
+.network-status.weak .network-signal,
+.network-status.offline .network-signal {
   color: var(--danger);
 }
 
-.network-status.offline .network-dot {
-  background: var(--danger);
+.network-status.offline .network-signal,
+.network-status.checking .network-signal {
   animation: network-pulse 1.4s ease-in-out infinite;
+}
+
+/* The details, under the icon while it is hovered or focused. */
+.network-card {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 100;
+  width: max-content;
+  max-width: 260px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-size: 12.5px;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-2px);
+  transition:
+    opacity 0.12s,
+    transform 0.12s,
+    visibility 0.12s;
+  pointer-events: none;
+}
+
+.network-status:hover .network-card,
+.network-status:focus-visible .network-card {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+}
+
+.network-status:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: -4px;
+  border-radius: 6px;
+}
+
+.network-card strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.network-card dl {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 3px 14px;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.network-card dt {
+  color: var(--muted);
+}
+
+.network-card dd {
+  margin: 0;
+  text-align: right;
+}
+
+.network-card p {
+  margin: 0;
+  color: var(--muted);
 }
 
 @keyframes network-pulse {
@@ -373,10 +474,10 @@ input {
   color: var(--ink);
 }
 
+/* Focus shows on the field's own border; outlines are off everywhere (see the end of this file). */
 input:focus,
 textarea:focus {
-  outline: 2px solid var(--brand-bright);
-  border-color: transparent;
+  border-color: var(--brand-bright);
 }
 
 :root[data-theme="dark"] input,
@@ -524,6 +625,21 @@ textarea:focus {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+  width: var(--nav-width);
+  transition:
+    width 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+/* Collapsed, the bar widens over the sidebar while the pointer is on it, to show the labels, and goes
+   back when it leaves. The short delay before widening keeps it from flashing open as the pointer
+   passes across on its way somewhere else. */
+.navbar:not(.expanded):hover {
+  position: relative;
+  z-index: 30;
+  width: 200px;
+  box-shadow: 12px 0 32px rgba(28, 25, 21, 0.16);
+  transition-delay: 0.25s;
 }
 
 .nav-item {
@@ -556,8 +672,9 @@ textarea:focus {
   white-space: nowrap;
 }
 
-/* Collapsed, labels are hidden from sight but still read out; each button's tooltip shows it. */
-.navbar:not(.expanded) .nav-label {
+/* Collapsed, labels are hidden from sight but still read out, until the bar widens on hover. While it
+   widens they are already in place, cut off by the bar's edge, so they come into view with it. */
+.navbar:not(.expanded):not(:hover) .nav-label {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -669,12 +786,6 @@ textarea:focus {
 .side-menu-footer {
   margin-top: auto;
   padding-top: 12px;
-  border-top: 1px solid var(--side-line);
-}
-
-.side-menu-plain .side-menu-item {
-  border-bottom: 0;
-  border-radius: 12px;
 }
 
 .side-menu-plain .side-menu-chevron {
@@ -693,15 +804,10 @@ textarea:focus {
   width: 100%;
   padding: 12px 8px;
   border: 0;
-  border-bottom: 1px solid var(--side-line);
-  border-radius: 0;
+  border-radius: 12px;
   background: transparent;
   color: var(--side-ink);
   text-align: left;
-}
-
-.side-menu-item:last-child {
-  border-bottom: 0;
 }
 
 /* The selected row is shaded like a selected chat or room. */
@@ -956,6 +1062,13 @@ textarea:focus {
   border: 0;
   border-radius: 12px;
   padding: 8px;
+}
+
+/* Pictures in the chat lists (Online and Local), a size up from the default. */
+.chat-row .avatar {
+  width: 46px;
+  height: 46px;
+  font-size: 15px;
 }
 
 .chat-row.active,
@@ -2338,24 +2451,34 @@ code {
   font-size: 13px;
 }
 
+.task-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  /* Every row as tall as the tallest card, so the cards in a group match. */
+  grid-auto-rows: 1fr;
+  gap: 12px;
+}
+
 .task-card {
   position: relative;
-  display: grid;
-  gap: 8px;
-  padding: 12px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
   border: 1px solid var(--line);
-  border-left: 3px solid var(--line);
-  border-radius: 10px;
+  border-radius: 16px;
   background: var(--card);
-}
-
-.task-card {
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
   cursor: pointer;
+  transition: box-shadow 0.12s, border-color 0.12s;
 }
 
-/* A shadow rather than a border colour, so the priority stripe on the left stays visible. */
 .task-card:hover {
-  box-shadow: 0 2px 10px rgba(28, 25, 21, 0.1);
+  box-shadow: 0 4px 16px rgba(28, 25, 21, 0.08);
 }
 
 .task-card.selected {
@@ -2363,16 +2486,263 @@ code {
   box-shadow: inset 0 0 0 1px var(--brand);
 }
 
-.task-card.priority-high {
-  border-left-color: var(--brand);
-}
-
-.task-card.priority-low {
-  border-left-color: var(--muted);
-}
-
 .task-card.new {
   background: color-mix(in srgb, var(--brand-bright) 8%, var(--card));
+}
+
+.task-card:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.task-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-card-title .new-tag {
+  flex: none;
+  margin-left: 0;
+}
+
+.task-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.task-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--side-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.task-flag.low {
+  background: color-mix(in srgb, #2e9b57 14%, var(--card));
+  color: #1f8a4c;
+}
+
+.task-flag.high {
+  background: color-mix(in srgb, #e5484d 12%, var(--card));
+  color: #d93036;
+}
+
+.task-flag.normal {
+  background: color-mix(in srgb, #e8590c 12%, var(--card));
+  color: #e2561c;
+}
+
+:root[data-theme="dark"] .task-flag.high {
+  color: #f59a9c;
+}
+
+:root[data-theme="dark"] .task-flag.normal {
+  color: #f5a37a;
+}
+
+:root[data-theme="dark"] .task-flag.low {
+  color: #8fd9a8;
+}
+
+/* Takes up the spare height, so progress, due date and footer sit together at the bottom. */
+.task-card-text {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  margin-bottom: auto;
+}
+
+.task-card-text strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* One colour per status, shared by each card's status badge and its progress bar and icon. */
+.task-progress.todo,
+.task-badge.todo {
+  --tone: #2b7fe8;
+}
+
+.task-progress.doing,
+.task-badge.doing {
+  --tone: #e8590c;
+}
+
+.task-progress.done,
+.task-badge.done {
+  --tone: #1fa64a;
+}
+
+.task-progress.failed,
+.task-badge.failed {
+  --tone: #e5484d;
+}
+
+.task-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tone) 10%, var(--card));
+  color: var(--tone);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.task-badge .status-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.task-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.task-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.task-progress-head .status-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.task-progress-head > span {
+  margin-left: auto;
+}
+
+.task-progress-head b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.status-icon {
+  flex: 0 0 auto;
+  fill: none;
+  stroke: var(--tone);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.status-icon .fill {
+  fill: var(--tone);
+  stroke: none;
+}
+
+.status-icon.solid circle {
+  fill: var(--tone);
+  stroke: none;
+}
+
+.status-icon.solid path {
+  stroke: #fff;
+  stroke-width: 2.4;
+}
+
+.task-progress-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--side-soft);
+}
+
+/* Faint diagonal stripes over the fill, as in the design. */
+.task-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background:
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.12) 0 4px, transparent 4px 8px),
+    var(--tone);
+}
+
+/* A striped stub so an empty bar still reads as a progress bar. */
+.task-progress-bar.empty span {
+  width: 16px !important;
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--muted) 30%, transparent) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+.task-due-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.task-due-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--side-soft);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.task-due-chip b {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.task-due-chip.overdue,
+.task-due-chip.overdue b {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.task-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  /* One height on every card, so footers line up across cards in a row. */
+  box-sizing: border-box;
+  height: 41px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.task-card-foot .task-assignee {
+  margin-left: 0;
 }
 
 .task-open {
@@ -2517,6 +2887,8 @@ code {
 
 .schedule-item.past {
   border-left-color: var(--line);
+  /* A little greyer than upcoming events, towards the page colour. */
+  background: color-mix(in srgb, var(--paper) 70%, var(--card));
   opacity: 0.65;
 }
 
@@ -2551,7 +2923,33 @@ code {
 }
 
 .schedule-people {
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+/* Creator, a thin line, then participants overlapping a little, like assignees on tasks. */
+.schedule-people .avatar.event-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+  cursor: default;
+}
+
+.schedule-people-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+}
+
+.schedule-participants {
+  display: flex;
+}
+
+.schedule-participants .avatar + .avatar {
+  margin-left: -6px;
+  box-shadow: 0 0 0 2px var(--card);
 }
 
 .desk-people {
@@ -2802,6 +3200,24 @@ code {
   margin-top: 0;
 }
 
+/* Labels with an icon in front, in the task panel. */
+.event-facts dt:has(.fact-icon) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fact-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .event-facts dd {
   margin: 0;
   overflow-wrap: anywhere;
@@ -3004,6 +3420,250 @@ code {
 
 .desk-delete {
   margin-right: auto;
+}
+
+/* New / edit task: two white cards on a soft background, with grey labels over pill-shaped fields,
+   priority as a row of pills, and the people to assign as a row of avatars. */
+.desk-modal.task-form {
+  gap: 10px;
+  padding: 18px;
+  background: var(--paper);
+}
+
+.task-form h2 {
+  margin: 0 4px 2px;
+}
+
+.task-form-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+}
+
+.task-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.task-form-card input {
+  height: 42px;
+  padding: 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.task-form-card textarea {
+  padding: 10px 18px;
+  border-radius: 18px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.task-form-priority {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* Floated so the legend lays out like a normal first row of the grid, spanning its full width. */
+.task-form-priority legend,
+.task-form-people legend {
+  float: left;
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.task-form-priority legend {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.task-form-priority button {
+  --tone: var(--muted);
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+}
+
+.task-form-priority button:hover {
+  color: var(--ink);
+}
+
+/* The chosen priority takes the colour of its flag on the cards. */
+.task-form-priority button.high {
+  --tone: #d93036;
+}
+
+.task-form-priority button.normal {
+  --tone: #e2561c;
+}
+
+.task-form-priority button.low {
+  --tone: #1f8a4c;
+}
+
+.task-form-priority button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--tone) 55%, var(--card));
+  background: color-mix(in srgb, var(--tone) 12%, var(--card));
+  color: var(--tone);
+  font-weight: 600;
+}
+
+.task-form-people legend {
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.task-form-people .hint {
+  margin: 0;
+}
+
+/* The assignees as large round photos, then a dashed "+" to add more. Padding leaves room for each
+   photo's ring so nothing is clipped at the edges. */
+.task-form-avatars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 3px;
+}
+
+.task-form-avatar,
+.task-form-add {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  box-shadow: 0 0 0 2px var(--line);
+}
+
+.task-form-avatar .avatar.event-avatar {
+  width: 56px;
+  height: 56px;
+  font-size: 17px;
+  cursor: inherit;
+}
+
+/* A small cross shows on hover; clicking the photo removes that person. */
+.task-form-remove {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.task-form-avatar:hover .task-form-remove,
+.task-form-avatar:focus-visible .task-form-remove {
+  opacity: 1;
+}
+
+.task-form-remove circle {
+  fill: var(--danger);
+  stroke: var(--card);
+  stroke-width: 2;
+}
+
+.task-form-remove path {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+
+.task-form-add {
+  color: var(--muted);
+  background: var(--card);
+}
+
+.task-form-add:hover,
+.task-form-add[aria-expanded="true"] {
+  color: var(--ink);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--muted) 50%, var(--line));
+}
+
+.task-form-add svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  transition: transform 0.15s ease-out;
+}
+
+/* While the list is open, the "+" turns into an "×" that closes it. */
+.task-form-add[aria-expanded="true"] svg {
+  transform: rotate(45deg);
+}
+
+/* People who can still be added, opened by the "+". */
+.task-form-picker {
+  display: grid;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  list-style: none;
+}
+
+.task-form-picker button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+}
+
+.task-form-picker button:hover {
+  background: var(--side-soft);
+}
+
+.task-form-picker .avatar.event-avatar {
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+  cursor: inherit;
+}
+
+.task-form-picker .hint {
+  margin: 0;
 }
 
 @media (max-width: 1000px) {
@@ -4601,6 +5261,11 @@ code {
   overflow: visible;
 }
 
+/* The avatar can't clip its photo (the presence dot sits over its edge), so round the photo itself. */
+.avatar.local-avatar img {
+  border-radius: 50%;
+}
+
 .avatar.local-avatar svg {
   width: 20px;
   height: 20px;
@@ -4807,8 +5472,8 @@ code {
 }
 
 .message-row.flash .bubble {
-  outline: 2px solid var(--brand-bright);
-  outline-offset: 2px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-bright) 60%, transparent);
+  transition: box-shadow 0.2s;
 }
 
 .bubble-status.double {
@@ -4825,6 +5490,50 @@ code {
   border: 0;
   background: none;
   cursor: zoom-in;
+}
+
+/* The save button sits in the image's top-right corner and shows on hover. */
+.local-image-wrap {
+  position: relative;
+  display: block;
+  width: fit-content;
+}
+
+.local-image-save {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.local-image-wrap:hover .local-image-save,
+.local-image-save:focus-visible {
+  opacity: 1;
+}
+
+.local-image-save:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.local-image-save svg,
+.image-viewer-save svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .local-image-placeholder {
@@ -4975,18 +5684,133 @@ code {
   position: fixed;
   inset: 0;
   z-index: 80;
-  display: grid;
-  place-items: center;
-  padding: 40px;
   background: rgba(0, 0, 0, 0.82);
   animation: drawer-fade 0.15s ease-out;
 }
 
+/* Fills the window and scrolls once the image is larger than it. The image's size is set in code. */
+.image-viewer-stage {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  cursor: zoom-out;
+}
+
+.image-viewer-stage.zoomed {
+  cursor: grab;
+}
+
+.image-viewer-stage.zoomed:active {
+  cursor: grabbing;
+}
+
+/* At least as large as the stage, so a small image sits in the middle; grows with a large one so
+   the stage scrolls, with the same margin all round. */
+.image-viewer-canvas {
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  min-height: 100%;
+  padding: 48px;
+}
+
 .image-viewer img {
-  max-width: 100%;
-  max-height: 100%;
+  display: block;
+  max-width: none;
   border-radius: 8px;
-  object-fit: contain;
+  cursor: default;
+  user-select: none;
+}
+
+.image-viewer-stage.zoomed img {
+  cursor: inherit;
+}
+
+.image-viewer-zoom {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(30, 30, 30, 0.85);
+  transform: translateX(-50%);
+}
+
+.image-viewer-zoom button {
+  display: grid;
+  place-items: center;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.image-viewer-zoom button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.image-viewer-zoom button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.image-viewer-zoom .image-viewer-scale {
+  min-width: 56px;
+}
+
+.image-viewer-zoom svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Left of the close button. */
+.image-viewer-save {
+  position: absolute;
+  top: 16px;
+  right: 60px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.image-viewer-save:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Above the zoom buttons. */
+.image-viewer-error {
+  position: absolute;
+  bottom: 72px;
+  left: 50%;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  transform: translateX(-50%);
 }
 
 .image-viewer-close {
@@ -5002,4 +5826,340 @@ code {
   color: #fff;
   font-size: 22px;
   line-height: 1;
+}
+
+/* LeadDesk tasks: a list grouped by due date, with a status filter on top. */
+.task-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 16px;
+  padding: 5px;
+  border-radius: 999px;
+  background: var(--card);
+}
+
+/* A segmented bar: plain grey icon and label, the chosen one on a soft grey pill in dark text. */
+.task-filter {
+  --tone: currentColor;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.task-filter .status-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.task-filter > span {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.task-filter:hover {
+  color: var(--ink);
+}
+
+.task-filter[aria-selected="true"] {
+  background: var(--side-soft);
+  color: var(--ink);
+}
+
+.task-filter:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.task-group {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.task-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 2px;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+
+.task-group-head.past {
+  color: var(--muted);
+}
+
+.task-group-head span {
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-status {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--side-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.task-status.doing {
+  background: color-mix(in srgb, var(--brand-bright) 18%, var(--card));
+  color: var(--brand-ink);
+}
+
+.task-status.done {
+  background: color-mix(in srgb, #2e9b57 20%, var(--card));
+  color: #1f7a42;
+}
+
+.task-status.failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+:root[data-theme="dark"] .task-status.done {
+  color: #8fd9a8;
+}
+
+/* Each assignee's signed result in the task panel. */
+/* Task details: a bar with close and edit, the facts in two columns, the description in a soft box,
+   then tabs for results and notes. Each part pads itself, so the bar and tab lines run edge to edge. */
+.event-detail.drawer.task-drawer {
+  width: min(480px, 100vw);
+  gap: 0;
+  padding: 0;
+}
+
+/* Close, then the title taking the rest of the row, then edit. */
+.task-drawer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-drawer-bar h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-drawer-bar .event-detail-icon {
+  width: 34px;
+  height: 34px;
+  margin: 0;
+}
+
+.task-drawer-bar .event-detail-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.task-drawer-main {
+  display: grid;
+  gap: 22px;
+  padding: 22px 24px 24px;
+}
+
+.task-facts {
+  display: grid;
+  grid-template-columns: minmax(120px, 38%) 1fr;
+  align-items: center;
+  gap: 14px 12px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.task-facts dt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.task-facts dt .fact-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.task-facts dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-fact-muted {
+  color: var(--muted);
+}
+
+.task-fact-person .avatar.event-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+
+.task-facts .task-assignee {
+  margin-left: 0;
+}
+
+.task-facts .task-assignee .avatar.event-avatar {
+  width: 28px;
+  height: 28px;
+}
+
+/* A small grey label over the text in a white bordered box. */
+.task-drawer-description {
+  display: grid;
+  gap: 10px;
+}
+
+.task-drawer-description h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.task-drawer-description h3 .fact-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.task-drawer-description p {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.task-drawer-description p.empty {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.task-drawer-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 0 24px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.task-drawer-tabs button {
+  margin-bottom: -1px;
+  padding: 12px 10px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.task-drawer-tabs button:hover {
+  color: var(--ink);
+}
+
+.task-drawer-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--brand);
+  color: var(--brand);
+}
+
+.task-drawer-panel {
+  padding: 20px 24px 24px;
+}
+
+/* Each assignee's result, like an activity feed: avatar, who did what, and when. */
+.task-activity {
+  display: grid;
+  gap: 16px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.task-activity li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.task-activity li.pending {
+  color: var(--muted);
+}
+
+.task-activity .avatar.event-avatar {
+  flex: none;
+  width: 30px;
+  height: 30px;
+}
+
+.task-activity-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.task-activity-text b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.task-activity-text .task-badge {
+  vertical-align: middle;
+}
+
+.task-activity time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.button.task-fail {
+  color: var(--danger);
+}
+
+/* No outlines anywhere: not the browser's focus rings, nor the focus styles above. */
+*,
+*::before,
+*::after {
+  outline: none !important;
 }

@@ -550,7 +550,7 @@ function TodayDetail({
                 left: `${position(item.startedAt)}%`,
                 width: `${Math.max(0.15, position(item.endedAt) - position(item.startedAt))}%`,
               }}
-              title={`${STATUS_LABELS[item.status]} ${clock(item.startedAt, zone)}–${clock(item.endedAt, zone)}`}
+              title={`${STATUS_LABELS[item.status]} ${clock(item.startedAt, zone)}–${clock(item.endedAt, zone)} ${zoneAbbreviation(zone, new Date(item.startedAt))}`}
             />
           ))}
         </div>
@@ -572,7 +572,7 @@ function TodayDetail({
               <span className={`timer-dot ${item.status}`} />
               <span className="timer-list-status">{STATUS_LABELS[item.status]}</span>
               <span className="timer-list-time">
-                {clock(item.startedAt, zone)} – {clock(item.endedAt, zone)}
+                {clock(item.startedAt, zone)} – {clock(item.endedAt, zone)} {zoneAbbreviation(zone, new Date(item.startedAt))}
               </span>
               <span className="timer-list-length">
                 {formatDuration(new Date(item.endedAt).getTime() - new Date(item.startedAt).getTime())}

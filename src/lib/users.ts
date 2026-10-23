@@ -51,3 +51,27 @@ export async function listUsers(): Promise<RegisteredUser[]> {
     domains: (row.domains as string[] | null) ?? [],
   }))
 }
+
+export type Person = { name: string; avatarUrl: string | null }
+
+// Looked-up people with when, so a changed picture shows up after a while.
+const people = new Map<string, { at: number; person: Promise<Person | null> }>()
+const PERSON_FRESH_MS = 10 * 60 * 1000
+
+/** Someone's name and profile picture, for notifications. Null if they can't be found. */
+export function personById(id: string | null): Promise<Person | null> {
+  if (!id) return Promise.resolve(null)
+  const cached = people.get(id)
+  if (cached && Date.now() - cached.at < PERSON_FRESH_MS) return cached.person
+  const person = (async (): Promise<Person | null> => {
+    if (!supabase) {
+      const profile = readPreviewProfiles()[id]
+      return profile ? { name: profile.displayName, avatarUrl: profile.avatarUrl } : null
+    }
+    const { data } = await supabase.from("profiles").select("display_name, avatar_url").eq("id", id).maybeSingle()
+    const row = data as { display_name: string | null; avatar_url: string | null } | null
+    return row ? { name: row.display_name ?? "", avatarUrl: row.avatar_url } : null
+  })().catch(() => null)
+  people.set(id, { at: Date.now(), person })
+  return person
+}

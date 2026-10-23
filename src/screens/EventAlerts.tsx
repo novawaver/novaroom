@@ -16,6 +16,7 @@ import {
   type DeskTask,
 } from "../lib/leaddesk"
 import { useReconnectEpoch } from "../lib/network"
+import { personById, type Person } from "../lib/users"
 
 // tab: the LeadDesk tab that clicking the toast opens.
 export type Toast = { id: string; title: string; body: string; tab: "schedule" | "tasks" }
@@ -27,8 +28,12 @@ const REFRESH_EVENTS_MS = 5 * 60 * 1000
 const LATE_LIMIT_MS = 5 * 60 * 1000
 const TOAST_MS = 10 * 1000
 
-function timeOf(value: string) {
-  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value))
+function timeOf(value: string, zone = false) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: zone ? "short" : undefined,
+  }).format(new Date(value))
 }
 
 // Tells LeadDesk participants about events: when they are added to one (from the database inbox)
@@ -51,10 +56,11 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
   // Subscriptions are made again, and missed changes loaded, each time the connection comes back.
   const epoch = useReconnectEpoch()
 
-  const show = useCallback((key: string, title: string, body: string, tab: Toast["tab"] = "schedule") => {
+  // from: whose picture the desktop notification shows.
+  const show = useCallback((key: string, title: string, body: string, tab: Toast["tab"] = "schedule", from?: Person | null) => {
     if (shownRef.current.has(key)) return
     shownRef.current.add(key)
-    void notifyIncoming(title, body, `desk:${tab}`)
+    void notifyIncoming(title, body, `desk:${tab}`, from)
     setToasts((current) => [...current.slice(-3), { id: key, title, body, tab }])
     window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== key)), TOAST_MS)
   }, [])
@@ -87,8 +93,14 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
     let active = true
     const deliver = (alerts: EventAlert[]) => {
       for (const alert of alerts) {
-        if (alert.kind === "task_assigned") show(`task:${alert.id}`, "Task assigned to you", alert.title, "tasks")
-        else show(`added:${alert.id}`, "Added to an event", alert.title)
+        void personById(alert.actorId).then((from) => {
+          const who = from?.name || "Someone"
+          if (alert.kind === "task_assigned") show(`task:${alert.id}`, "Task assigned to you", alert.title, "tasks", from)
+          else if (alert.kind === "task_done") show(`signed:${alert.id}`, `${who} marked a task done`, alert.title, "tasks", from)
+          else if (alert.kind === "task_failed")
+            show(`signed:${alert.id}`, `${who} marked a task failed`, alert.title, "tasks", from)
+          else show(`added:${alert.id}`, "Added to an event", alert.title, "schedule", from)
+        })
       }
       void markAlertsDelivered(alerts.map((alert) => alert.id)).catch(() => {})
     }
@@ -97,7 +109,7 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
         .then((alerts) => {
           if (!active || alerts.length === 0) return
           deliver(alerts)
-          if (alerts.some((alert) => alert.kind === "task_assigned")) void refreshTasks()
+          if (alerts.some((alert) => alert.kind !== "event_added")) void refreshTasks()
           if (alerts.some((alert) => alert.kind === "event_added")) void refreshEvents()
         })
         .catch(() => {})
@@ -111,7 +123,8 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
       if (alert.kind === "task_assigned") {
         if (alert.taskId) localTaskReadsRef.current.delete(alert.taskId)
         void refreshTasks()
-      } else void refreshEvents()
+      } else if (alert.kind === "event_added") void refreshEvents()
+      else void refreshTasks()
     })
     return () => {
       active = false
@@ -135,10 +148,10 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
         for (const occurrence of occurrencesOf(event, new Date(from), new Date(now))) {
           const start = new Date(occurrence.startsAt).getTime()
           if (start <= from || start > now) continue
-          show(
-            `start:${event.id}:${occurrence.startsAt}`,
-            `Starting now: ${event.title}`,
-            `${timeOf(occurrence.startsAt)}–${timeOf(occurrence.endsAt)}${event.location ? ` · ${event.location}` : ""}`,
+          const key = `start:${event.id}:${occurrence.startsAt}`
+          const body = `${timeOf(occurrence.startsAt)}–${timeOf(occurrence.endsAt, true)}${event.location ? ` · ${event.location}` : ""}`
+          void personById(event.createdBy).then((from) =>
+            show(key, `Starting now: ${event.title}`, body, "schedule", from),
           )
         }
       }

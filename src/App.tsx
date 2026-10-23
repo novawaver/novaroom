@@ -12,7 +12,7 @@ import { UpdateBanner } from "./screens/UpdateBanner"
 function Screen() {
   const { ready, session, profile, offline, offlineChosen, signOut } = useAuth()
   // Local chat keeps running when the app switches between offline and online.
-  const local = useLocalChat(session, profile?.displayName || session?.email || "", offline)
+  const local = useLocalChat(session, profile?.displayName || session?.email || "", offline, profile?.avatarUrl ?? null)
   if (!ready) {
     return (
       <div className="boot">

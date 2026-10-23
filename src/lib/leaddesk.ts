@@ -1,7 +1,12 @@
 import { supabase } from "./supabase"
-import { addDays, instantToZoned, isTimeZone, zonedToInstant } from "./timezone"
+import { addDays, instantToZoned, isTimeZone, localTimeZone, zonedToInstant } from "./timezone"
 
-export type TaskStatus = "todo" | "doing" | "done"
+export type TaskStatus = "todo" | "doing" | "done" | "failed"
+
+/** An assignee's own verdict on a task. */
+export type TaskResult = "done" | "failed"
+
+export type TaskSignoff = { result: TaskResult; signedAt: string }
 export type TaskPriority = "low" | "normal" | "high"
 
 export type DeskTask = {
@@ -15,7 +20,11 @@ export type DeskTask = {
   priority: TaskPriority
   // Everyone the task is assigned to; empty when no one is.
   assigneeIds: string[]
+  // Results signed by assignees, by their id.
+  signoffs: Record<string, TaskSignoff>
   dueDate: string | null
+  // The creator's zone, which the due date is counted in. Null on older tasks: use the viewer's.
+  timeZone: string | null
   createdBy: string | null
   createdAt: string
 }
@@ -121,6 +130,7 @@ type TaskRow = {
   priority: TaskPriority
   assignee_ids: string[] | null
   due_date: string | null
+  time_zone: string | null
   created_by: string | null
   created_at: string
 }
@@ -133,7 +143,9 @@ const toTask = (row: TaskRow): DeskTask => ({
   status: row.status,
   priority: row.priority,
   assigneeIds: row.assignee_ids ?? [],
+  signoffs: {},
   dueDate: row.due_date,
+  timeZone: row.time_zone && isTimeZone(row.time_zone) ? row.time_zone : null,
   createdBy: row.created_by,
   createdAt: row.created_at,
 })
@@ -144,20 +156,74 @@ export async function listTasks(): Promise<DeskTask[]> {
     return readPreview().tasks.map(({ assigneeId, ...task }: DeskTask & { assigneeId?: string | null }) => ({
       ...task,
       assigneeIds: task.assigneeIds ?? (assigneeId ? [assigneeId] : []),
+      signoffs: task.signoffs ?? {},
       assigneeNotes: task.assigneeNotes ?? "",
+      timeZone: task.timeZone ?? null,
       createdBy: task.createdBy ?? null,
     }))
   }
-  const { data, error } = await supabase
-    .from("leaddesk_tasks")
-    .select("id, title, notes, assignee_notes, status, priority, assignee_ids, due_date, created_by, created_at")
-    .order("created_at")
-  fail(error)
-  return (data as TaskRow[]).map(toTask)
+  const [tasks, signoffs] = await Promise.all([
+    supabase
+      .from("leaddesk_tasks")
+      .select("id, title, notes, assignee_notes, status, priority, assignee_ids, due_date, time_zone, created_by, created_at")
+      .order("created_at"),
+    supabase.from("leaddesk_task_signoffs").select("task_id, user_id, result, signed_at"),
+  ])
+  fail(tasks.error)
+  fail(signoffs.error)
+  const byTask = new Map<string, Record<string, TaskSignoff>>()
+  for (const row of signoffs.data as Array<{ task_id: string; user_id: string; result: TaskResult; signed_at: string }>) {
+    const signed = byTask.get(row.task_id) ?? {}
+    signed[row.user_id] = { result: row.result, signedAt: row.signed_at }
+    byTask.set(row.task_id, signed)
+  }
+  return (tasks.data as TaskRow[]).map((row) => ({ ...toTask(row), signoffs: byTask.get(row.id) ?? {} }))
 }
 
-// Leaves assigneeNotes alone; only assignees change those, through saveAssigneeNotes.
-export async function saveTask(task: Omit<DeskTask, "id" | "createdAt" | "assigneeNotes"> & { id?: string }) {
+/**
+ * The status a task gets from its assignees' results: failed when anyone failed it, done when all
+ * of them signed done. Taking back the result that finished it puts it back in progress.
+ */
+export function settledStatus(task: Pick<DeskTask, "status" | "assigneeIds" | "signoffs">): TaskStatus {
+  const results = task.assigneeIds.map((id) => task.signoffs[id]?.result)
+  if (results.includes("failed")) return "failed"
+  if (results.length > 0 && results.every((result) => result === "done")) return "done"
+  return task.status === "done" || task.status === "failed" ? "doing" : task.status
+}
+
+/** Signs this assignee's result on a task, or takes it back with null. */
+export async function signTask(id: string, userId: string, outcome: TaskResult | null) {
+  if (!supabase) {
+    const desk = readPreview()
+    desk.tasks = desk.tasks.map((item) => {
+      if (item.id !== id) return item
+      const signoffs = { ...(item.signoffs ?? {}) }
+      if (outcome) signoffs[userId] = { result: outcome, signedAt: new Date().toISOString() }
+      else delete signoffs[userId]
+      const next = { ...item, signoffs }
+      return { ...next, status: settledStatus(next) }
+    })
+    writePreview(desk)
+    return
+  }
+  const { error } = await supabase.rpc("sign_task", { task: id, outcome })
+  fail(error)
+}
+
+/**
+ * When a task is due: the end of its due date on its creator's clock (the viewer's for older tasks
+ * with no zone saved). Null when it has no due date.
+ */
+export function taskDeadline(task: Pick<DeskTask, "dueDate" | "timeZone">): Date | null {
+  if (!task.dueDate) return null
+  return zonedToInstant(addDays(task.dueDate, 1), "00:00", task.timeZone ?? localTimeZone())
+}
+
+// Leaves assigneeNotes and sign-offs alone; only assignees change those. A new task gets the
+// creator's time zone; an edited one keeps the zone it was created in.
+export async function saveTask(
+  task: Omit<DeskTask, "id" | "createdAt" | "assigneeNotes" | "signoffs" | "timeZone"> & { id?: string },
+) {
   // createdBy is only used by the preview store; the database sets created_by itself.
   const fields = {
     title: task.title.trim(),
@@ -176,7 +242,11 @@ export async function saveTask(task: Omit<DeskTask, "id" | "createdAt" | "assign
       title: fields.title,
       notes: fields.notes,
       assigneeIds: fields.assignee_ids,
+      signoffs: Object.fromEntries(
+        Object.entries(existing?.signoffs ?? {}).filter(([person]) => fields.assignee_ids.includes(person)),
+      ),
       assigneeNotes: existing?.assigneeNotes ?? "",
+      timeZone: existing ? (existing.timeZone ?? null) : localTimeZone(),
       id: task.id ?? crypto.randomUUID(),
       createdAt: existing?.createdAt ?? new Date().toISOString(),
     }
@@ -189,7 +259,7 @@ export async function saveTask(task: Omit<DeskTask, "id" | "createdAt" | "assign
         .from("leaddesk_tasks")
         .update({ ...fields, updated_at: new Date().toISOString() })
         .eq("id", task.id)
-    : await supabase.from("leaddesk_tasks").insert(fields)
+    : await supabase.from("leaddesk_tasks").insert({ ...fields, time_zone: localTimeZone() })
   fail(error)
 }
 
@@ -454,6 +524,7 @@ export function subscribeToDeskChanges(onChange: () => void) {
     .channel(`leaddesk-changes:${crypto.randomUUID()}`)
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_events" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_tasks" }, () => onChange())
+    .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_task_signoffs" }, () => onChange())
     // Someone may have lost access to an event, which the events stream above cannot tell them.
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "leaddesk_signals" }, () => onChange())
     .subscribe()

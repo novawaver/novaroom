@@ -13,13 +13,15 @@ import {
   saveAssigneeNotes,
   saveNote,
   saveTask,
-  setTaskStatus,
+  signTask,
+  taskDeadline,
   type DeskEvent,
   type DeskNote,
   type DeskTask,
   type EventVisibility,
   type Occurrence,
   type TaskPriority,
+  type TaskResult,
   type TaskStatus,
 } from "../lib/leaddesk"
 import { listUsers, type RegisteredUser } from "../lib/users"
@@ -44,7 +46,11 @@ const STATUSES: Array<{ id: TaskStatus; label: string }> = [
   { id: "todo", label: "To do" },
   { id: "doing", label: "In progress" },
   { id: "done", label: "Done" },
+  { id: "failed", label: "Failed" },
 ]
+
+/** Done and failed tasks are finished; nothing more is expected of them. */
+const finished = (status: TaskStatus) => status === "done" || status === "failed"
 
 const PRIORITIES: Array<{ id: TaskPriority; label: string }> = [
   { id: "high", label: "High" },
@@ -95,7 +101,7 @@ export function useLeadDesk(open: boolean) {
 
 export function leadDeskHints(data: DeskData | null, selfId: string, isAdmin: boolean): Record<LeadDeskTab, string> {
   if (!data) return { tasks: "Loading…", schedule: "Loading…", notes: "Loading…" }
-  const open = visibleTasks(data.tasks, selfId, isAdmin).filter((task) => task.status !== "done").length
+  const open = visibleTasks(data.tasks, selfId, isAdmin).filter((task) => !finished(task.status)).length
   const daily = data.events.filter((event) => event.repeat === "daily").length
   const upcoming = data.events.filter(
     (event) => event.repeat !== "daily" && event.endsAt && new Date(event.endsAt).getTime() >= Date.now(),
@@ -146,6 +152,19 @@ function formatTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value))
 }
 
+// A moment as date and time on the viewer's clock, with the zone: "Oct 22, 10:35 AM GMT+9". Pass date
+// fields (not dateStyle, which Intl won't mix with the time fields added here).
+function formatMoment(value: string, options: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" }) {
+  return new Intl.DateTimeFormat(undefined, { ...options, hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(
+    new Date(value),
+  )
+}
+
+// The zone a task's due date is counted in, as "GMT+9": its creator's, or the viewer's for older tasks.
+function dueZone(task: DeskTask) {
+  return zoneAbbreviation(task.timeZone ?? localTimeZone(), taskDeadline(task) ?? new Date())
+}
+
 export function LeadDesk({
   tab,
   data,
@@ -194,7 +213,9 @@ export function LeadDesk({
 
   const label = LEADDESK_TABS.find((item) => item.id === tab)?.label ?? "LeadDesk"
   const newLabel = tab === "tasks" ? "New task" : tab === "schedule" ? "New event" : "New note"
-  const newBlocked = tab === "tasks" && !isAdmin && !data?.canAddTasks
+  // The admin-granted task permission covers adding, editing, moving and deleting tasks.
+  const canEditTasks = isAdmin || Boolean(data?.canAddTasks)
+  const newBlocked = tab === "tasks" && !canEditTasks
 
   return (
     <section className={tab === "schedule" ? "settings desk-fixed" : "settings"}>
@@ -204,7 +225,7 @@ export function LeadDesk({
           type="button"
           className="button desk-new"
           disabled={newBlocked}
-          title={newBlocked && data ? "You need an admin's permission to add tasks" : undefined}
+          title={newBlocked && data ? "You need an admin's permission to add or edit tasks" : undefined}
           onClick={() => setEditing({ kind: tab, item: null })}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -221,7 +242,7 @@ export function LeadDesk({
       {!data ? (
         !error && <p className="hint desk-note">Loading LeadDesk…</p>
       ) : tab === "tasks" ? (
-        <TaskBoard
+        <TaskList
           tasks={data.tasks}
           users={data.users}
           selfId={session.userId}
@@ -232,7 +253,6 @@ export function LeadDesk({
             setSelectedTaskId(task.id)
             if (newTaskIds.has(task.id)) onTaskOpened(task.id)
           }}
-          onMove={(task, status) => void act(() => setTaskStatus(task.id, status))}
         />
       ) : tab === "schedule" ? (
         <Schedule
@@ -252,8 +272,10 @@ export function LeadDesk({
           users={data.users}
           selfId={session.userId}
           isAdmin={isAdmin}
+          canEdit={canEditTasks}
           covered={editing !== null}
           onSaved={reload}
+          onSign={(outcome) => act(() => signTask(selectedTask.id, session.userId, outcome))}
           onEdit={() => setEditing({ kind: "tasks", item: selectedTask })}
           onClose={closeTask}
         />
@@ -293,7 +315,29 @@ export function visibleTasks(tasks: DeskTask[], selfId: string, isAdmin: boolean
   return tasks.filter((task) => task.assigneeIds.length === 0 || task.assigneeIds.includes(selfId))
 }
 
-function TaskBoard({
+type TaskFilter = "all" | TaskStatus
+
+const TASK_FILTERS: Array<{ id: TaskFilter; label: string }> = [{ id: "all", label: "All" }, ...STATUSES]
+
+/** "Yesterday", "Today", "Tomorrow", else the weekday and date (with the year when it differs). */
+function dueLabel(key: string) {
+  const today = todayKey()
+  if (key === today) return "Today"
+  if (key === addDays(today, -1)) return "Yesterday"
+  if (key === addDays(today, 1)) return "Tomorrow"
+  const date = new Date(`${key}T00:00`)
+  const sameYear = date.getFullYear() === new Date().getFullYear()
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: sameYear ? undefined : "numeric",
+  }).format(date)
+}
+
+// Tasks grouped by due date, earliest first, then the ones with no due date. The filter row narrows
+// them by status.
+function TaskList({
   tasks,
   users,
   selfId,
@@ -301,7 +345,6 @@ function TaskBoard({
   selectedId,
   newTaskIds,
   onSelect,
-  onMove,
 }: {
   tasks: DeskTask[]
   users: RegisteredUser[]
@@ -310,101 +353,274 @@ function TaskBoard({
   selectedId: string | null
   newTaskIds: Set<string>
   onSelect: (task: DeskTask) => void
-  onMove: (task: DeskTask, status: TaskStatus) => void
 }) {
+  const [filter, setFilter] = useState<TaskFilter>("all")
+  // Ticks so the time left on each card counts down.
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30 * 1000)
+    return () => window.clearInterval(timer)
+  }, [])
   const shown = visibleTasks(tasks, selfId, isAdmin)
   const today = todayKey()
   const rank: Record<TaskPriority, number> = { high: 0, normal: 1, low: 2 }
+  const matching = shown
+    .filter((task) => filter === "all" || task.status === filter)
+    .sort(
+      (a, b) =>
+        (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999") ||
+        rank[a.priority] - rank[b.priority] ||
+        a.createdAt.localeCompare(b.createdAt),
+    )
+  const groups: Array<{ key: string; label: string; tasks: DeskTask[] }> = []
+  for (const task of matching) {
+    const key = task.dueDate ?? "none"
+    const last = groups[groups.length - 1]
+    if (last?.key === key) last.tasks.push(task)
+    else groups.push({ key, label: task.dueDate ? dueLabel(task.dueDate) : "No due date", tasks: [task] })
+  }
 
   return (
     <div className="desk-body">
-      <div className="task-board">
-        {STATUSES.map((column, index) => {
-          const items = shown
-            .filter((task) => task.status === column.id)
-            .sort(
-              (a, b) =>
-                rank[a.priority] - rank[b.priority] ||
-                (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999") ||
-                a.createdAt.localeCompare(b.createdAt),
-            )
+      <div className="task-filters" role="tablist" aria-label="Show tasks">
+        {TASK_FILTERS.map(({ id, label }) => {
+          const count = id === "all" ? shown.length : shown.filter((task) => task.status === id).length
           return (
-            <section key={column.id} className="task-column">
-              <h2>
-                {column.label}
-                <span>{items.length}</span>
-              </h2>
-              {items.length === 0 && <p className="task-empty">Nothing here.</p>}
-              {items.map((task) => {
-                const overdue = task.status !== "done" && task.dueDate !== null && task.dueDate < today
-                return (
-                  // The whole card opens the task; the title button keeps it reachable by keyboard.
-                  <article
-                    key={task.id}
-                    className={`task-card priority-${task.priority}${task.id === selectedId ? " selected" : ""}${newTaskIds.has(task.id) ? " new" : ""}`}
-                    onClick={() => onSelect(task)}
-                  >
-                    <button
-                      type="button"
-                      className="task-open"
-                      aria-current={task.id === selectedId ? "true" : undefined}
-                    >
-                      <strong>
-                        {task.title}
-                        {newTaskIds.has(task.id) && <span className="new-tag">New</span>}
-                      </strong>
-                      {task.notes && <span className="task-notes">{task.notes}</span>}
-                    </button>
-                    <div className="task-meta">
-                      {task.priority !== "normal" && (
-                        <span className={`task-tag ${task.priority}`}>
-                          {task.priority === "high" ? "High" : "Low"}
-                        </span>
-                      )}
-                      {task.dueDate && (
-                        <span className={overdue ? "task-due overdue" : "task-due"}>
-                          {overdue ? "Overdue · " : "Due "}
-                          {formatShortDate(task.dueDate)}
-                        </span>
-                      )}
-                      {task.assigneeIds.length > 0 && (
-                        <span className="task-assignee">
-                          {task.assigneeIds.map((id) => (
-                            <PersonAvatar key={id} users={users} id={id} />
-                          ))}
-                        </span>
-                      )}
-                    </div>
-                    <div className="task-move" onClick={(event) => event.stopPropagation()}>
-                      {index > 0 && (
-                        <button
-                          type="button"
-                          aria-label={`Move to ${STATUSES[index - 1].label}`}
-                          title={`Move to ${STATUSES[index - 1].label}`}
-                          onClick={() => onMove(task, STATUSES[index - 1].id)}
-                        >
-                          ←
-                        </button>
-                      )}
-                      {index < STATUSES.length - 1 && (
-                        <button
-                          type="button"
-                          aria-label={`Move to ${STATUSES[index + 1].label}`}
-                          title={`Move to ${STATUSES[index + 1].label}`}
-                          onClick={() => onMove(task, STATUSES[index + 1].id)}
-                        >
-                          →
-                        </button>
-                      )}
-                    </div>
-                  </article>
-                )
-              })}
-            </section>
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              className="task-filter"
+              aria-selected={filter === id}
+              onClick={() => setFilter(id)}
+            >
+              {id === "all" ? <BoardIcon /> : <StatusIcon status={id} />}
+              {label}
+              <span>{count}</span>
+            </button>
           )
         })}
       </div>
+      {groups.length === 0 ? (
+        <p className="task-empty">{filter === "all" ? "No tasks yet." : "No tasks here."}</p>
+      ) : (
+        groups.map((group) => {
+          const past = group.key !== "none" && group.key < today
+          return (
+            <section key={group.key} className="task-group">
+              <h2 className={past && group.key !== addDays(today, -1) ? "task-group-head past" : "task-group-head"}>
+                {group.label}
+                <span>{group.tasks.length}</span>
+              </h2>
+              <div className="task-cards">
+                {group.tasks.map((task) => (
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    users={users}
+                    now={now}
+                    selected={task.id === selectedId}
+                    isNew={newTaskIds.has(task.id)}
+                    onSelect={onSelect}
+                  />
+                ))}
+              </div>
+            </section>
+          )
+        })
+      )}
     </div>
+  )
+}
+
+// One task on the list: priority, title and description, how many assignees have signed it done,
+// the due date, then the people and the status.
+function TaskCard({
+  task,
+  users,
+  now,
+  selected,
+  isNew,
+  onSelect,
+}: {
+  task: DeskTask
+  users: RegisteredUser[]
+  now: number
+  selected: boolean
+  isNew: boolean
+  onSelect: (task: DeskTask) => void
+}) {
+  const status = STATUSES.find((item) => item.id === task.status)?.label ?? task.status
+  const priority = PRIORITIES.find((item) => item.id === task.priority)?.label ?? task.priority
+  const total = task.assigneeIds.length
+  const done = task.assigneeIds.filter((id) => task.signoffs[id]?.result === "done").length
+  const due = task.dueDate ? `${formatShortDate(task.dueDate)} ${dueZone(task)}` : null
+  // Due by the end of the due date on the creator's clock.
+  const deadline = taskDeadline(task)
+  const overdue = !finished(task.status) && deadline !== null && deadline.getTime() <= now
+  let left: string | null = null
+  if (deadline && !finished(task.status)) {
+    const minutes = Math.floor((deadline.getTime() - now) / 60000)
+    if (minutes >= 0) left = `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`
+  }
+
+  return (
+    <button
+      type="button"
+      className={`task-card${selected ? " selected" : ""}${isNew ? " new" : ""}`}
+      aria-current={selected ? "true" : undefined}
+      onClick={() => onSelect(task)}
+    >
+      <span className="task-card-text">
+        <span className="task-card-title">
+          <strong>{task.title}</strong>
+          {isNew && <span className="new-tag">New</span>}
+        </span>
+        {task.notes && <span className="task-notes">{task.notes}</span>}
+      </span>
+      {total > 0 && (
+        <span className={`task-progress ${task.status}`}>
+          <span className="task-progress-head">
+            <StatusIcon status={task.status} solid />
+            Progress
+            <span>
+              <b>{done}</b>/{total}
+            </span>
+          </span>
+          <span className={done === 0 ? "task-progress-bar empty" : "task-progress-bar"}>
+            <span style={{ width: `${(done / total) * 100}%` }} />
+          </span>
+        </span>
+      )}
+      <span className="task-due-row">
+        <span className={overdue ? "task-due-chip overdue" : "task-due-chip"}>
+          <FactIcon kind="due" />
+          {due ? (
+            <>
+              {overdue ? "Overdue:" : "Due to:"} <b>{due}</b>
+            </>
+          ) : (
+            "No due date"
+          )}
+        </span>
+        {left && (
+          <span className="task-left" title="Hours and minutes left until the end of the due date">
+            <ClockIcon />
+            {left}
+          </span>
+        )}
+      </span>
+      <span className="task-card-foot">
+        <span className="task-assignee">
+          {task.assigneeIds.map((id) => (
+            <PersonAvatar key={id} users={users} id={id} />
+          ))}
+        </span>
+        <span className="task-card-badges">
+          <span className={`task-flag ${task.priority}`}>
+            <FactIcon kind="priority" />
+            {priority}
+          </span>
+          <span className={`task-badge ${task.status}`}>
+            <StatusIcon status={task.status} />
+            {status}
+          </span>
+        </span>
+      </span>
+    </button>
+  )
+}
+
+// One icon per status: an hourglass while it's still to do, a checklist while it's in progress, and a
+// tick or cross once it's finished. Solid fills the finished ones' circle, as beside a card's progress.
+function StatusIcon({ status, solid = false }: { status: TaskStatus; solid?: boolean }) {
+  if (status === "done" || status === "failed") {
+    return (
+      <svg className={solid ? "status-icon solid" : "status-icon"} viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r={solid ? 10 : 9} />
+        <path d={status === "done" ? "M7.5 12.3l3 3 6-6.3" : "M8.5 8.5l7 7M15.5 8.5l-7 7"} />
+      </svg>
+    )
+  }
+  if (status === "todo") {
+    return (
+      <svg className="status-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6.5 3.5h11M6.5 20.5h11" />
+        <path d="M8 3.5v2.5a4 4 0 0 0 2 3.5l2 1.5 2-1.5a4 4 0 0 0 2-3.5V3.5M8 20.5V18a4 4 0 0 1 2-3.5l2-1.5 2 1.5a4 4 0 0 1 2 3.5v2.5" />
+        <path d="M9.5 19.5h5l-2.5-2z" className="fill" />
+      </svg>
+    )
+  }
+  return (
+    <svg className="status-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 6.5l1.5 1.5L8.5 5M4 12.5l1.5 1.5 3-3M4 18.5l1.5 1.5 3-3" />
+      <path d="M11.5 6.5H20M11.5 12.5H20M11.5 18.5H20" />
+    </svg>
+  )
+}
+
+function ClockIcon() {
+  return (
+    <svg className="fact-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </svg>
+  )
+}
+
+// Two tall and two short panels, for the "All" filter.
+function BoardIcon() {
+  return (
+    <svg className="status-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="4" width="6.5" height="16" rx="2" />
+      <rect x="13.5" y="4" width="6.5" height="6.5" rx="2" />
+      <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="2" />
+    </svg>
+  )
+}
+
+// Small line icons for the labels in the task panel.
+function FactIcon({ kind }: { kind: "status" | "priority" | "due" | "assignees" | "creator" | "description" }) {
+  return (
+    <svg className="fact-icon" viewBox="0 0 24 24" aria-hidden="true">
+      {kind === "description" && (
+        <>
+          <rect x="5" y="3.5" width="14" height="17" rx="2" />
+          <path d="M8.5 8h7M8.5 12h7M8.5 16h4" />
+        </>
+      )}
+      {kind === "status" && (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M8.5 12.2l2.4 2.4 4.6-4.8" />
+        </>
+      )}
+      {kind === "priority" && (
+        <>
+          <path d="M6 20.5v-16" />
+          <path d="M6 4.5h11l-2.5 4 2.5 4H6" />
+        </>
+      )}
+      {kind === "due" && (
+        <>
+          <rect x="4" y="5.5" width="16" height="15" rx="2" />
+          <path d="M4 10h16M8.5 3.5v4M15.5 3.5v4" />
+        </>
+      )}
+      {kind === "assignees" && (
+        <>
+          <circle cx="9" cy="8.5" r="3.2" />
+          <path d="M3.5 19.5a5.5 5.5 0 0 1 11 0" />
+          <path d="M15.5 5.6a3.2 3.2 0 0 1 0 5.8M17.5 14.5a5.5 5.5 0 0 1 3 5" />
+        </>
+      )}
+      {kind === "creator" && (
+        <>
+          <path d="M4 20h4.5L19 9.5a2.1 2.1 0 0 0-3-3L5.5 17 4 20z" />
+          <path d="M14.5 8l3 3" />
+        </>
+      )}
+    </svg>
   )
 }
 
@@ -414,8 +630,10 @@ function TaskDrawer({
   users,
   selfId,
   isAdmin,
+  canEdit,
   covered,
   onEdit,
+  onSign,
   onClose,
   onSaved,
 }: {
@@ -423,9 +641,12 @@ function TaskDrawer({
   users: RegisteredUser[]
   selfId: string
   isAdmin: boolean
+  // Changing the task needs an admin's permission; assignees can still sign and write notes.
+  canEdit: boolean
   // True while the editor is open on top, so Esc closes only the editor.
   covered: boolean
   onEdit: () => void
+  onSign: (outcome: TaskResult | null) => Promise<void>
   onClose: () => void
   onSaved: () => Promise<void>
 }) {
@@ -438,59 +659,218 @@ function TaskDrawer({
     return () => document.removeEventListener("keydown", onKey)
   }, [covered, onClose])
 
-  const overdue = task.status !== "done" && task.dueDate !== null && task.dueDate < todayKey()
+  const [tab, setTab] = useState<"results" | "notes">("results")
+  const deadline = taskDeadline(task)
+  const overdue = !finished(task.status) && deadline !== null && deadline.getTime() <= Date.now()
   const status = STATUSES.find((item) => item.id === task.status)?.label ?? task.status
   const priority = PRIORITIES.find((item) => item.id === task.priority)?.label ?? task.priority
+  const created = new Date(task.createdAt)
+  // Results only exist once someone is assigned.
+  const shownTab = task.assigneeIds.length > 0 ? tab : "notes"
 
   return (
     <div className="drawer-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
-      <aside className="event-detail drawer" role="dialog" aria-label="Task details">
-        <div className="event-detail-head">
-          <h2>{task.title}</h2>
-          <button type="button" className="event-detail-icon" aria-label="Edit task" title="Edit" onClick={onEdit}>
+      <aside className="event-detail drawer task-drawer" role="dialog" aria-label="Task details">
+        <div className="task-drawer-bar">
+          <button type="button" className="event-detail-icon" aria-label="Close" title="Close" onClick={onClose}>
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M11 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V13" />
-              <path d="M17.6 3.9a2 2 0 0 1 2.8 2.8L12.5 14.6 9 15.5l.9-3.5 7.7-8.1z" />
+              <path d="M6 6l12 12M18 6L6 18" />
             </svg>
           </button>
-          <button type="button" className="event-detail-close" aria-label="Close" onClick={onClose}>
-            ×
+          <h2>{task.title}</h2>
+          {canEdit && (
+            <button type="button" className="event-detail-icon" aria-label="Edit task" title="Edit" onClick={onEdit}>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M11 4.5H6.5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V13" />
+                <path d="M17.6 3.9a2 2 0 0 1 2.8 2.8L12.5 14.6 9 15.5l.9-3.5 7.7-8.1z" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <div className="task-drawer-main">
+          <dl className="task-facts">
+            <dt>
+              <ClockIcon />
+              Created time
+            </dt>
+            <dd>
+              {new Intl.DateTimeFormat(undefined, { month: "long", day: "numeric", year: "numeric" }).format(created)}
+              <span className="task-fact-muted">
+                {new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(
+                  created,
+                )}
+              </span>
+            </dd>
+            <dt>
+              <FactIcon kind="creator" />
+              Created by
+            </dt>
+            <dd className="task-fact-person">
+              <PersonAvatar users={users} id={task.createdBy} />
+              {nameOf(users, task.createdBy)}
+            </dd>
+            <dt>
+              <FactIcon kind="status" />
+              Status
+            </dt>
+            <dd>
+              <span className={`task-badge ${task.status}`}>
+                <StatusIcon status={task.status} />
+                {status}
+              </span>
+            </dd>
+            <dt>
+              <FactIcon kind="priority" />
+              Priority
+            </dt>
+            <dd>
+              <span className={`task-flag ${task.priority}`}>
+                <FactIcon kind="priority" />
+                {priority}
+              </span>
+            </dd>
+            <dt>
+              <FactIcon kind="due" />
+              Due date
+            </dt>
+            <dd className={overdue ? "task-due overdue" : undefined}>
+              {task.dueDate ? (
+                <>
+                  {new Intl.DateTimeFormat(undefined, { month: "long", day: "numeric", year: "numeric" }).format(
+                    new Date(`${task.dueDate}T00:00`),
+                  )}
+                  <span className="task-fact-muted">{dueZone(task)}</span>
+                  {overdue && " · Overdue"}
+                </>
+              ) : (
+                "No due date"
+              )}
+            </dd>
+            <dt>
+              <FactIcon kind="assignees" />
+              {task.assigneeIds.length > 1 ? "Assignees" : "Assignee"}
+            </dt>
+            <dd>
+              {task.assigneeIds.length > 0 ? (
+                <span className="task-assignee">
+                  {task.assigneeIds.map((id) => (
+                    <PersonAvatar key={id} users={users} id={id} />
+                  ))}
+                </span>
+              ) : (
+                "No one yet"
+              )}
+            </dd>
+          </dl>
+          <div className="task-drawer-description">
+            <h3>
+              <FactIcon kind="description" />
+              Description
+            </h3>
+            {task.notes ? <p>{task.notes}</p> : <p className="empty">No description.</p>}
+          </div>
+        </div>
+        <div className="task-drawer-tabs" role="tablist" aria-label="Task activity">
+          {task.assigneeIds.length > 0 && (
+            <button type="button" role="tab" aria-selected={shownTab === "results"} onClick={() => setTab("results")}>
+              Results
+            </button>
+          )}
+          <button type="button" role="tab" aria-selected={shownTab === "notes"} onClick={() => setTab("notes")}>
+            Notes from assignee
           </button>
         </div>
-        <dl className="event-facts">
-          <dt>Status</dt>
-          <dd>{status}</dd>
-          <dt>Priority</dt>
-          <dd>
-            {task.priority === "normal" ? priority : <span className={`task-tag ${task.priority}`}>{priority}</span>}
-          </dd>
-          <dt>Due</dt>
-          <dd className={overdue ? "task-due overdue" : undefined}>
-            {task.dueDate ? `${formatShortDate(task.dueDate)}${overdue ? " · Overdue" : ""}` : "No due date"}
-          </dd>
-          <dt>{task.assigneeIds.length > 1 ? "Assignees" : "Assignee"}</dt>
-          <dd>
-            {task.assigneeIds.length > 0 ? (
-              <span className="event-avatars">
-                {task.assigneeIds.map((id) => (
-                  <PersonAvatar key={id} users={users} id={id} />
-                ))}
-              </span>
-            ) : (
-              "No one yet"
-            )}
-          </dd>
-          <dt>Created by</dt>
-          <dd>
-            <PersonAvatar users={users} id={task.createdBy} />
-          </dd>
-        </dl>
-        <div className="task-section">
-          <h3>Description</h3>
-          {task.notes ? <p className="event-notes">{task.notes}</p> : <p className="hint">No description.</p>}
+        <div className="task-drawer-panel" role="tabpanel">
+          {shownTab === "results" ? (
+            <TaskResults task={task} users={users} selfId={selfId} onSign={onSign} />
+          ) : (
+            <AssigneeNotes key={task.id} task={task} canWrite={task.assigneeIds.includes(selfId) || isAdmin} onSaved={onSaved} />
+          )}
         </div>
-        <AssigneeNotes key={task.id} task={task} canWrite={task.assigneeIds.includes(selfId) || isAdmin} onSaved={onSaved} />
       </aside>
+    </div>
+  )
+}
+
+// Each assignee's result. An assignee signs their own as done or failed, and can take it back.
+function TaskResults({
+  task,
+  users,
+  selfId,
+  onSign,
+}: {
+  task: DeskTask
+  users: RegisteredUser[]
+  selfId: string
+  onSign: (outcome: TaskResult | null) => Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+  const mine = task.signoffs[selfId]?.result ?? null
+  const assigned = task.assigneeIds.includes(selfId)
+
+  async function sign(outcome: TaskResult | null) {
+    setBusy(true)
+    try {
+      await onSign(outcome)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Newest results first, then the people who haven't signed yet.
+  const people = [...task.assigneeIds].sort((a, b) =>
+    (task.signoffs[b]?.signedAt ?? "").localeCompare(task.signoffs[a]?.signedAt ?? ""),
+  )
+
+  return (
+    <div className="task-section">
+      <ul className="task-activity">
+        {people.map((id) => {
+          const signoff = task.signoffs[id]
+          const name = id === selfId ? "You" : nameOf(users, id)
+          return (
+            <li key={id} className={signoff ? undefined : "pending"}>
+              <PersonAvatar users={users} id={id} />
+              <span className="task-activity-text">
+                {signoff ? (
+                  <span>
+                    <b>{name}</b> marked it{" "}
+                    <span className={`task-badge ${signoff.result}`}>
+                      <StatusIcon status={signoff.result} />
+                      {signoff.result === "done" ? "Done" : "Failed"}
+                    </span>
+                  </span>
+                ) : (
+                  <span>
+                    <b>{name}</b> {id === selfId ? "haven't" : "hasn't"} signed yet
+                  </span>
+                )}
+                {signoff && (
+                  <time dateTime={signoff.signedAt}>{formatMoment(signoff.signedAt)}</time>
+                )}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+      {assigned && (
+        <div className="task-section-actions">
+          {mine ? (
+            <button type="button" className="button secondary" disabled={busy} onClick={() => void sign(null)}>
+              Take back my result
+            </button>
+          ) : (
+            <>
+              <button type="button" className="button secondary task-fail" disabled={busy} onClick={() => void sign("failed")}>
+                Mark failed
+              </button>
+              <button type="button" className="button" disabled={busy} onClick={() => void sign("done")}>
+                Mark done
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -528,7 +908,6 @@ function AssigneeNotes({
 
   return (
     <div className="task-section">
-      <h3>Notes from assignee</h3>
       {canWrite ? (
         <>
           <textarea
@@ -588,15 +967,13 @@ function TaskEditor({
 }) {
   const [title, setTitle] = useState(task?.title ?? "")
   const [notes, setNotes] = useState(task?.notes ?? "")
-  const [status, setStatus] = useState<TaskStatus>(task?.status ?? "todo")
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? "normal")
   const [assigneeIds, setAssigneeIds] = useState<string[]>(task?.assigneeIds ?? [])
   const [dueDate, setDueDate] = useState(task?.dueDate ?? "")
-  // Leaders who later lost the role stay listed so they are not silently removed.
-  const choices = [
-    ...leaders,
-    ...users.filter((user) => assigneeIds.includes(user.userId) && !leaders.includes(user)),
-  ]
+  // True while the list of people to add is open under the avatars.
+  const [picking, setPicking] = useState(false)
+  // Leaders not yet on the task. Assignees who later lost the role stay on it until removed.
+  const addable = leaders.filter((user) => !assigneeIds.includes(user.userId))
 
   return (
     <DeskModal
@@ -607,7 +984,8 @@ function TaskEditor({
           id: task?.id,
           title,
           notes,
-          status,
+          // Status is set from the admin website (or by assignees signing), not here.
+          status: task?.status ?? "todo",
           priority,
           assigneeIds,
           dueDate: dueDate || null,
@@ -624,61 +1002,93 @@ function TaskEditor({
           : undefined
       }
       deleteText="Delete this task?"
+      className="task-form"
     >
-      <label>
-        Title
-        <input value={title} maxLength={120} required autoFocus onChange={(event) => setTitle(event.target.value)} />
-      </label>
-      <label>
-        Description
-        <textarea value={notes} rows={4} maxLength={2000} onChange={(event) => setNotes(event.target.value)} />
-      </label>
-      <div className="desk-form-row">
+      <div className="task-form-card">
         <label>
-          Status
-          <select value={status} onChange={(event) => setStatus(event.target.value as TaskStatus)}>
-            {STATUSES.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
+          Task name
+          <input value={title} maxLength={120} required autoFocus onChange={(event) => setTitle(event.target.value)} />
         </label>
         <label>
-          Priority
-          <select value={priority} onChange={(event) => setPriority(event.target.value as TaskPriority)}>
-            {PRIORITIES.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
+          Description
+          <textarea value={notes} rows={3} maxLength={2000} onChange={(event) => setNotes(event.target.value)} />
         </label>
+        <label>
+          {/* Counted in the creator's zone: this person's for a new task, the original creator's when editing. */}
+          Due date ({zoneAbbreviation(task?.timeZone ?? localTimeZone())})
+          <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} />
+        </label>
+        <fieldset className="task-form-priority">
+          <legend>Priority</legend>
+          {PRIORITIES.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={item.id}
+              aria-pressed={priority === item.id}
+              onClick={() => setPriority(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </fieldset>
       </div>
-      <label>
-        Due date
-        <input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} />
-      </label>
-      <fieldset className="desk-people">
-        <legend>Assignees</legend>
-        {choices.length === 0 ? (
-          <p className="hint">No Leadership members yet.</p>
-        ) : (
-          choices.map((user) => (
-            <label key={user.userId} className="desk-check">
-              <input
-                type="checkbox"
-                checked={assigneeIds.includes(user.userId)}
-                onChange={(change) =>
-                  setAssigneeIds((current) =>
-                    change.target.checked ? [...current, user.userId] : current.filter((id) => id !== user.userId),
-                  )
-                }
-              />
-              {user.displayName || "Unnamed"}
-              {user.userId === selfId && <span className="hint"> (you)</span>}
-            </label>
-          ))
+      <fieldset className="task-form-card task-form-people">
+        <legend>Assign to</legend>
+        <div className="task-form-avatars">
+          {assigneeIds.map((id) => {
+            const name = id === selfId ? "you" : nameOf(users, id)
+            return (
+              <button
+                key={id}
+                type="button"
+                className="task-form-avatar"
+                aria-label={`Remove ${name}`}
+                title={`Remove ${name}`}
+                onClick={() => setAssigneeIds((current) => current.filter((item) => item !== id))}
+              >
+                <PersonAvatar users={users} id={id} />
+                <svg className="task-form-remove" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M8.5 8.5l7 7M15.5 8.5l-7 7" />
+                </svg>
+              </button>
+            )
+          })}
+          {addable.length > 0 && (
+            <button
+              type="button"
+              className="task-form-add"
+              aria-label={picking ? "Close the list" : "Add assignee"}
+              title={picking ? "Close the list" : "Add assignee"}
+              aria-expanded={picking}
+              onClick={() => setPicking((open) => !open)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          )}
+        </div>
+        {assigneeIds.length === 0 && addable.length === 0 && <p className="hint">No Leadership members yet.</p>}
+        {picking && addable.length > 0 && (
+          <ul className="task-form-picker">
+            {addable.map((user) => (
+              <li key={user.userId}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAssigneeIds((current) => [...current, user.userId])
+                    if (addable.length === 1) setPicking(false)
+                  }}
+                >
+                  <PersonAvatar users={users} id={user.userId} />
+                  {user.displayName || "Unnamed"}
+                  {user.userId === selfId && <span className="hint">(you)</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </fieldset>
     </DeskModal>
@@ -737,7 +1147,12 @@ function Schedule({
 }) {
   const [view, setView] = useState<ScheduleView>("daily")
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const now = Date.now()
+  // Ticks so an event that ends while the page is open shows as past without a reload.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30 * 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   function switchView(next: ScheduleView) {
     setView(next)
@@ -766,7 +1181,6 @@ function Schedule({
 
   const item = ({ event, startsAt, endsAt }: Occurrence, past: boolean) => {
     const original = originalTime(event, startsAt)
-    const participants = event.participantIds.map((id) => nameOf(users, id))
     const classes = [
       "schedule-item",
       past ? "past" : "",
@@ -787,6 +1201,7 @@ function Schedule({
         <span className="schedule-time">
           {formatTime(startsAt)}
           <span>{formatTime(endsAt)}</span>
+          <span>{zoneAbbreviation(localTimeZone(), new Date(startsAt))}</span>
         </span>
         <span className="schedule-text">
           <strong>
@@ -796,8 +1211,17 @@ function Schedule({
           {event.location && <span>{event.location}</span>}
           {original && <span className="schedule-zone">Set for {original}</span>}
           <span className="schedule-people">
-            By {nameOf(users, event.createdBy)}
-            {participants.length > 0 && ` · With ${participants.join(", ")}`}
+            <PersonAvatar users={users} id={event.createdBy} prefix="Created by " />
+            {event.participantIds.length > 0 && (
+              <>
+                <span className="schedule-people-divider" aria-hidden="true" />
+                <span className="schedule-participants">
+                  {event.participantIds.map((id) => (
+                    <PersonAvatar key={id} users={users} id={id} />
+                  ))}
+                </span>
+              </>
+            )}
           </span>
           {event.notes && <span className="schedule-notes">{event.notes}</span>}
         </span>
@@ -836,7 +1260,8 @@ function Schedule({
             ) : (
               <section className="schedule-day">
                 <h2>Every day</h2>
-                {daily.map((occurrence) => item(occurrence, false))}
+                {/* Today's run of a daily event is past once it has ended. */}
+                {daily.map((occurrence) => item(occurrence, new Date(occurrence.endsAt).getTime() < now))}
               </section>
             )
           ) : days.size === 0 ? (
@@ -869,12 +1294,12 @@ function Schedule({
   )
 }
 
-// A round avatar whose name shows on hover.
-function PersonAvatar({ users, id }: { users: RegisteredUser[]; id: string | null }) {
+// A round avatar whose name shows on hover, after `prefix` if given (e.g. "Created by ").
+function PersonAvatar({ users, id, prefix = "" }: { users: RegisteredUser[]; id: string | null; prefix?: string }) {
   const user = id ? users.find((item) => item.userId === id) : undefined
   const name = nameOf(users, id)
   return (
-    <span className="avatar event-avatar" title={name} aria-label={name} role="img">
+    <span className="avatar event-avatar" title={prefix + name} aria-label={prefix + name} role="img">
       {user?.avatarUrl ? <img src={user.avatarUrl} alt="" /> : <span>{initials(name)}</span>}
     </span>
   )
@@ -932,7 +1357,8 @@ function EventDetail({
           {occurrence ? (
             <>
               {event.repeat !== "daily" && `${formatDay(localDate(new Date(occurrence.startsAt)))}, `}
-              {formatTime(occurrence.startsAt)} – {formatTime(occurrence.endsAt)}
+              {formatTime(occurrence.startsAt)} – {formatTime(occurrence.endsAt)}{" "}
+              {zoneAbbreviation(localTimeZone(), new Date(occurrence.startsAt))}
               <span className="event-fact-note">
                 {original ? `Set for ${original} · ${event.timeZone}` : event.timeZone}
               </span>
@@ -1139,7 +1565,7 @@ function Notes({ notes, onOpen }: { notes: DeskNote[]; onOpen: (note: DeskNote) 
           </span>
           {note.body && <span className="note-body">{note.body}</span>}
           <span className="note-date">
-            Updated {new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(note.updatedAt))}
+            Updated {formatMoment(note.updatedAt, { year: "numeric", month: "short", day: "numeric" })}
           </span>
         </button>
       ))}
@@ -1203,9 +1629,12 @@ function DeskModal({
   onSave,
   onDelete,
   deleteText,
+  className,
 }: {
   title: string
   children: ReactNode
+  // Extra class on the form, for an editor with its own layout.
+  className?: string
   onClose: () => void
   onSave: () => Promise<void>
   onDelete?: () => Promise<void>
@@ -1241,7 +1670,7 @@ function DeskModal({
 
   return (
     <div className="desk-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
-      <form className="desk-modal" role="dialog" aria-label={title} onSubmit={onSubmit}>
+      <form className={className ? `desk-modal ${className}` : "desk-modal"} role="dialog" aria-label={title} onSubmit={onSubmit}>
         <h2>{title}</h2>
         {children}
         {error && (

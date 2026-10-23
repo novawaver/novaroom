@@ -1,6 +1,6 @@
 [package]
 name = "novaroom-app"
-version = "0.1.9"
+version = "0.2.0"
 description = "Chat for AI trainers"
 authors = ["Novawave"]
 edition = "2021"

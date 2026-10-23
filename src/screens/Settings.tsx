@@ -295,7 +295,7 @@ function Updates() {
   } else if (update) {
     status = `Novaroom ${update.version} is available.`
   } else if (checkedAt) {
-    status = `Novaroom is up to date. Last checked at ${new Date(checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+    status = `Novaroom is up to date. Last checked at ${new Date(checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}.`
   } else {
     status = "Novaroom has not checked for updates yet."
   }

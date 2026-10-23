@@ -1,10 +1,12 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react"
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import { notifyIncoming, windowIsActive } from "../lib/desktop"
 import { useIdle } from "../lib/presence"
 import { typingText } from "../lib/typing"
 import {
   LOCAL_FILE_LIMIT,
   LOCAL_ROOM,
+  localAvatars,
   localChatAvailable,
   localFileUrl,
   localChats,
@@ -40,7 +42,7 @@ export type LocalChatState = ReturnType<typeof useLocalChat>
  * Runs Local chat for the signed-in account while the app is open, online or not. `offline` says
  * the server cannot be reached, so the list of registered keys is not refreshed.
  */
-export function useLocalChat(session: Session | null, name: string, offline: boolean) {
+export function useLocalChat(session: Session | null, name: string, offline: boolean, avatarUrl: string | null) {
   const available = localChatAvailable()
   const userId = session?.userId ?? null
   const [publicKey, setPublicKey] = useState<string | null>(null)
@@ -59,6 +61,15 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
   visibleRef.current = visible
   // Who is typing where: chat, then person, then when it runs out.
   const [typing, setTyping] = useState<Record<string, Record<string, number>>>({})
+  // Profile pictures from the directory, by account id.
+  const [avatars, setAvatars] = useState<Record<string, string>>({})
+  const avatarsRef = useRef(avatars)
+  avatarsRef.current = avatars
+  const reloadAvatars = useCallback(() => {
+    void localAvatars()
+      .then(setAvatars)
+      .catch(() => {})
+  }, [])
   const lastTypingRef = useRef<{ chat: string; at: number } | null>(null)
 
   const reloadChats = useCallback(() => {
@@ -78,6 +89,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
         setPublicKey(key)
         void localPeers().then(setPeers).catch(() => {})
         reloadChats()
+        reloadAvatars()
       })
       .catch((caught) => {
         if (active) setError(caught instanceof Error ? caught.message : "Local chat could not start.")
@@ -89,10 +101,11 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
       setChats([])
       setMessages([])
       setUnread({})
+      setAvatars({})
       void stopLocalChat().catch(() => {})
     }
     // The name is sent separately below, so renaming does not restart everything.
-  }, [available, userId, reloadChats])
+  }, [available, userId, reloadChats, reloadAvatars])
 
   // Others see the new name on their next connection.
   useEffect(() => {
@@ -110,14 +123,17 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     if (!publicKey || !userId || offline) return
     const sync = () =>
       void syncLocalDirectory(userId, publicKey)
-        .then(() => setSetupError(""))
+        .then(() => {
+          setSetupError("")
+          reloadAvatars()
+        })
         .catch((caught) =>
           setSetupError(caught instanceof Error ? caught.message : "Could not set up Local chat on the server."),
         )
     sync()
     const timer = window.setInterval(sync, DIRECTORY_EVERY_MS)
     return () => window.clearInterval(timer)
-  }, [publicKey, userId, offline])
+  }, [publicKey, userId, offline, reloadAvatars])
 
   const loadMessages = useCallback((chat: string) => {
     void localMessages(chat)
@@ -149,7 +165,10 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
           if (active && visibleRef.current && message.chat === selectedRef.current) return
           setUnread((current) => ({ ...current, [message.chat]: (current[message.chat] ?? 0) + 1 }))
           const where = message.chat === LOCAL_ROOM ? " (local network)" : " (local)"
-          void notifyIncoming(`${message.senderName || "Someone"}${where}`, localMessageLabel(message), `local:${message.chat}`)
+          void notifyIncoming(`${message.senderName || "Someone"}${where}`, localMessageLabel(message), `local:${message.chat}`, {
+            name: message.senderName || "Someone",
+            avatarUrl: avatarsRef.current[message.senderId] ?? null,
+          })
         })
       },
       delivered(id) {
@@ -261,9 +280,14 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     .filter((id) => id !== userId)
     .map((id) => peers.find((peer) => peer.userId === id)?.name || "Someone")
 
+  /** Someone's profile picture address, if known. */
+  function avatarOf(id: string) {
+    return id === userId ? avatarUrl : (avatars[id] ?? null)
+  }
+
   /** The name to show for a chat: the room's, or the other person's. */
   function chatName(chat: string) {
-    if (chat === LOCAL_ROOM) return "Everyone on this network"
+    if (chat === LOCAL_ROOM) return "Broadcast"
     return (
       peers.find((peer) => peer.userId === chat)?.name ||
       chats.find((item) => item.chat === chat)?.name ||
@@ -288,6 +312,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     onType,
     typists,
     chatName,
+    avatarOf,
   }
 }
 
@@ -298,11 +323,28 @@ function initials(name: string) {
 }
 
 function formatTime(value: number) {
-  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(value))
+  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(
+    new Date(value),
+  )
 }
 
 function formatDay(value: number) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value))
+}
+
+/**
+ * A round profile picture, or initials when there is none or it can't load (Local chat works
+ * offline, where pictures from the server don't load).
+ */
+function LocalAvatar({ name, url, className, children }: { name: string; url: string | null; className: string; children?: ReactNode }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [url])
+  return (
+    <span className={`avatar ${className}`} title={name}>
+      {url && !failed ? <img src={url} alt="" onError={() => setFailed(true)} /> : <span>{initials(name)}</span>}
+      {children}
+    </span>
+  )
 }
 
 function NetworkIcon() {
@@ -344,15 +386,20 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
       className={chat === local.selected ? "chat-row active" : "chat-row"}
       onClick={() => local.select(chat)}
     >
-      <span className="avatar local-avatar">
-        {chat === LOCAL_ROOM ? <NetworkIcon /> : <span>{initials(local.chatName(chat))}</span>}
-        {here !== null && (
-          <span
-            className={`presence-dot local-presence ${!here ? "offline" : here.idle ? "idle" : "online"}`}
-            title={!here ? "Not on the network" : here.idle ? "Idle, on this network" : "On this network"}
-          />
-        )}
-      </span>
+      {chat === LOCAL_ROOM ? (
+        <span className="avatar local-avatar">
+          <NetworkIcon />
+        </span>
+      ) : (
+        <LocalAvatar name={local.chatName(chat)} url={local.avatarOf(chat)} className="local-avatar">
+          {here !== null && (
+            <span
+              className={`presence-dot local-presence ${!here ? "offline" : here.idle ? "idle" : "online"}`}
+              title={!here ? "Not on the network" : here.idle ? "Idle, on this network" : "On this network"}
+            />
+          )}
+        </LocalAvatar>
+      )}
       <span className="profile-chip-text">
         <strong>{local.chatName(chat)}</strong>
         <span>{hint}</span>
@@ -449,8 +496,39 @@ function LocalStatus({ message, isRoom }: { message: LocalMessage; isRoom: boole
   )
 }
 
-/** A message's image, read from this computer once it has arrived. */
-function LocalImage({ id, name, mime, onOpen }: { id: string; name: string; mime: string; onOpen: (url: string) => void }) {
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4v11M7.5 10.5L12 15l4.5-4.5" />
+      <path d="M5 19.5h14" />
+    </svg>
+  )
+}
+
+/** Asks where to save a message's file, and reports why if it couldn't. */
+async function saveFile(id: string, onError: (message: string) => void) {
+  onError("")
+  try {
+    await saveLocalFile(id)
+  } catch (caught) {
+    onError(caught instanceof Error ? caught.message : "Could not save the file.")
+  }
+}
+
+/** A message's image, read from this computer once it has arrived, with a save button on hover. */
+function LocalImage({
+  id,
+  name,
+  mime,
+  onOpen,
+  onSave,
+}: {
+  id: string
+  name: string
+  mime: string
+  onOpen: (url: string) => void
+  onSave: () => void
+}) {
   const [url, setUrl] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
 
@@ -471,9 +549,14 @@ function LocalImage({ id, name, mime, onOpen }: { id: string; name: string; mime
   if (failed) return <p className="local-file-note">This image is no longer on this computer.</p>
   if (!url) return <span className="local-image-placeholder" aria-label="Loading image" />
   return (
-    <button type="button" className="local-image" title="View larger" onClick={() => onOpen(url)}>
-      <img className="bubble-image" src={url} alt={name} />
-    </button>
+    <span className="local-image-wrap">
+      <button type="button" className="local-image" title="View larger" onClick={() => onOpen(url)}>
+        <img className="bubble-image" src={url} alt={name} />
+      </button>
+      <button type="button" className="local-image-save" aria-label="Save image" title="Save image" onClick={onSave}>
+        <DownloadIcon />
+      </button>
+    </span>
   )
 }
 
@@ -483,7 +566,18 @@ function LocalFileView({ message, onOpenImage }: { message: LocalMessage; onOpen
   const file = message.file
   if (!file) return null
   if (file.state === "ready" && isImage(file.mime)) {
-    return <LocalImage id={message.id} name={file.name} mime={file.mime} onOpen={(url) => onOpenImage(url, file.name)} />
+    return (
+      <>
+        <LocalImage
+          id={message.id}
+          name={file.name}
+          mime={file.mime}
+          onOpen={(url) => onOpenImage(url, file.name)}
+          onSave={() => void saveFile(message.id, setError)}
+        />
+        {error && <p className="local-file-error">{error}</p>}
+      </>
+    )
   }
   return (
     <div className="local-file">
@@ -503,12 +597,7 @@ function LocalFileView({ message, onOpenImage }: { message: LocalMessage; onOpen
         <button
           type="button"
           className="text-button"
-          onClick={() => {
-            setError("")
-            void saveLocalFile(message.id).catch((caught) =>
-              setError(caught instanceof Error ? caught.message : "Could not save the file."),
-            )
-          }}
+          onClick={() => void saveFile(message.id, setError)}
         >
           Save
         </button>
@@ -517,23 +606,197 @@ function LocalFileView({ message, onOpenImage }: { message: LocalMessage; onOpen
   )
 }
 
-/** Shows an image over the app at a larger size. Esc or a click outside it closes it. */
-function ImageViewer({ url, name, onClose }: { url: string; name: string; onClose: () => void }) {
+const MAX_ZOOM = 8
+const ZOOM_STEP = 1.25
+// Room left around an image shown whole.
+const VIEWER_MARGIN = 48
+
+/**
+ * Shows an image over the app, whole at first. It zooms with the buttons, Ctrl+wheel, + / - / 0 or a
+ * double-click, and once larger than the window it scrolls with the wheel or by dragging. Esc, the
+ * close button or a click outside the image closes it.
+ */
+function ImageViewer({ id, url, name, onClose }: { id: string; url: string; name: string; onClose: () => void }) {
+  const [error, setError] = useState("")
+  const stageRef = useRef<HTMLDivElement>(null)
+  const [stage, setStage] = useState({ width: 0, height: 0 })
+  const [natural, setNatural] = useState<{ width: number; height: number } | null>(null)
+  // null shows the image whole; otherwise the scale, where 1 is its actual size.
+  const [zoom, setZoom] = useState<number | null>(null)
+  const imageRef = useRef<HTMLImageElement>(null)
+  // The point to keep still while zooming: where it is on the stage (x, y) and on the image (px, py).
+  // Applied once the new size is drawn.
+  const anchorRef = useRef<{ x: number; y: number; px: number; py: number; ratio: number } | null>(null)
+  const dragRef = useRef<{ x: number; y: number; left: number; top: number; moved: boolean } | null>(null)
+
+  // Measured before the stage has a size, the fit would be negative.
+  const fit =
+    natural && stage.width > 0
+      ? Math.min(1, (stage.width - VIEWER_MARGIN * 2) / natural.width, (stage.height - VIEWER_MARGIN * 2) / natural.height)
+      : 1
+  const scale = zoom ?? fit
+  const minZoom = Math.min(fit, 0.1)
+
+  // Zooms to a scale (null to show it whole), keeping the given point of the stage, or its centre, still.
+  const zoomTo = useCallback(
+    (next: number | null, at?: { x: number; y: number }) => {
+      const target = next === null ? fit : Math.min(MAX_ZOOM, Math.max(minZoom, next))
+      if (target === scale) return
+      const element = stageRef.current
+      const image = imageRef.current
+      if (element && image) {
+        const x = at?.x ?? element.clientWidth / 2
+        const y = at?.y ?? element.clientHeight / 2
+        anchorRef.current = {
+          x,
+          y,
+          px: element.scrollLeft + x - image.offsetLeft,
+          py: element.scrollTop + y - image.offsetTop,
+          ratio: target / scale,
+        }
+      }
+      setZoom(next === null || target === fit ? null : target)
+    },
+    [fit, minZoom, scale],
+  )
+
+  useEffect(() => {
+    const element = stageRef.current
+    if (!element) return
+    const measure = () => setStage({ width: element.clientWidth, height: element.clientHeight })
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current
+    const element = stageRef.current
+    const image = imageRef.current
+    if (!anchor || !element || !image) return
+    anchorRef.current = null
+    element.scrollLeft = anchor.px * anchor.ratio + image.offsetLeft - anchor.x
+    element.scrollTop = anchor.py * anchor.ratio + image.offsetTop - anchor.y
+  }, [scale])
+
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") onClose()
+      else if (event.key === "+" || event.key === "=") zoomTo(scale * ZOOM_STEP)
+      else if (event.key === "-") zoomTo(scale / ZOOM_STEP)
+      else if (event.key === "0") zoomTo(null)
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
-  }, [onClose])
+  }, [onClose, scale, zoomTo])
 
-  return (
-    <div className="image-viewer" role="dialog" aria-label={name} onClick={onClose}>
-      <img src={url} alt={name} onClick={(event) => event.stopPropagation()} />
+  // Ctrl+wheel (and a touchpad pinch, which arrives as one) zooms at the pointer. A plain wheel scrolls.
+  // Attached by hand because React's wheel listener can't stop the window itself from zooming.
+  useEffect(() => {
+    const element = stageRef.current
+    if (!element) return
+    function onWheel(event: WheelEvent) {
+      if (!event.ctrlKey) return
+      event.preventDefault()
+      const box = element!.getBoundingClientRect()
+      const factor = Math.exp(-event.deltaY * 0.0025)
+      zoomTo(scale * factor, { x: event.clientX - box.left, y: event.clientY - box.top })
+    }
+    element.addEventListener("wheel", onWheel, { passive: false })
+    return () => element.removeEventListener("wheel", onWheel)
+  }, [scale, zoomTo])
+
+  const zoomed = natural !== null && (natural.width * scale > stage.width || natural.height * scale > stage.height)
+
+  return createPortal(
+    <div className="image-viewer" role="dialog" aria-label={name}>
+      <div
+        ref={stageRef}
+        className={zoomed ? "image-viewer-stage zoomed" : "image-viewer-stage"}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return
+          const element = stageRef.current!
+          dragRef.current = {
+            x: event.clientX,
+            y: event.clientY,
+            left: element.scrollLeft,
+            top: element.scrollTop,
+            moved: false,
+          }
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current
+          if (!drag) return
+          const dx = event.clientX - drag.x
+          const dy = event.clientY - drag.y
+          if (!drag.moved && Math.hypot(dx, dy) < 4) return
+          if (!drag.moved) event.currentTarget.setPointerCapture(event.pointerId)
+          drag.moved = true
+          event.currentTarget.scrollLeft = drag.left - dx
+          event.currentTarget.scrollTop = drag.top - dy
+        }}
+        onPointerUp={(event) => {
+          const drag = dragRef.current
+          dragRef.current = null
+          // A click (not the end of a drag) on the dark area around the image closes the viewer.
+          if (drag && !drag.moved && !(event.target instanceof HTMLImageElement)) onClose()
+        }}
+        onPointerCancel={() => (dragRef.current = null)}
+      >
+        <div className="image-viewer-canvas">
+          <img
+            ref={imageRef}
+            src={url}
+            alt={name}
+            draggable={false}
+            style={natural ? { width: natural.width * scale, height: natural.height * scale } : { visibility: "hidden" }}
+            onLoad={(event) =>
+              setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })
+            }
+            onDoubleClick={(event) => {
+              const box = stageRef.current!.getBoundingClientRect()
+              const at = { x: event.clientX - box.left, y: event.clientY - box.top }
+              zoomTo(zoom === null ? Math.max(1, fit * 2) : null, at)
+            }}
+          />
+        </div>
+      </div>
+      <div className="image-viewer-zoom" role="toolbar" aria-label="Zoom">
+        <button type="button" aria-label="Zoom out" title="Zoom out (-)" disabled={scale <= minZoom} onClick={() => zoomTo(scale / ZOOM_STEP)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 12h12" />
+          </svg>
+        </button>
+        <button type="button" className="image-viewer-scale" title="Actual size" onClick={() => zoomTo(1)}>
+          {Math.round(scale * 100)}%
+        </button>
+        <button type="button" aria-label="Zoom in" title="Zoom in (+)" disabled={scale >= MAX_ZOOM} onClick={() => zoomTo(scale * ZOOM_STEP)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M6 12h12M12 6v12" />
+          </svg>
+        </button>
+        <button type="button" aria-label="Fit to window" title="Fit to window (0)" disabled={zoom === null} onClick={() => zoomTo(null)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+          </svg>
+        </button>
+      </div>
+      <button
+        type="button"
+        className="image-viewer-save"
+        aria-label="Save image"
+        title="Save image"
+        onClick={() => void saveFile(id, setError)}
+      >
+        <DownloadIcon />
+      </button>
       <button type="button" className="image-viewer-close" aria-label="Close" onClick={onClose}>
         ×
       </button>
-    </div>
+      {error && <p className="image-viewer-error">{error}</p>}
+    </div>,
+    document.body,
   )
 }
 
@@ -546,7 +809,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   const [file, setFile] = useState<File | null>(null)
   const [filePreview, setFilePreview] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
-  const [viewing, setViewing] = useState<{ url: string; name: string } | null>(null)
+  const [viewing, setViewing] = useState<{ id: string; url: string; name: string } | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -563,6 +826,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     setSendError("")
     setReplyTo(null)
     setFile(null)
+    bodyRef.current?.focus()
   }, [selected])
 
   useEffect(() => {
@@ -681,11 +945,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             const name = message.senderName || "Someone"
             const day = formatDay(message.sentAt)
             const newDay = index === 0 || formatDay(local.messages[index - 1].sentAt) !== day
-            const avatar = (
-              <span className="avatar message-avatar" title={name}>
-                <span>{initials(name)}</span>
-              </span>
-            )
+            const avatar = <LocalAvatar name={name} url={local.avatarOf(message.senderId)} className="message-avatar" />
             const reply = message.replyTo
             return (
               <Fragment key={message.id}>
@@ -700,7 +960,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                         <span>{reply.body || (reply.fileName ? `File: ${reply.fileName}` : "")}</span>
                       </button>
                     )}
-                    <LocalFileView message={message} onOpenImage={(url, imageName) => setViewing({ url, name: imageName })} />
+                    <LocalFileView message={message} onOpenImage={(url, imageName) => setViewing({ id: message.id, url, name: imageName })} />
                     {message.body && <p>{message.body}</p>}
                     <span className="bubble-meta">
                       <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>
@@ -836,7 +1096,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           Drop a file to send it
         </div>
       )}
-      {viewing && <ImageViewer url={viewing.url} name={viewing.name} onClose={closeViewer} />}
+      {viewing && <ImageViewer id={viewing.id} url={viewing.url} name={viewing.name} onClose={closeViewer} />}
     </section>
   )
 }

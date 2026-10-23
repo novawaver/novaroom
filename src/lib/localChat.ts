@@ -66,6 +66,9 @@ export const setLocalIdle = (idle: boolean) => call<void>("local_chat_set_idle",
 
 export const localPeers = () => call<LocalPeer[]>("local_chat_peers")
 
+/** Profile picture addresses from the saved directory, by account id. They only load while online. */
+export const localAvatars = () => call<Record<string, string>>("local_chat_avatars")
+
 export const localChats = () => call<LocalChatSummary[]>("local_chat_chats")
 
 export const localMessages = (chat: string) => call<LocalMessage[]>("local_chat_messages", { chat })
@@ -115,7 +118,11 @@ export const sendLocalTyping = (chat: string, typing: boolean) => call<void>("lo
 /** Tells the other person in a direct chat that this person has seen it, for their double checks. */
 export const markLocalRead = (chat: string) => call<void>("local_chat_mark_read", { chat })
 
-type KeyRow = { user_id: string; public_key: string; profiles: { display_name: string | null } | null }
+type KeyRow = {
+  user_id: string
+  public_key: string
+  profiles: { display_name: string | null; avatar_url: string | null } | null
+}
 
 /**
  * Registers this computer's key for the account, then saves every registered key on this computer,
@@ -127,12 +134,13 @@ export async function syncLocalDirectory(userId: string, publicKey: string) {
     .from("local_chat_keys")
     .upsert({ user_id: userId, public_key: publicKey }, { onConflict: "user_id,public_key", ignoreDuplicates: true })
   if (addError) throw new Error(addError.message)
-  const { data, error } = await supabase.from("local_chat_keys").select("user_id, public_key, profiles(display_name)")
+  const { data, error } = await supabase.from("local_chat_keys").select("user_id, public_key, profiles(display_name, avatar_url)")
   if (error) throw new Error(error.message)
   const entries = (data as unknown as KeyRow[]).map((row) => ({
     userId: row.user_id,
     publicKey: row.public_key,
     name: row.profiles?.display_name ?? "",
+    avatarUrl: row.profiles?.avatar_url ?? null,
   }))
   await call<void>("local_chat_set_directory", { entries })
 }

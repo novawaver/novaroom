@@ -118,6 +118,17 @@ fn migrate(db: &Connection) -> Result<(), String> {
                 .map_err(message)?;
         }
     }
+    // Profile pictures came later than the directory itself.
+    let has_avatar = db
+        .prepare("PRAGMA table_info(directory)")
+        .map_err(message)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(message)?
+        .filter_map(Result::ok)
+        .any(|column| column == "avatar_url");
+    if !has_avatar {
+        db.execute_batch("ALTER TABLE directory ADD COLUMN avatar_url TEXT").map_err(message)?;
+    }
     Ok(())
 }
 
@@ -247,6 +258,9 @@ pub struct DirectoryEntry {
     user_id: String,
     public_key: String,
     name: String,
+    /// The profile picture's address. It only loads while online; the app shows initials otherwise.
+    #[serde(default)]
+    avatar_url: Option<String>,
 }
 
 /// What two apps send each other, as JSON inside encrypted Noise messages.
@@ -1217,11 +1231,12 @@ pub fn local_chat_set_directory(state: tauri::State<'_, LocalChat>, entries: Vec
     tx.execute("DELETE FROM directory", []).map_err(message)?;
     {
         let mut insert = tx
-            .prepare("INSERT OR IGNORE INTO directory (user_id, public_key, name) VALUES (?1, ?2, ?3)")
+            .prepare("INSERT OR IGNORE INTO directory (user_id, public_key, name, avatar_url) VALUES (?1, ?2, ?3, ?4)")
             .map_err(message)?;
         for entry in &entries {
+            let avatar = entry.avatar_url.as_deref().filter(|url| url.starts_with("https://") && url.len() <= 1000);
             insert
-                .execute(params![entry.user_id, entry.public_key, clip(entry.name.trim(), MAX_NAME)])
+                .execute(params![entry.user_id, entry.public_key, clip(entry.name.trim(), MAX_NAME), avatar])
                 .map_err(message)?;
         }
     }
@@ -1240,6 +1255,22 @@ pub fn local_chat_set_idle(state: tauri::State<'_, LocalChat>, idle: bool) -> Re
         let _ = peer.outbox.send(Frame::Status { idle });
     }
     Ok(())
+}
+
+/// Everyone's profile picture address from the saved directory, by account id.
+#[tauri::command]
+pub fn local_chat_avatars(state: tauri::State<'_, LocalChat>) -> Result<HashMap<String, String>, String> {
+    let session = running(&state)?;
+    let db = session.db.lock().unwrap();
+    let mut statement = db
+        .prepare("SELECT user_id, MAX(avatar_url) FROM directory WHERE avatar_url IS NOT NULL GROUP BY user_id")
+        .map_err(message)?;
+    let avatars = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(message)?
+        .filter_map(Result::ok)
+        .collect();
+    Ok(avatars)
 }
 
 #[tauri::command]

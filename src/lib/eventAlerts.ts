@@ -1,11 +1,27 @@
 import { supabase } from "./supabase"
 
-// "You were added to an event" and "A task was assigned to you" notifications, created by the database.
-export type AlertKind = "event_added" | "task_assigned"
+// "You were added to an event", "A task was assigned to you" and "An assignee signed your task done
+// (or failed)" notifications, created by the database.
+export type AlertKind = "event_added" | "task_assigned" | "task_done" | "task_failed"
 
-export type EventAlert = { id: string; kind: AlertKind; eventId: string | null; taskId: string | null; title: string }
+// actorId: who caused it, for their picture on the notification.
+export type EventAlert = {
+  id: string
+  kind: AlertKind
+  eventId: string | null
+  taskId: string | null
+  title: string
+  actorId: string | null
+}
 
-type AlertRow = { id: string; kind: AlertKind; event_id: string | null; task_id: string | null; title: string }
+type AlertRow = {
+  id: string
+  kind: AlertKind
+  event_id: string | null
+  task_id: string | null
+  title: string
+  actor_id?: string | null
+}
 
 const toAlert = (row: AlertRow): EventAlert => ({
   id: row.id,
@@ -13,6 +29,7 @@ const toAlert = (row: AlertRow): EventAlert => ({
   eventId: row.event_id,
   taskId: row.task_id,
   title: row.title,
+  actorId: row.actor_id ?? null,
 })
 
 // Notifications not shown yet, for example ones that arrived while the app was closed.
@@ -20,7 +37,7 @@ export async function undeliveredAlerts(): Promise<EventAlert[]> {
   if (!supabase) return []
   const { data, error } = await supabase
     .from("leaddesk_notifications")
-    .select("id, kind, event_id, task_id, title")
+    .select("id, kind, event_id, task_id, title, actor_id")
     .is("delivered_at", null)
     .order("created_at")
     .limit(20)

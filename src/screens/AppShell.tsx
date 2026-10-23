@@ -663,7 +663,7 @@ function NavBar({
   badges?: Partial<Record<NavItem, number>>
   onSelect: (item: NavItem) => void
   footer?: ReactNode
-  // Icons only when collapsed (labels still read out and shown on hover); labels beside them when expanded.
+  // Icons only when collapsed (it widens over the sidebar on hover to show the labels); labels beside them when expanded.
   expanded: boolean
   onToggle: () => void
 }) {
@@ -687,7 +687,6 @@ function NavBar({
           type="button"
           className="nav-item"
           aria-current={active === id ? "page" : undefined}
-          title={expanded ? undefined : label}
           onClick={() => onSelect(id)}
         >
           <span className="nav-tile">
@@ -716,6 +715,7 @@ function formatTime(value: string) {
   return new Intl.DateTimeFormat(undefined, {
     hour: "numeric",
     minute: "2-digit",
+    timeZoneName: "short",
   }).format(new Date(value))
 }
 
@@ -1071,7 +1071,10 @@ export function AppShell({ local }: { local: LocalChatState }) {
               writeUnread(session.userId, next)
               return next
             })
-            void notifyIncoming(message.senderName || "Novaroom", messageLabel(message), `chat:${message.conversationId}`)
+            void notifyIncoming(message.senderName || "Novaroom", messageLabel(message), `chat:${message.conversationId}`, {
+              name: message.senderName || "Someone",
+              avatarUrl: message.senderAvatarUrl ?? null,
+            })
           })
         }
         setMessages((current) => {
@@ -1591,7 +1594,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
                 title={PRESENCE_LABELS[presenceOf(session.userId)]}
               />
             </span>
-            {navExpanded && <span className="nav-label">{profile.displayName || session.email}</span>}
+            <span className="nav-label">{profile.displayName || session.email}</span>
           </button>
         }
       />

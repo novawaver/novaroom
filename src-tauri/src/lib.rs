@@ -52,7 +52,7 @@ fn request_quit(app: &tauri::AppHandle) {
     }
 }
 
-/// The large logo and the banner across the top of every toast. Toasts can only show images from
+/// The large logo and the banner under the text of every toast. Toasts can only show images from
 /// files, so these are written next to the app's other local data the first time they are needed.
 #[cfg(windows)]
 fn toast_images(app: &tauri::AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
@@ -71,14 +71,57 @@ fn toast_images(app: &tauri::AppHandle) -> Option<(std::path::PathBuf, std::path
     Some((write("logo.png", LOGO)?, write("banner.png", BANNER)?))
 }
 
+/// Saves the sender's picture (a base64 PNG drawn by the window) for a toast, named after its
+/// contents so each picture is written once. Keeps only the most recent few.
+#[cfg(windows)]
+fn toast_picture(app: &tauri::AppHandle, picture: &str) -> Option<std::path::PathBuf> {
+    use base64::Engine;
+    use std::hash::{Hash, Hasher};
+    let bytes = base64::engine::general_purpose::STANDARD.decode(picture).ok()?;
+    if bytes.len() > 2 * 1024 * 1024 {
+        return None;
+    }
+    let dir = app.path().app_local_data_dir().ok()?.join("notification").join("people");
+    std::fs::create_dir_all(&dir).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let path = dir.join(format!("{:016x}.png", hasher.finish()));
+    if !path.exists() {
+        std::fs::write(&path, &bytes).ok()?;
+        // Toasts read the file when they show, so only clear out pictures older than a day.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let day = std::time::Duration::from_secs(24 * 60 * 60);
+            for entry in entries.flatten() {
+                let old = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > day);
+                if old {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+    Some(path)
+}
+
 /// Shows a Windows toast that brings the window forward when clicked. The notification plugin's
 /// toasts have no click handler on desktop, so clicking them did nothing.
 /// target says what the click should open (for example "chat:<id>"); it is sent back to the window
 /// as a "notification-clicked" event.
-/// Every toast has the Novaroom banner and a large logo, and stays up longer than Windows' default.
+/// Every toast has the Novaroom banner and a large picture: the sender's (`picture`, a base64 PNG)
+/// when there is one, else the Novaroom logo. It stays up longer than Windows' default.
 /// LeadDesk alerts ("desk:" targets) stay until dismissed, since they are things to act on.
 #[tauri::command]
-fn notify(app: tauri::AppHandle, title: String, body: String, target: Option<String>) -> Result<(), String> {
+fn notify(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+    target: Option<String>,
+    picture: Option<String>,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         use tauri_winrt_notification::{Duration, IconCrop, Scenario, Toast};
@@ -96,13 +139,20 @@ fn notify(app: tauri::AppHandle, title: String, body: String, target: Option<Str
             app.config().identifier.clone()
         };
         let images = toast_images(&app);
+        let sender = picture.as_deref().and_then(|picture| toast_picture(&app, picture));
         let lasting = target.as_deref().is_some_and(|target| target.starts_with("desk:"));
         // Toast::show waits briefly, so keep it off the command thread.
         std::thread::spawn(move || {
             let clicked = app.clone();
             let mut toast = Toast::new(&app_id).title(&title).text1(&body).duration(Duration::Long);
             if let Some((logo, banner)) = &images {
-                toast = toast.hero(banner, "Novaroom").icon(logo, IconCrop::Square, "Novaroom");
+                // Inline rather than a hero image: Windows crops hero images to 2:1, while an inline
+                // image keeps its own, shorter shape. It shows under the text.
+                toast = toast.image(banner, "Novaroom");
+                toast = match &sender {
+                    Some(sender) => toast.icon(sender, IconCrop::Circular, &title),
+                    None => toast.icon(logo, IconCrop::Square, "Novaroom"),
+                };
             }
             if lasting {
                 // A reminder only stays on screen when it has a button.
@@ -122,7 +172,7 @@ fn notify(app: tauri::AppHandle, title: String, body: String, target: Option<Str
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, title, body, target);
+        let _ = (app, title, body, target, picture);
         Err("Clickable notifications are only built for Windows.".into())
     }
 }
@@ -305,6 +355,7 @@ pub fn run() {
             localchat::local_chat_stop,
             localchat::local_chat_set_directory,
             localchat::local_chat_peers,
+            localchat::local_chat_avatars,
             localchat::local_chat_chats,
             localchat::local_chat_messages,
             localchat::local_chat_send,
