@@ -1,3 +1,4 @@
+import { safeFileName } from "./chats"
 import { supabase } from "./supabase"
 import { addDays, instantToZoned, isTimeZone, localTimeZone, zonedToInstant } from "./timezone"
 
@@ -52,6 +53,17 @@ export type DeskEvent = {
   visibility: EventVisibility
   // Set by admins. Leaders can see a locked event but not change or delete it.
   locked: boolean
+  // Attached files, oldest first. Changed with addEventFiles and removeEventFiles, not saveEvent.
+  files: EventFile[]
+}
+
+// A file attached to an event. Its address comes from eventFileUrls when it is shown.
+export type EventFile = {
+  id: string
+  path: string
+  name: string
+  mime: string
+  size: number
 }
 
 // One appearance of an event on the schedule. A daily event has one per day.
@@ -342,7 +354,9 @@ type EventRow = {
   locked: boolean
 }
 
-const toEvent = (row: EventRow): DeskEvent => ({
+type EventFileRow = { id: string; event_id: string; path: string; name: string; mime: string; size: number }
+
+const toEvent = (row: EventRow): Omit<DeskEvent, "files"> => ({
   id: row.id,
   title: row.title,
   notes: row.notes,
@@ -368,18 +382,28 @@ export async function listEvents(): Promise<DeskEvent[]> {
       participantIds: event.participantIds ?? [],
       visibility: event.visibility ?? "leaders",
       locked: event.locked ?? false,
+      files: event.files ?? [],
     }))
   }
-  const { data, error } = await supabase
-    .from("leaddesk_events")
-    .select(
-      "id, title, notes, location, repeat, time_zone, starts_at, ends_at, start_time, end_time, created_by, participant_ids, visibility, locked",
-    )
-  fail(error)
-  return (data as EventRow[]).map(toEvent)
+  const [events, files] = await Promise.all([
+    supabase
+      .from("leaddesk_events")
+      .select(
+        "id, title, notes, location, repeat, time_zone, starts_at, ends_at, start_time, end_time, created_by, participant_ids, visibility, locked",
+      ),
+    supabase.from("leaddesk_event_files").select("id, event_id, path, name, mime, size").order("created_at"),
+  ])
+  fail(events.error)
+  fail(files.error)
+  const byEvent = new Map<string, EventFile[]>()
+  for (const { event_id, ...file } of files.data as EventFileRow[]) {
+    byEvent.set(event_id, [...(byEvent.get(event_id) ?? []), file])
+  }
+  return (events.data as EventRow[]).map((row) => ({ ...toEvent(row), files: byEvent.get(row.id) ?? [] }))
 }
 
-export async function saveEvent(event: Omit<DeskEvent, "id"> & { id?: string }) {
+// Saves an event's details and returns its id. Its files are left as they are.
+export async function saveEvent(event: Omit<DeskEvent, "id" | "files"> & { id?: string }): Promise<string> {
   const daily = event.repeat === "daily"
   const fields = {
     title: event.title.trim(),
@@ -405,8 +429,9 @@ export async function saveEvent(event: Omit<DeskEvent, "id"> & { id?: string }) 
   }
   if (!supabase) {
     const desk = readPreview()
+    const id = event.id ?? crypto.randomUUID()
     const saved: DeskEvent = {
-      id: event.id ?? crypto.randomUUID(),
+      id,
       title: fields.title,
       notes: fields.notes,
       location: fields.location,
@@ -421,26 +446,179 @@ export async function saveEvent(event: Omit<DeskEvent, "id"> & { id?: string }) 
       participantIds: fields.participant_ids,
       visibility: fields.visibility,
       locked: event.locked,
+      files: desk.events.find((item) => item.id === event.id)?.files ?? [],
     }
     desk.events = event.id ? desk.events.map((item) => (item.id === event.id ? saved : item)) : [...desk.events, saved]
     writePreview(desk)
-    return
+    return id
   }
-  const { error } = event.id
-    ? await supabase.from("leaddesk_events").update(fields).eq("id", event.id)
-    : await supabase.from("leaddesk_events").insert(fields)
+  if (event.id) {
+    const { error } = await supabase.from("leaddesk_events").update(fields).eq("id", event.id)
+    fail(error)
+    return event.id
+  }
+  const { data, error } = await supabase.from("leaddesk_events").insert(fields).select("id").single()
   fail(error)
+  return (data as { id: string }).id
 }
 
 export async function deleteEvent(id: string) {
   if (!supabase) {
     const desk = readPreview()
+    const gone = desk.events.find((item) => item.id === id)?.files ?? []
     desk.events = desk.events.filter((item) => item.id !== id)
     writePreview(desk)
+    forgetPreviewFiles(gone)
     return
   }
+  // The rows go with the event, so note the stored files first and remove them once it is gone.
+  const { data: files, error: filesError } = await supabase
+    .from("leaddesk_event_files")
+    .select("path")
+    .eq("event_id", id)
+  fail(filesError)
   const { error } = await supabase.from("leaddesk_events").delete().eq("id", id)
   fail(error)
+  await removeStoredFiles((files as Array<{ path: string }>).map((file) => file.path))
+}
+
+// Event files -------------------------------------------------------------------
+
+const EVENT_FILES_BUCKET = "leaddesk-files"
+export const EVENT_FILE_LIMIT = 25 * 1024 * 1024
+export const EVENT_FILES_MAX = 10
+// Offline preview keeps files in local storage, which only holds a few MB in all.
+const PREVIEW_FILE_LIMIT = 2 * 1024 * 1024
+// File contents in offline preview, by file id, kept apart so listing events stays small.
+const PREVIEW_FILES_KEY = "novaroom.preview.leaddesk-files"
+
+function readPreviewFiles(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(PREVIEW_FILES_KEY) ?? "{}") as Record<string, string>
+  } catch {
+    return {}
+  }
+}
+
+function forgetPreviewFiles(files: EventFile[]) {
+  const stored = readPreviewFiles()
+  for (const file of files) delete stored[file.id]
+  localStorage.setItem(PREVIEW_FILES_KEY, JSON.stringify(stored))
+}
+
+function readAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(new Error("Could not read that file."))
+    reader.readAsDataURL(file)
+  })
+}
+
+// A file that can't be removed is only logged: the event or row it belonged to is already gone.
+async function removeStoredFiles(paths: string[]) {
+  if (!supabase || paths.length === 0) return
+  const { error } = await supabase.storage.from(EVENT_FILES_BUCKET).remove(paths)
+  if (error) console.warn("Could not remove event files:", error.message)
+}
+
+/** Attaches files to a saved event, one at a time, stopping at the first that fails. */
+export async function addEventFiles(eventId: string, files: File[]) {
+  for (const file of files) {
+    if (file.size > EVENT_FILE_LIMIT) throw new Error(`${file.name} is over 25 MB.`)
+  }
+  if (!supabase) {
+    for (const file of files) {
+      if (file.size > PREVIEW_FILE_LIMIT) {
+        throw new Error("This preview keeps files up to 2 MB. Connected projects allow 25 MB.")
+      }
+      const id = crypto.randomUUID()
+      const stored = readPreviewFiles()
+      stored[id] = await readAsDataUrl(file)
+      try {
+        localStorage.setItem(PREVIEW_FILES_KEY, JSON.stringify(stored))
+      } catch {
+        throw new Error("This preview has no room for more files. Remove some first.")
+      }
+      const desk = readPreview()
+      const added: EventFile = { id, path: id, name: file.name || "file", mime: file.type, size: file.size }
+      desk.events = desk.events.map((item) =>
+        item.id === eventId ? { ...item, files: [...(item.files ?? []), added] } : item,
+      )
+      writePreview(desk)
+    }
+    return
+  }
+  for (const file of files) {
+    const path = `${eventId}/${crypto.randomUUID()}/${safeFileName(file.name)}`
+    const { error: uploadError } = await supabase.storage.from(EVENT_FILES_BUCKET).upload(path, file, {
+      contentType: file.type || "application/octet-stream",
+      upsert: false,
+    })
+    fail(uploadError)
+    const { error } = await supabase.from("leaddesk_event_files").insert({
+      event_id: eventId,
+      path,
+      name: (file.name || "file").slice(0, 255),
+      mime: file.type,
+      size: file.size,
+    })
+    if (error) {
+      await removeStoredFiles([path])
+      fail(error)
+    }
+  }
+}
+
+export async function removeEventFiles(files: EventFile[]) {
+  if (files.length === 0) return
+  if (!supabase) {
+    const ids = new Set(files.map((file) => file.id))
+    const desk = readPreview()
+    desk.events = desk.events.map((item) => ({ ...item, files: (item.files ?? []).filter((file) => !ids.has(file.id)) }))
+    writePreview(desk)
+    forgetPreviewFiles(files)
+    return
+  }
+  const { error } = await supabase.from("leaddesk_event_files").delete().in("id", files.map((file) => file.id))
+  fail(error)
+  await removeStoredFiles(files.map((file) => file.path))
+}
+
+/** Addresses to show event files at, by file id, good for an hour. */
+export async function eventFileUrls(files: EventFile[]): Promise<Map<string, string>> {
+  const urls = new Map<string, string>()
+  if (files.length === 0) return urls
+  if (!supabase) {
+    const stored = readPreviewFiles()
+    for (const file of files) if (stored[file.id]) urls.set(file.id, stored[file.id])
+    return urls
+  }
+  const { data, error } = await supabase.storage.from(EVENT_FILES_BUCKET).createSignedUrls(
+    files.map((file) => file.path),
+    60 * 60,
+  )
+  fail(error)
+  const byPath = new Map(files.map((file) => [file.path, file.id]))
+  for (const item of data ?? []) {
+    const id = item.path ? byPath.get(item.path) : undefined
+    if (id && item.signedUrl) urls.set(id, item.signedUrl)
+  }
+  return urls
+}
+
+/** An address that downloads the file under its own name, rather than showing it. */
+export async function eventFileDownloadUrl(file: EventFile): Promise<string> {
+  if (!supabase) {
+    const url = readPreviewFiles()[file.id]
+    if (!url) throw new Error("That file is no longer available.")
+    return url
+  }
+  const { data, error } = await supabase.storage
+    .from(EVENT_FILES_BUCKET)
+    .createSignedUrl(file.path, 10 * 60, { download: file.name })
+  fail(error)
+  return data!.signedUrl
 }
 
 // Read state, for unread badges ------------------------------------------------
@@ -530,6 +708,7 @@ export function subscribeToDeskChanges(onChange: () => void) {
     // A fresh topic each time: reusing one that is still closing would leave this subscription dead.
     .channel(`leaddesk-changes:${crypto.randomUUID()}`)
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_events" }, () => onChange())
+    .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_event_files" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_tasks" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_task_signoffs" }, () => onChange())
     // Someone may have lost access to an event, which the events stream above cannot tell them.

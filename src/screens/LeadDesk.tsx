@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
 import { useAuth } from "../auth"
 import {
+  EVENT_FILES_MAX,
+  EVENT_FILE_LIMIT,
   LEADERSHIP,
+  addEventFiles,
   deleteEvent,
+  eventFileDownloadUrl,
+  eventFileUrls,
+  removeEventFiles,
   deleteNote,
   deleteTask,
   listEvents,
@@ -18,13 +24,16 @@ import {
   type DeskEvent,
   type DeskNote,
   type DeskTask,
+  type EventFile,
   type EventVisibility,
   type Occurrence,
   type TaskPriority,
   type TaskResult,
   type TaskStatus,
 } from "../lib/leaddesk"
+import { inTauri } from "../lib/desktop"
 import { listUsers, type RegisteredUser } from "../lib/users"
+import { ImageViewer } from "./ImageViewer"
 import {
   addDays,
   instantToZoned,
@@ -1257,6 +1266,265 @@ function LockIcon() {
   )
 }
 
+// Event files -------------------------------------------------------------------
+
+function AttachIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 11.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.1 8.1a1.7 1.7 0 0 1-2.4-2.4l7.4-7.4" />
+    </svg>
+  )
+}
+
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-10z" />
+      <path d="M14 3.5v5h5" />
+    </svg>
+  )
+}
+
+// SVG is left out: it can carry scripts, so it is offered as a file to save instead.
+function isImage(mime: string) {
+  return mime.startsWith("image/") && mime !== "image/svg+xml"
+}
+
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// Addresses to show an event's files at, by file id. Empty until they load.
+function useEventFileUrls(files: EventFile[]) {
+  const [urls, setUrls] = useState<Map<string, string>>(() => new Map())
+  // Keyed by the ids, since every reload hands over a new array of the same files.
+  const key = files.map((file) => file.id).join(",")
+  const filesRef = useRef(files)
+  filesRef.current = files
+  useEffect(() => {
+    let active = true
+    eventFileUrls(filesRef.current)
+      .then((loaded) => {
+        if (active) setUrls(loaded)
+      })
+      .catch(() => {
+        // Images show as plain files; saving one asks for its address again.
+      })
+    return () => {
+      active = false
+    }
+  }, [key])
+  return urls
+}
+
+// Downloads a file under its own name. The desktop app hands the address to the system browser,
+// which saves it to Downloads.
+async function saveEventFile(file: EventFile) {
+  const url = await eventFileDownloadUrl(file)
+  if (url.startsWith("data:")) {
+    const link = document.createElement("a")
+    link.href = url
+    link.download = file.name
+    link.click()
+  } else if (inTauri()) {
+    const { openUrl } = await import("@tauri-apps/plugin-opener")
+    await openUrl(url)
+  } else {
+    window.open(url, "_blank", "noopener")
+  }
+}
+
+// An event's files in its panel: images as a grid of previews that open larger, then other files
+// with a button to save them.
+function EventFiles({ files, onView }: { files: EventFile[]; onView: (file: EventFile, url: string) => void }) {
+  const urls = useEventFileUrls(files)
+  const [error, setError] = useState("")
+  const images = files.filter((file) => isImage(file.mime) && urls.has(file.id))
+  const others = files.filter((file) => !images.includes(file))
+
+  function save(file: EventFile) {
+    setError("")
+    saveEventFile(file).catch((caught) => setError(caught instanceof Error ? caught.message : "Could not save the file."))
+  }
+
+  return (
+    <div className="event-files">
+      {images.length > 0 && (
+        <div className="event-file-grid">
+          {images.map((file) => (
+            <button
+              key={file.id}
+              type="button"
+              className="event-file-thumb"
+              title={`${file.name} · ${formatBytes(file.size)}`}
+              onClick={() => onView(file, urls.get(file.id)!)}
+            >
+              <img src={urls.get(file.id)} alt={file.name} />
+            </button>
+          ))}
+        </div>
+      )}
+      {others.map((file) => (
+        <div key={file.id} className="event-file-row">
+          <span className="local-file-icon">
+            <FileIcon />
+          </span>
+          <span className="local-file-text">
+            <strong title={file.name}>{file.name}</strong>
+            <span>{formatBytes(file.size)}</span>
+          </span>
+          <button type="button" className="text-button" onClick={() => save(file)}>
+            Save
+          </button>
+        </div>
+      ))}
+      {error && (
+        <span className="form-error" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  )
+}
+
+// A file waiting to be attached when the event form is saved.
+type PendingFile = { key: string; file: File }
+
+// The event form's files: the ones it has, and new ones picked, dropped or pasted, each with a preview
+// when it is an image. Nothing is uploaded or removed until the form is saved.
+function EventFilesField({
+  kept,
+  pending,
+  onKeptChange,
+  onPendingChange,
+}: {
+  kept: EventFile[]
+  pending: PendingFile[]
+  onKeptChange: (files: EventFile[]) => void
+  onPendingChange: (files: PendingFile[]) => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [dragging, setDragging] = useState(false)
+  const [error, setError] = useState("")
+  const [viewing, setViewing] = useState<{ url: string; name: string } | null>(null)
+  const closeViewer = useCallback(() => setViewing(null), [])
+  const keptUrls = useEventFileUrls(kept)
+  // Local previews of new images, made again whenever the list changes.
+  const [pendingUrls, setPendingUrls] = useState<Map<string, string>>(() => new Map())
+  useEffect(() => {
+    const made = new Map<string, string>()
+    for (const { key, file } of pending) if (isImage(file.type)) made.set(key, URL.createObjectURL(file))
+    setPendingUrls(made)
+    return () => made.forEach((url) => URL.revokeObjectURL(url))
+  }, [pending])
+
+  const room = EVENT_FILES_MAX - kept.length - pending.length
+
+  function add(list: Iterable<File>) {
+    const chosen = [...list]
+    if (chosen.length === 0) return
+    const tooBig = chosen.find((file) => file.size > EVENT_FILE_LIMIT)
+    const fitting = chosen.filter((file) => file.size <= EVENT_FILE_LIMIT)
+    setError(
+      tooBig
+        ? `${tooBig.name || "That file"} is over 25 MB.`
+        : fitting.length > room
+          ? `An event can have up to ${EVENT_FILES_MAX} files.`
+          : "",
+    )
+    const added = fitting.slice(0, Math.max(0, room)).map((file) => ({ key: crypto.randomUUID(), file }))
+    if (added.length > 0) onPendingChange([...pending, ...added])
+  }
+
+  const row = (key: string, name: string, size: number, preview: string | null, onRemove: () => void) => (
+    <li key={key} className="event-file-row">
+      {preview ? (
+        <button type="button" className="event-file-preview" title="View larger" onClick={() => setViewing({ url: preview, name })}>
+          <img src={preview} alt="" />
+        </button>
+      ) : (
+        <span className="local-file-icon">
+          <FileIcon />
+        </span>
+      )}
+      <span className="local-file-text">
+        <strong title={name}>{name}</strong>
+        <span>{formatBytes(size)}</span>
+      </span>
+      <button type="button" className="composer-extra-close" aria-label={`Remove ${name}`} title="Remove" onClick={onRemove}>
+        ×
+      </button>
+    </li>
+  )
+
+  return (
+    <div
+      className={dragging ? "task-form-card event-files-field dragging" : "task-form-card event-files-field"}
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return
+        event.preventDefault()
+        setDragging(true)
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false)
+      }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.types.includes("Files")) return
+        event.preventDefault()
+        setDragging(false)
+        add(event.dataTransfer.files)
+      }}
+      onPaste={(event) => {
+        if (event.clipboardData.files.length === 0) return
+        event.preventDefault()
+        add(event.clipboardData.files)
+      }}
+    >
+      <div className="event-files-head">
+        <span>Attachments</span>
+        <button type="button" className="text-button" disabled={room <= 0} onClick={() => inputRef.current?.click()}>
+          <AttachIcon />
+          Add files
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(event) => {
+            add(event.target.files ?? [])
+            event.target.value = ""
+          }}
+        />
+      </div>
+      {kept.length + pending.length === 0 ? (
+        <p className="hint task-form-hint">Drop files here or paste an image. Up to 25 MB each.</p>
+      ) : (
+        <ul className="event-file-list">
+          {kept.map((file) =>
+            row(file.id, file.name, file.size, isImage(file.mime) ? (keptUrls.get(file.id) ?? null) : null, () =>
+              onKeptChange(kept.filter((item) => item.id !== file.id)),
+            ),
+          )}
+          {pending.map(({ key, file }) =>
+            row(key, file.name || "Pasted image", file.size, pendingUrls.get(key) ?? null, () =>
+              onPendingChange(pending.filter((item) => item.key !== key)),
+            ),
+          )}
+        </ul>
+      )}
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {viewing && <ImageViewer url={viewing.url} name={viewing.name} onClose={closeViewer} />}
+    </div>
+  )
+}
+
 function Schedule({
   events,
   users,
@@ -1374,6 +1642,15 @@ function Schedule({
             <span>
               Status: <b className={`event-card-state ${state}`}>{stateLabel}</b>
             </span>
+            {event.files.length > 0 && (
+              <span
+                className="event-card-files"
+                title={event.files.length === 1 ? "1 attachment" : `${event.files.length} attachments`}
+              >
+                <AttachIcon />
+                {event.files.length}
+              </span>
+            )}
             <span className="schedule-participants event-card-people">
               <PersonAvatar users={users} id={event.createdBy} prefix="Created by " />
               {event.participantIds
@@ -1472,6 +1749,9 @@ function EventDetail({
   onEdit: () => void
   onClose: () => void
 }) {
+  const [viewing, setViewing] = useState<{ file: EventFile; url: string } | null>(null)
+  const closeViewer = useCallback(() => setViewing(null), [])
+
   useEffect(() => {
     if (covered) return
     function onKey(key: KeyboardEvent) {
@@ -1597,8 +1877,25 @@ function EventDetail({
             </h3>
             {event.notes ? <p>{event.notes}</p> : <p className="empty">No notes.</p>}
           </div>
+          {event.files.length > 0 && (
+            <div className="task-drawer-description">
+              <h3>
+                <AttachIcon className="fact-icon" />
+                Attachments
+              </h3>
+              <EventFiles files={event.files} onView={(file, url) => setViewing({ file, url })} />
+            </div>
+          )}
         </div>
       </aside>
+      {viewing && (
+        <ImageViewer
+          url={viewing.url}
+          name={viewing.file.name}
+          onSave={() => saveEventFile(viewing.file)}
+          onClose={closeViewer}
+        />
+      )}
     </div>
   )
 }
@@ -1630,6 +1927,10 @@ function EventEditor({
   const [notes, setNotes] = useState(event?.notes ?? "")
   const [participantIds, setParticipantIds] = useState<string[]>(event?.participantIds ?? [])
   const [visibility, setVisibility] = useState<EventVisibility>(event?.visibility ?? "leaders")
+  const [keptFiles, setKeptFiles] = useState<EventFile[]>(event?.files ?? [])
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
+  // A new event's id once it is saved, so saving again after a file fails updates it, not adds another.
+  const savedIdRef = useRef<string | null>(null)
 
   return (
     <DeskModal
@@ -1638,8 +1939,8 @@ function EventEditor({
       onSave={async () => {
         // An end time earlier than the start means the event runs past midnight.
         const endDate = endTime <= startTime ? addDays(date, 1) : date
-        await saveEvent({
-          id: event?.id,
+        const id = await saveEvent({
+          id: event?.id ?? savedIdRef.current ?? undefined,
           title,
           location,
           notes,
@@ -1654,7 +1955,20 @@ function EventEditor({
           visibility,
           locked: event?.locked ?? false,
         })
-        await onSaved()
+        savedIdRef.current = id
+        try {
+          const removed = (event?.files ?? []).filter((file) => !keptFiles.some((kept) => kept.id === file.id))
+          await removeEventFiles(removed)
+          // One at a time, dropping each from the list once it is attached, so a retry skips it.
+          let left = pendingFiles
+          for (const item of pendingFiles) {
+            await addEventFiles(id, [item.file])
+            left = left.filter((other) => other.key !== item.key)
+            setPendingFiles(left)
+          }
+        } finally {
+          await onSaved()
+        }
       }}
       onDelete={
         event
@@ -1741,6 +2055,12 @@ function EventEditor({
         users={users}
         leaders={leaders}
         selfId={selfId}
+      />
+      <EventFilesField
+        kept={keptFiles}
+        pending={pendingFiles}
+        onKeptChange={setKeptFiles}
+        onPendingChange={setPendingFiles}
       />
     </DeskModal>
   )

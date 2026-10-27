@@ -229,7 +229,7 @@ function parseEmails(value: string) {
   return unique
 }
 
-function safeFileName(name: string) {
+export function safeFileName(name: string) {
   const base = name.split(/[/\\]/).pop() ?? "file"
   const cleaned = base.replace(/[^\w.\- ()]/g, "_").slice(0, 120)
   return cleaned || "file"
