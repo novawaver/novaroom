@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS reads (
   chat TEXT PRIMARY KEY,
   up_to INTEGER NOT NULL
 );
+-- Messages this person deleted from this computer, so a copy sent again when an app reconnects is
+-- not kept again.
+CREATE TABLE IF NOT EXISTS removed (
+  id TEXT PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS directory (
   user_id TEXT NOT NULL,
   public_key TEXT NOT NULL,
@@ -510,7 +515,7 @@ impl Session {
         let _ = self.app.emit("local-chat-peers", self.peer_list());
     }
 
-    /// Saves a message unless it is already here. True if it was new.
+    /// Saves a message unless it is already here or was deleted here. True if it was new.
     fn store(&self, item: &LocalMessage) -> bool {
         let db = self.db.lock().unwrap();
         let file = item.file.as_ref();
@@ -518,7 +523,8 @@ impl Session {
             "INSERT OR IGNORE INTO messages
                (id, chat, sender_id, sender_name, body, sent_at, delivered, read, reply_to,
                 file_name, file_mime, file_size, file_state, file_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13
+             WHERE NOT EXISTS (SELECT 1 FROM removed WHERE id = ?1)",
             params![
                 item.id,
                 item.chat,
@@ -537,6 +543,27 @@ impl Session {
         )
         .map(|changed| changed > 0)
         .unwrap_or(false)
+    }
+
+    /// Deletes messages and their files from this computer, and remembers them so they are not
+    /// kept again. Others keep their copies.
+    fn remove(&self, ids: &[String]) -> Result<(), String> {
+        {
+            let mut db = self.db.lock().unwrap();
+            let transaction = db.transaction().map_err(message)?;
+            for id in ids {
+                transaction
+                    .execute("INSERT OR IGNORE INTO removed (id) VALUES (?1)", params![id])
+                    .map_err(message)?;
+                transaction.execute("DELETE FROM messages WHERE id = ?1", params![id]).map_err(message)?;
+            }
+            transaction.commit().map_err(message)?;
+        }
+        // Ids are folder names here, so only real ones are used to find files.
+        for id in ids.iter().filter(|id| valid_user_id(id)) {
+            let _ = std::fs::remove_dir_all(self.files_dir.join(id));
+        }
+        Ok(())
     }
 
     /// One message as the app shows it, with what it replies to.
@@ -1456,6 +1483,30 @@ pub async fn local_chat_save_file(
     let target = picked.into_path().map_err(message)?;
     std::fs::copy(source, target).map_err(message)?;
     Ok(true)
+}
+
+/// Deletes messages from this computer only. Others keep their copies.
+#[tauri::command]
+pub fn local_chat_delete_messages(state: tauri::State<'_, LocalChat>, ids: Vec<String>) -> Result<(), String> {
+    let session = running(&state)?;
+    session.remove(&ids)
+}
+
+/// Deletes every message of one chat from this computer only. Others keep their copies.
+#[tauri::command]
+pub fn local_chat_clear(state: tauri::State<'_, LocalChat>, chat: String) -> Result<(), String> {
+    let session = running(&state)?;
+    let ids: Vec<String> = {
+        let db = session.db.lock().unwrap();
+        let mut statement = db.prepare("SELECT id FROM messages WHERE chat = ?1").map_err(message)?;
+        let ids = statement
+            .query_map(params![chat], |row| row.get(0))
+            .map_err(message)?
+            .collect::<Result<_, _>>()
+            .map_err(message)?;
+        ids
+    };
+    session.remove(&ids)
 }
 
 /// Tells the room, or the other person in a direct chat, that this person started or stopped typing.

@@ -53,6 +53,8 @@ type LocalConversation = {
 type LocalDb = {
   conversations: LocalConversation[]
   messages: ChatMessage[]
+  // What each person cleared or deleted for themselves, by "userId:conversationId".
+  hidden?: Record<string, { clearedAt: string | null; ids: string[] }>
 }
 
 type MessageRow = {
@@ -86,6 +88,7 @@ function readDb(): LocalDb {
     return {
       conversations: parsed.conversations ?? [],
       messages: parsed.messages ?? [],
+      hidden: parsed.hidden ?? {},
     }
   } catch {
     return { conversations: [], messages: [] }
@@ -154,18 +157,30 @@ function senderAvatar(userId: string) {
   return readProfiles()[userId]?.avatarUrl ?? null
 }
 
-function summaryFor(
-  conversation: LocalConversation,
-  session: Session,
-  messages: ChatMessage[],
-): ChatSummary {
+/** What one person no longer sees in a chat: everything up to clearedAt, and the messages in ids. */
+type Hidden = { clearedAt: string | null; ids: ReadonlySet<string> }
+
+const NOTHING_HIDDEN: Hidden = { clearedAt: null, ids: new Set() }
+
+function isShown(message: Pick<ChatMessage, "id" | "createdAt">, hidden: Hidden) {
+  return (!hidden.clearedAt || message.createdAt > hidden.clearedAt) && !hidden.ids.has(message.id)
+}
+
+function previewHidden(db: LocalDb, userId: string, conversationId: string): Hidden {
+  const entry = db.hidden?.[`${userId}:${conversationId}`]
+  return entry ? { clearedAt: entry.clearedAt, ids: new Set(entry.ids) } : NOTHING_HIDDEN
+}
+
+function summaryFor(conversation: LocalConversation, session: Session, db: LocalDb): ChatSummary {
   const kind = conversation.kind ?? "direct"
   const blocked = previewBlockedIds(session.userId)
-  const thread = messages
+  const hidden = previewHidden(db, session.userId, conversation.id)
+  const thread = db.messages
     .filter(
       (message) =>
         message.conversationId === conversation.id &&
-        (message.senderId === session.userId || !blocked.has(message.senderId)),
+        (message.senderId === session.userId || !blocked.has(message.senderId)) &&
+        isShown(message, hidden),
     )
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   const latest = thread[thread.length - 1]
@@ -311,28 +326,56 @@ function withDeleted(message: ChatMessage): ChatMessage {
   }
 }
 
-async function latestMessage(conversationId: string) {
+/** A chat's messages that this person still sees, newest last unless `newestFirst`. */
+function shownMessages(columns: string, conversationId: string, hidden: Hidden, newestFirst = false) {
+  let query = supabase!.from("messages").select(columns).eq("conversation_id", conversationId)
+  if (hidden.clearedAt) query = query.gt("created_at", hidden.clearedAt)
+  if (hidden.ids.size > 0) query = query.not("id", "in", `(${[...hidden.ids].join(",")})`)
+  return query.order("created_at", { ascending: !newestFirst })
+}
+
+/**
+ * What this person cleared or deleted for themselves, in every chat. Nothing is hidden when the
+ * hidden messages SQL script has not been run yet.
+ */
+async function loadHidden(userId: string): Promise<Map<string, Hidden>> {
+  const hidden = new Map<string, { clearedAt: string | null; ids: Set<string> }>()
+  if (!supabase) return hidden
+  const [cleared, rows] = await Promise.all([
+    supabase.from("conversation_members").select("conversation_id, cleared_at").eq("user_id", userId),
+    supabase.from("hidden_messages").select("conversation_id, message_id").eq("user_id", userId),
+  ])
+  const entry = (conversationId: string) => {
+    let found = hidden.get(conversationId)
+    if (!found) {
+      found = { clearedAt: null, ids: new Set() }
+      hidden.set(conversationId, found)
+    }
+    return found
+  }
+  for (const row of (cleared.error ? [] : cleared.data) as Array<{ conversation_id: string; cleared_at: string | null }>) {
+    if (row.cleared_at) entry(row.conversation_id).clearedAt = row.cleared_at
+  }
+  for (const row of (rows.error ? [] : rows.data) as Array<{ conversation_id: string; message_id: string }>) {
+    entry(row.conversation_id).ids.add(row.message_id)
+  }
+  return hidden
+}
+
+async function latestMessage(conversationId: string, hidden: Hidden) {
   if (!supabase) return null
-  const first = await supabase
-    .from("messages")
-    .select("body, created_at, attachment_name, deleted_at")
-    .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: false })
+  const first = await shownMessages("body, created_at, attachment_name, deleted_at", conversationId, hidden, true)
     .limit(1)
     .maybeSingle()
   if (first.error && /deleted_at/.test(first.error.message)) {
-    const second = await supabase
-      .from("messages")
-      .select("body, created_at, attachment_name")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: false })
+    const second = await shownMessages("body, created_at, attachment_name", conversationId, hidden, true)
       .limit(1)
       .maybeSingle()
     if (second.error) throw second.error
-    return second.data
+    return second.data as { body: string | null; created_at: string; attachment_name: string | null } | null
   }
   if (first.error) throw first.error
-  return first.data
+  return first.data as { body: string | null; created_at: string; attachment_name: string | null; deleted_at: string | null } | null
 }
 
 async function loadConversationRows(ids: string[]) {
@@ -350,14 +393,14 @@ export async function listChats(session: Session): Promise<ChatSummary[]> {
     const db = readDb()
     return db.conversations
       .filter((conversation) => conversation.memberIds.includes(session.userId))
-      .map((conversation) => summaryFor(conversation, session, db.messages))
+      .map((conversation) => summaryFor(conversation, session, db))
       .sort(byRecent)
   }
 
-  const { data: mine, error } = await supabase
-    .from("conversation_members")
-    .select("conversation_id")
-    .eq("user_id", session.userId)
+  const [{ data: mine, error }, hiddenByChat] = await Promise.all([
+    supabase.from("conversation_members").select("conversation_id").eq("user_id", session.userId),
+    loadHidden(session.userId),
+  ])
   if (error) throw error
   const ids = (mine ?? []).map((row) => row.conversation_id as string)
   if (ids.length === 0) return []
@@ -398,7 +441,7 @@ export async function listChats(session: Session): Promise<ChatSummary[]> {
       const id = conversation.id as string
       const kind = (conversation.kind as "direct" | "group" | "room") || "direct"
       const memberIds = membersByChat.get(id) ?? []
-      const latest = await latestMessage(id)
+      const latest = await latestMessage(id, hiddenByChat.get(id) ?? NOTHING_HIDDEN)
       const lastBody = latest
         ? messageLabel({
             body: (latest.body as string | null) ?? "",
@@ -542,10 +585,12 @@ export async function startGroupChat(session: Session, title: string, emails: st
   return data as string
 }
 
-export async function loadMessages(conversationId: string): Promise<ChatMessage[]> {
+export async function loadMessages(session: Session, conversationId: string): Promise<ChatMessage[]> {
   if (!supabase) {
-    return readDb()
-      .messages.filter((message) => message.conversationId === conversationId)
+    const db = readDb()
+    const hidden = previewHidden(db, session.userId, conversationId)
+    return db.messages
+      .filter((message) => message.conversationId === conversationId && isShown(message, hidden))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
       .map((message) =>
         withDeleted({
@@ -557,28 +602,53 @@ export async function loadMessages(conversationId: string): Promise<ChatMessage[
       )
   }
 
-  const first = await supabase
-    .from("messages")
-    .select(`${MESSAGE_COLUMNS}, deleted_at`)
-    .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: true })
-    .limit(500)
+  const hidden = (await loadHidden(session.userId)).get(conversationId) ?? NOTHING_HIDDEN
+  const first = await shownMessages(`${MESSAGE_COLUMNS}, deleted_at`, conversationId, hidden).limit(500)
   const result =
     first.error && /deleted_at/.test(first.error.message)
-      ? await supabase
-          .from("messages")
-          .select(MESSAGE_COLUMNS)
-          .eq("conversation_id", conversationId)
-          .order("created_at", { ascending: true })
-          .limit(500)
+      ? await shownMessages(MESSAGE_COLUMNS, conversationId, hidden).limit(500)
       : first
   if (result.error) throw result.error
-  const rows = (result.data ?? []) as MessageRow[]
+  const rows = (result.data ?? []) as unknown as MessageRow[]
   const senders = await sendersFor([...new Set(rows.map((row) => row.sender_id))])
   const urls = await signedUrls(
     rows.map((row) => row.attachment_path).filter((path): path is string => Boolean(path)),
   )
   return rows.map((row) => rowToMessage(row, senders, urls))
+}
+
+/** Removes messages from this person's view of a chat. Everyone else still sees them. */
+export async function hideMessages(session: Session, conversationId: string, ids: string[]) {
+  if (ids.length === 0) return
+  if (!supabase) {
+    const db = readDb()
+    const key = `${session.userId}:${conversationId}`
+    const entry = db.hidden?.[key] ?? { clearedAt: null, ids: [] }
+    db.hidden = { ...db.hidden, [key]: { ...entry, ids: [...new Set([...entry.ids, ...ids])] } }
+    writeDb(db)
+    return
+  }
+  const { error } = await supabase.rpc("hide_messages", { cid: conversationId, message_ids: ids })
+  if (error) throw hiddenMessagesError(error)
+}
+
+/** Removes every message so far from this person's view of a chat. Everyone else still sees them. */
+export async function clearConversation(session: Session, conversationId: string) {
+  if (!supabase) {
+    const db = readDb()
+    db.hidden = { ...db.hidden, [`${session.userId}:${conversationId}`]: { clearedAt: new Date().toISOString(), ids: [] } }
+    writeDb(db)
+    return
+  }
+  const { error } = await supabase.rpc("clear_conversation", { cid: conversationId })
+  if (error) throw hiddenMessagesError(error)
+}
+
+function hiddenMessagesError(error: { message: string }) {
+  if (/does not exist|schema cache|Could not find the function|404/i.test(error.message)) {
+    return new Error("Run the hidden messages SQL script (20261026120000_hidden_messages.sql), then try again.")
+  }
+  return new Error(error.message)
 }
 
 export async function sendMessage(

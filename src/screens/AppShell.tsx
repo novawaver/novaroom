@@ -3,6 +3,7 @@ import { useAuth } from "../auth"
 import { notifyIncoming, onNotificationClick, setUnreadBadge, windowIsActive } from "../lib/desktop"
 import { useReconnectEpoch } from "../lib/network"
 import { readUnread, unreadTotal, writeUnread } from "../lib/unread"
+import { loadDraft, saveDraft } from "../lib/drafts"
 import {
   blockUser,
   deleteOwnMessage,
@@ -15,6 +16,8 @@ import {
   type ReportReason,
 } from "../lib/safety"
 import {
+  clearConversation,
+  hideMessages,
   listChats,
   loadMessages,
   messageLabel,
@@ -50,6 +53,15 @@ import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
 import { groupTables } from "../lib/vault"
 import { Vault, VaultLeaveDialog, useVault, type VaultState } from "./Vault"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
+import {
+  ConfirmDialog,
+  SelectCheck,
+  SelectionBar,
+  ThreadMenu,
+  selectableRow,
+  useMessageSelection,
+  type ConfirmAction,
+} from "./ChatTools"
 
 function NewChatIcon() {
   return (
@@ -596,6 +608,26 @@ const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
 
 type ChatMode = "online" | "local"
 
+function OnlineChatsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5s1.2-6.1 3.5-8.5z" />
+    </svg>
+  )
+}
+
+function LocalChatsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="9" y="3.5" width="6" height="5" rx="1.2" />
+      <rect x="3" y="15.5" width="6" height="5" rx="1.2" />
+      <rect x="15" y="15.5" width="6" height="5" rx="1.2" />
+      <path d="M12 8.5v3.5M6 15.5V12h12v3.5" />
+    </svg>
+  )
+}
+
 /** Switches the Chats page between chats over the internet and Local chat on the office network. */
 function ChatModeSwitch({
   mode,
@@ -606,13 +638,18 @@ function ChatModeSwitch({
   unread: Record<ChatMode, number>
   onChange: (mode: ChatMode) => void
 }) {
-  const modes: Array<{ id: ChatMode; label: string; hint: string }> = [
-    { id: "online", label: "Online", hint: "Chats over the internet" },
-    { id: "local", label: "Local", hint: "Chats with people on this network, without internet" },
+  const modes: Array<{ id: ChatMode; label: string; hint: string; icon: ComponentType }> = [
+    { id: "online", label: "Online chats", hint: "Chats over the internet", icon: OnlineChatsIcon },
+    {
+      id: "local",
+      label: "Local chats",
+      hint: "Chats with people on this network, without internet",
+      icon: LocalChatsIcon,
+    },
   ]
   return (
     <div className="chat-mode" role="tablist" aria-label="Kind of chat">
-      {modes.map(({ id, label, hint }) => (
+      {modes.map(({ id, label, hint, icon: Icon }) => (
         <button
           key={id}
           type="button"
@@ -622,6 +659,7 @@ function ChatModeSwitch({
           title={hint}
           onClick={() => onChange(id)}
         >
+          <Icon />
           {label}
           {unread[id] > 0 && <span className="chat-mode-count">{unread[id] > 9 ? "9+" : unread[id]}</span>}
         </button>
@@ -836,6 +874,9 @@ export function AppShell({ local }: { local: LocalChatState }) {
   const [chatsLoaded, setChatsLoaded] = useState(false)
   const [roomsLoaded, setRoomsLoaded] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // The open chat, for code that finishes after the person may have moved on.
+  const selectedIdRef = useRef(selectedId)
+  selectedIdRef.current = selectedId
   // The conversation last opened in each section, restored when switching back to it.
   const lastOpenRef = useRef<Record<"chats" | "rooms", string | null>>({ chats: null, rooms: null })
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -966,14 +1007,14 @@ export function AppShell({ local }: { local: LocalChatState }) {
   useEffect(() => () => void setUnreadBadge(0), [])
 
   useEffect(() => {
-    if (!selectedId) {
+    if (!session || !selectedId) {
       setMessages([])
       setLoadingMessages(false)
       return
     }
     let active = true
     setLoadingMessages(true)
-    loadMessages(selectedId)
+    loadMessages(session, selectedId)
       .then((next) => {
         if (active) setMessages(next)
       })
@@ -1003,7 +1044,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
           })
           const openId = selectedRef.current
           if (!openId) return
-          void loadMessages(openId).then((next) => {
+          void loadMessages(session, openId).then((next) => {
             if (active && selectedRef.current === openId) setMessages(next)
           })
         })
@@ -1091,7 +1132,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
         void listChats(session).then(setChats).catch(() => undefined)
         const openId = selectedRef.current
         if (!openId) return
-        void loadMessages(openId).then(setMessages).catch(() => undefined)
+        void loadMessages(session, openId).then(setMessages).catch(() => undefined)
       },
     })
   }, [session, epoch])
@@ -1121,7 +1162,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
       })
     const openId = selectedRef.current
     if (openId) {
-      void loadMessages(openId)
+      void loadMessages(session, openId)
         .then((next) => {
           if (!active || selectedRef.current !== openId) return
           setMessages(next)
@@ -1147,6 +1188,10 @@ export function AppShell({ local }: { local: LocalChatState }) {
   // Who else is typing in the open chat. People this person blocked are never shown.
   const typing = useTyping(selectedId, session?.userId ?? null, profile?.displayName ?? "")
   const typingNow = typingText(typing.typists.filter((typist) => !blockedIds.includes(typist.userId)))
+
+  // Choosing messages to delete, and the dialog that confirms clearing or deleting.
+  const selection = useMessageSelection(selectedId)
+  const [confirm, setConfirm] = useState<{ title: string; text: string; actions: ConfirmAction[] } | null>(null)
 
   // Messages keep the name and picture their sender had when they loaded; show changes right away.
   useEffect(
@@ -1217,6 +1262,18 @@ export function AppShell({ local }: { local: LocalChatState }) {
     : readable
   const closed = lock !== "open"
   const reporting = visible.find((message) => message.id === reportId) ?? null
+  // A short line under the chat's name: whether the other person is around, or who is in it.
+  const threadStatus = !selected
+    ? ""
+    : selected.kind !== "direct"
+      ? selected.kind === "group"
+        ? `${selected.memberCount} ${selected.memberCount === 1 ? "person" : "people"}`
+        : selected.detail
+      : !selected.otherUserId
+        ? "Account deleted"
+        : blockedIds.includes(selected.otherUserId)
+          ? "Blocked"
+          : PRESENCE_LABELS[presenceOf(selected.otherUserId)]
 
   function replaceMessage(message: ChatMessage) {
     setMessages((current) => current.map((item) => (item.id === message.id ? { ...item, ...message } : item)))
@@ -1239,23 +1296,86 @@ export function AppShell({ local }: { local: LocalChatState }) {
     }
   }
 
+  // Deletes one of this person's messages for everyone; the others see that it was removed.
+  async function deleteForEveryone(message: ChatMessage) {
+    await deleteOwnMessage(session!, message.id)
+    replaceMessage({
+      ...message,
+      deleted: true,
+      body: "",
+      attachmentUrl: null,
+      attachmentName: null,
+      attachmentMime: null,
+      attachmentSize: null,
+    })
+  }
+
   async function onDelete(message: ChatMessage) {
     if (!window.confirm("Delete this message? People in the chat will see that it was removed.")) return
     setSendError("")
     try {
-      await deleteOwnMessage(session!, message.id)
-      replaceMessage({
-        ...message,
-        deleted: true,
-        body: "",
-        attachmentUrl: null,
-        attachmentName: null,
-        attachmentMime: null,
-        attachmentSize: null,
-      })
+      await deleteForEveryone(message)
     } catch (caught) {
       setSendError(caught instanceof Error ? caught.message : "Could not delete that message.")
     }
+  }
+
+  // Asks how to delete the chosen messages. Only a person's own messages can go for everyone.
+  function onDeleteChosen() {
+    const chosen = visible.filter((message) => selection.chosen.has(message.id))
+    if (!selectedId || chosen.length === 0) return
+    const chatId = selectedId
+    const ids = chosen.map((message) => message.id)
+    const these = chosen.length === 1 ? "this message" : `these ${chosen.length} messages`
+    const allMine = chosen.every((message) => message.senderId === session!.userId && !message.deleted)
+    const forMe: ConfirmAction = {
+      label: "Delete for me",
+      danger: !allMine,
+      onSelect: async () => {
+        await hideMessages(session!, chatId, ids)
+        const gone = new Set(ids)
+        setMessages((current) => current.filter((message) => !gone.has(message.id)))
+        selection.stop()
+        void listChats(session!).then(setChats).catch(() => undefined)
+      },
+    }
+    const forEveryone: ConfirmAction = {
+      label: "Delete for everyone",
+      danger: true,
+      onSelect: async () => {
+        for (const message of chosen) await deleteForEveryone(message)
+        selection.stop()
+      },
+    }
+    setConfirm({
+      title: chosen.length === 1 ? "Delete message?" : `Delete ${chosen.length} messages?`,
+      text: allMine
+        ? `Delete for everyone removes ${these} from the chat, and the others see that a message was removed. Delete for me only removes ${these} from your view.`
+        : `This removes ${these} from your view only. Others in the chat still see ${chosen.length === 1 ? "it" : "them"}.`,
+      actions: allMine ? [forMe, forEveryone] : [forMe],
+    })
+  }
+
+  // Asks before removing every message so far from this person's view of the open chat.
+  function onClearChat() {
+    if (!selectedId) return
+    const chatId = selectedId
+    setConfirm({
+      title: "Clear this chat?",
+      text: "This removes every message in this chat from your view. Others in the chat still see them.",
+      actions: [
+        {
+          label: "Clear chat",
+          danger: true,
+          onSelect: async () => {
+            await clearConversation(session!, chatId)
+            selection.stop()
+            if (selectedRef.current === chatId) setMessages([])
+            setChats((current) => current.map((chat) => (chat.id === chatId ? { ...chat, lastBody: "" } : chat)))
+          },
+        },
+      ],
+    })
   }
 
   async function onReport() {
@@ -1352,7 +1472,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
     const text = body
     if (!text.trim()) return
     markChatRead(selectedId)
-    setBody("")
+    updateBody("")
     setSendError("")
 
     // Show the message right away, then swap in the saved copy once the server confirms it.
@@ -1392,7 +1512,9 @@ export function AppShell({ local }: { local: LocalChatState }) {
       )
     } catch (caught) {
       setMessages((current) => current.filter((item) => item.id !== localId))
-      setBody(text)
+      // Puts the text back as the chat's draft, even if the person has moved to another chat.
+      saveDraft(session!.userId, draft.conversationId, text)
+      if (selectedIdRef.current === draft.conversationId) setBody(text)
       setSendError(caught instanceof Error ? caught.message : "Could not send that message.")
     } finally {
       setSendingIds((current) => {
@@ -1403,12 +1525,22 @@ export function AppShell({ local }: { local: LocalChatState }) {
     }
   }
 
-  // Grow the message box with its content, from one line up to a few, then scroll.
+  // Keeps each chat's unsent text, so leaving the chat or the page does not lose it.
+  function updateBody(text: string) {
+    setBody(text)
+    if (session && selectedId) saveDraft(session.userId, selectedId, text)
+  }
+
+  useEffect(() => {
+    setBody(session && selectedId ? loadDraft(session.userId, selectedId) : "")
+  }, [selectedId, session?.userId])
+
+  // Grow the message box with its content, from one line up to six (the CSS max-height), then scroll.
   useEffect(() => {
     const box = bodyRef.current
     if (!box) return
     box.style.height = "auto"
-    box.style.height = `${Math.min(box.scrollHeight, 160)}px`
+    box.style.height = `${box.scrollHeight + box.offsetHeight - box.clientHeight}px`
   }, [body, selectedId])
 
   const conversations = chats.filter((chat) => chat.kind !== "room")
@@ -1804,7 +1936,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
             )}
           </form>
         )}
-        <div className="chat-list">
+        <div className={section === "rooms" ? "chat-list room-list" : "chat-list"}>
           {section === "chats" && !chatsLoaded && <ListSkeleton />}
           {section === "chats" && chatsLoaded && (conversations.length === 0 ? (
             <p className="empty-list">No chats yet. Start a direct chat or a group.</p>
@@ -1940,9 +2072,19 @@ export function AppShell({ local }: { local: LocalChatState }) {
       ) : (
         <section className="thread">
           <header className="thread-bar">
-            <div>
+            {selected && (
+              <span className="thread-photo">
+                <span className="avatar thread-avatar">
+                  {selected.avatarUrl ? <img src={selected.avatarUrl} alt="" /> : <span>{initials(selected.title)}</span>}
+                </span>
+                {selected.kind === "direct" && selected.otherUserId && (
+                  <span className={`presence-dot thread-presence ${presenceOf(selected.otherUserId)}`} />
+                )}
+              </span>
+            )}
+            <div className="thread-who">
               <h1>{selected ? selected.title : "Messages"}</h1>
-              {selected?.detail && <p className="thread-email">{selected.detail}</p>}
+              {threadStatus && <p className="thread-email">{threadStatus}</p>}
             </div>
             {selected && (
               <div className="thread-actions">
@@ -1969,12 +2111,13 @@ export function AppShell({ local }: { local: LocalChatState }) {
                   aria-label="Search this chat"
                   onChange={(event) => setSearch(event.target.value)}
                 />
+                <ThreadMenu onSelect={selection.start} onClear={onClearChat} />
               </div>
             )}
           </header>
           {selected ? (
             <>
-              <div className="message-log" ref={logRef}>
+              <div className={selection.selecting ? "message-log selecting" : "message-log"} ref={logRef}>
                 {loadingMessages ? (
                   <div className="thread-loading" role="status" aria-label="Loading messages">
                     <span className="loading-spinner" aria-hidden="true" />
@@ -1993,13 +2136,18 @@ export function AppShell({ local }: { local: LocalChatState }) {
                         {avatarUrl ? <img src={avatarUrl} alt="" /> : <span>{initials(name)}</span>}
                       </span>
                     )
+                    // Messages still being sent can't be chosen yet.
+                    const choosable = !sendingIds.has(message.id)
+                    const chosen = selection.selecting && selection.chosen.has(message.id)
                     return (
                       <Fragment key={message.id}>
-                        <div className={mine ? "message-row mine" : "message-row theirs"}>
+                        <div
+                          className={`message-row ${mine ? "mine" : "theirs"}${selection.selecting && choosable ? " selectable" : ""}${chosen ? " chosen" : ""}`}
+                          {...selectableRow(selection, message.id, choosable)}
+                        >
+                          {selection.selecting && choosable && <SelectCheck checked={chosen} />}
                           {!mine && avatar}
                           <article className={mine ? "bubble mine" : "bubble theirs"}>
-                            {(selected.kind === "group" || selected.kind === "room") &&
-                              message.senderId !== session.userId && <p className="sender-name">{message.senderName}</p>}
                             {message.attachmentUrl && isImage(message.attachmentMime) && (
                               <img
                                 className="bubble-image"
@@ -2039,7 +2187,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
                                   </svg>
                                 ))}
                             </span>
-                            {!message.deleted && !sendingIds.has(message.id) && (
+                            {!selection.selecting && !message.deleted && !sendingIds.has(message.id) && (
                               <MessageMenu
                                 side={message.senderId === session.userId ? "mine" : "theirs"}
                                 actions={
@@ -2089,88 +2237,94 @@ export function AppShell({ local }: { local: LocalChatState }) {
                   </>
                 )}
               </p>
-              <form className="composer" onSubmit={onSend}>
-                {closed && (
-                  <p className="notice" role="status">
-                    {messagingLockMessage(lock)}
-                  </p>
-                )}
-                {reporting && (
-                  <div className="report-box">
-                    <label>
-                      Report this message
-                      <select
-                        value={reportReason}
-                        onChange={(event) => setReportReason(event.target.value as ReportReason)}
-                      >
-                        <option value="harassment">Harassment</option>
-                        <option value="spam">Spam</option>
-                        <option value="leak">Confidential client information</option>
-                        <option value="other">Something else</option>
-                      </select>
-                    </label>
-                    <label>
-                      Note, optional
-                      <textarea
-                        value={reportNote}
-                        maxLength={1000}
-                        rows={2}
-                        onChange={(event) => setReportNote(event.target.value)}
-                      />
-                    </label>
-                    <div className="form-actions">
-                      <button
-                        type="button"
-                        className="button secondary"
-                        onClick={() => {
-                          setReportId(null)
-                          setReportNote("")
-                        }}
-                      >
-                        Cancel
-                      </button>
-                      <button type="button" className="button" onClick={() => void onReport()}>
-                        Send report
-                      </button>
-                    </div>
-                  </div>
-                )}
-                {sendError && (
-                  <p className="form-error" role="alert">
-                    {sendError}
-                  </p>
-                )}
-                <div className="composer-row">
-                  <textarea
-                    ref={bodyRef}
-                    value={body}
-                    maxLength={4000}
-                    rows={1}
-                    placeholder="Write a message"
-                    aria-label="Message"
-                    disabled={closed}
-                    onChange={(event) => {
-                      setBody(event.target.value)
-                      typing.onType(event.target.value.trim() !== "")
-                      if (selectedId) markChatRead(selectedId)
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault()
-                        event.currentTarget.form?.requestSubmit()
-                      }
-                    }}
-                  />
-                  <button
-                    type="submit"
-                    className="button send-button"
-                    aria-label="Send"
-                    disabled={closed || !body.trim()}
-                  >
-                    <SendIcon />
-                  </button>
+              {selection.selecting ? (
+                <div className="composer">
+                  <SelectionBar count={selection.chosen.size} onCancel={selection.stop} onDelete={onDeleteChosen} />
                 </div>
-              </form>
+              ) : (
+                <form className="composer" onSubmit={onSend}>
+                  {closed && (
+                    <p className="notice" role="status">
+                      {messagingLockMessage(lock)}
+                    </p>
+                  )}
+                  {reporting && (
+                    <div className="report-box">
+                      <label>
+                        Report this message
+                        <select
+                          value={reportReason}
+                          onChange={(event) => setReportReason(event.target.value as ReportReason)}
+                        >
+                          <option value="harassment">Harassment</option>
+                          <option value="spam">Spam</option>
+                          <option value="leak">Confidential client information</option>
+                          <option value="other">Something else</option>
+                        </select>
+                      </label>
+                      <label>
+                        Note, optional
+                        <textarea
+                          value={reportNote}
+                          maxLength={1000}
+                          rows={2}
+                          onChange={(event) => setReportNote(event.target.value)}
+                        />
+                      </label>
+                      <div className="form-actions">
+                        <button
+                          type="button"
+                          className="button secondary"
+                          onClick={() => {
+                            setReportId(null)
+                            setReportNote("")
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button type="button" className="button" onClick={() => void onReport()}>
+                          Send report
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {sendError && (
+                    <p className="form-error" role="alert">
+                      {sendError}
+                    </p>
+                  )}
+                  <div className="composer-row">
+                    <textarea
+                      ref={bodyRef}
+                      value={body}
+                      maxLength={4000}
+                      rows={1}
+                      placeholder="Write a message"
+                      aria-label="Message"
+                      disabled={closed}
+                      onChange={(event) => {
+                        updateBody(event.target.value)
+                        typing.onType(event.target.value.trim() !== "")
+                        if (selectedId) markChatRead(selectedId)
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault()
+                          event.currentTarget.form?.requestSubmit()
+                        }
+                      }}
+                    />
+                    <button
+                      type="submit"
+                      className="button send-button"
+                      aria-label="Send"
+                      disabled={closed || !body.trim()}
+                    >
+                      <SendIcon />
+                    </button>
+                  </div>
+                </form>
+              )}
             </>
           ) : (
             <div className="thread-empty">
@@ -2192,6 +2346,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
         }}
       />
       <VaultLeaveDialog vault={vault} />
+      {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
     </div>
   )
 }

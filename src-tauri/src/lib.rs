@@ -53,7 +53,7 @@ fn request_quit(app: &tauri::AppHandle) {
     }
 }
 
-/// The large logo and the banner under the text of every toast. Toasts can only show images from
+/// The large logo and the banner across the top of every toast. Toasts can only show images from
 /// files, so these are written next to the app's other local data the first time they are needed.
 #[cfg(windows)]
 fn toast_images(app: &tauri::AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
@@ -147,9 +147,8 @@ fn notify(
             let clicked = app.clone();
             let mut toast = Toast::new(&app_id).title(&title).text1(&body).duration(Duration::Long);
             if let Some((logo, banner)) = &images {
-                // Inline rather than a hero image: Windows crops hero images to 2:1, while an inline
-                // image keeps its own, shorter shape. It shows under the text.
-                toast = toast.image(banner, "Novaroom");
+                // Windows' own banner slot across the top, which shows images at 2:1.
+                toast = toast.hero(banner, "Novaroom");
                 toast = match &sender {
                     Some(sender) => toast.icon(sender, IconCrop::Circular, &title),
                     None => toast.icon(logo, IconCrop::Square, "Novaroom"),
@@ -370,6 +369,8 @@ pub fn run() {
             localchat::local_chat_save_file,
             localchat::local_chat_typing,
             localchat::local_chat_mark_read,
+            localchat::local_chat_delete_messages,
+            localchat::local_chat_clear,
             watchdog::watchdog_beat
         ])
         .on_window_event(|window, event| {

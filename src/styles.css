@@ -971,6 +971,11 @@ textarea:focus {
   gap: 6px;
 }
 
+/* Rooms has no buttons beside its title, so its list sits closer to it. */
+.chat-list.room-list {
+  margin-top: 0;
+}
+
 .list-label {
   font-size: 12px;
   letter-spacing: 0.12em;
@@ -1296,6 +1301,149 @@ textarea:focus {
   font-size: 14px;
 }
 
+/* The chat's picture in its header, with the other person's presence on its edge. */
+.thread-photo {
+  position: relative;
+  flex: none;
+  display: grid;
+}
+
+.avatar.thread-avatar {
+  width: 40px;
+  height: 40px;
+  font-size: 14px;
+}
+
+.thread-presence {
+  right: -1px;
+  bottom: -1px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--paper);
+}
+
+.thread-who {
+  min-width: 0;
+}
+
+.thread-who h1,
+.thread-who .thread-email {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.thread-menu {
+  position: relative;
+}
+
+.thread-menu-button {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.thread-menu-button:hover:not(:disabled),
+.thread-menu-button[aria-expanded="true"] {
+  background: var(--side-soft);
+  color: var(--ink);
+}
+
+.thread-menu-button svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+/* Choosing messages to delete: the whole row is the checkbox. */
+.message-row.selectable {
+  margin: -4px -8px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.message-row.selectable > * {
+  pointer-events: none;
+}
+
+.message-row.selectable:hover {
+  background: color-mix(in srgb, var(--brand) 6%, transparent);
+}
+
+.message-row.selectable.chosen {
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
+}
+
+.message-row.selectable:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: -2px;
+}
+
+.message-row.mine .select-check {
+  margin-right: auto;
+}
+
+.select-check {
+  align-self: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+}
+
+.select-check svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+}
+
+.select-check.checked {
+  border-color: var(--brand);
+  background: var(--brand);
+}
+
+.select-check.checked svg {
+  opacity: 1;
+}
+
+.message-log.selecting .bubble-reply {
+  display: none;
+}
+
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.selection-count {
+  flex: 1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.selection-bar .button {
+  padding: 6px 14px;
+  font-size: 14px;
+}
+
 .message-menu {
   position: absolute;
   top: 50%;
@@ -1535,7 +1683,7 @@ select {
   position: relative;
   max-width: min(72%, 460px);
   padding: 9px 14px;
-  border-radius: 20px;
+  border-radius: 12px;
 }
 
 /* iMessage-style tail: a bubble-coloured curve, with a paper-coloured curve carving its inner edge. */
@@ -1648,7 +1796,7 @@ select {
 }
 
 .bubble.theirs {
-  background: color-mix(in srgb, var(--brand-bright) 50%, var(--paper));
+  background: color-mix(in srgb, var(--brand-bright) 25%, var(--paper));
   color: var(--ink);
 }
 
@@ -1682,22 +1830,29 @@ select {
 }
 
 .avatar.message-avatar {
-  width: 52px;
-  height: 52px;
-  font-size: 17px;
+  width: 36px;
+  height: 36px;
+  font-size: 13px;
+  /* Drawn above the bubble's tail and its paper-coloured cut-out, which reach into the gap. */
+  position: relative;
+  z-index: 1;
 }
 
-.sender-name {
-  margin: 0 0 4px;
-  font-size: 12px;
-  font-weight: 700;
+/* 6px from the bubble: the row's 12px gap less 6px. */
+.message-row.theirs .message-avatar {
+  margin-right: -6px;
 }
+
+.message-row.mine .message-avatar {
+  margin-left: -6px;
+}
+
 
 .bubble-image {
   display: block;
   max-width: 100%;
   max-height: 280px;
-  border-radius: 10px;
+  border-radius: 6px;
   margin-bottom: 6px;
 }
 
@@ -1723,10 +1878,11 @@ select {
 .composer textarea {
   flex: 1;
   resize: none;
-  max-height: 160px;
+  /* Six lines plus the vertical padding and border. */
+  max-height: calc(1.4em * 6 + 18px);
   overflow-y: auto;
   line-height: 1.4;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid var(--line);
   padding: 8px 12px;
   scrollbar-width: none;
@@ -1743,7 +1899,7 @@ select {
   padding: 0;
   display: grid;
   place-items: center;
-  border-radius: 12px;
+  border-radius: 8px;
 }
 
 .send-button svg {
@@ -5451,6 +5607,8 @@ code {
   align-items: center;
   justify-content: center;
   gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
   padding: 7px 10px;
   border: 0;
   border-radius: 9px;
@@ -5473,6 +5631,17 @@ code {
 .chat-mode-tab:focus-visible {
   outline: 2px solid var(--brand-bright);
   outline-offset: 1px;
+}
+
+.chat-mode-tab svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .chat-mode-count {
@@ -5558,7 +5727,7 @@ code {
   padding: 5px 9px;
   border: 0;
   border-left: 3px solid var(--brand);
-  border-radius: 8px;
+  border-radius: 6px;
   background: color-mix(in srgb, var(--paper) 55%, transparent);
   color: var(--ink);
   font: inherit;
@@ -5644,7 +5813,7 @@ code {
   width: 180px;
   height: 120px;
   margin-bottom: 6px;
-  border-radius: 10px;
+  border-radius: 6px;
   background: color-mix(in srgb, var(--paper) 55%, transparent);
 }
 
@@ -5655,7 +5824,7 @@ code {
   min-width: 220px;
   margin-bottom: 6px;
   padding: 8px 10px;
-  border-radius: 10px;
+  border-radius: 6px;
   background: color-mix(in srgb, var(--paper) 55%, transparent);
 }
 
@@ -5665,7 +5834,7 @@ code {
   height: 32px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 5px;
   background: var(--card);
   color: var(--muted);
 }
@@ -5704,7 +5873,7 @@ code {
   gap: 10px;
   padding: 6px 8px 6px 10px;
   border-left: 3px solid var(--brand);
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--paper);
 }
 
@@ -5725,7 +5894,7 @@ code {
 .composer-extra-image {
   width: 40px;
   height: 40px;
-  border-radius: 6px;
+  border-radius: 4px;
   object-fit: cover;
 }
 
@@ -5754,7 +5923,7 @@ code {
   place-items: center;
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 8px;
   background: transparent;
   color: var(--muted);
 }
@@ -5776,7 +5945,7 @@ code {
   display: grid;
   place-items: center;
   border: 2px dashed var(--brand);
-  border-radius: 16px;
+  border-radius: 10px;
   background: color-mix(in srgb, var(--paper) 88%, transparent);
   color: var(--ink);
   font-weight: 650;

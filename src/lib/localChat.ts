@@ -118,6 +118,12 @@ export const sendLocalTyping = (chat: string, typing: boolean) => call<void>("lo
 /** Tells the other person in a direct chat that this person has seen it, for their double checks. */
 export const markLocalRead = (chat: string) => call<void>("local_chat_mark_read", { chat })
 
+/** Deletes messages from this computer only. Others keep their copies. */
+export const deleteLocalMessages = (ids: string[]) => call<void>("local_chat_delete_messages", { ids })
+
+/** Deletes every message of a chat from this computer only. Others keep their copies. */
+export const clearLocalChat = (chat: string) => call<void>("local_chat_clear", { chat })
+
 type KeyRow = {
   user_id: string
   public_key: string

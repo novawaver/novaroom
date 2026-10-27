@@ -1,11 +1,14 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import { notifyIncoming, windowIsActive } from "../lib/desktop"
+import { loadDraft, saveDraft } from "../lib/drafts"
 import { useIdle } from "../lib/presence"
 import { typingText } from "../lib/typing"
 import {
   LOCAL_FILE_LIMIT,
   LOCAL_ROOM,
+  clearLocalChat,
+  deleteLocalMessages,
   localAvatars,
   localChatAvailable,
   localFileUrl,
@@ -27,6 +30,7 @@ import {
   type LocalPeer,
 } from "../lib/localChat"
 import type { Session } from "../types"
+import { ConfirmDialog, SelectCheck, SelectionBar, ThreadMenu, selectableRow, useMessageSelection, type ConfirmAction } from "./ChatTools"
 
 // While online, how often to download the registered keys again, so people who set up Local chat
 // since can be recognised on the network.
@@ -260,6 +264,22 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     reloadChats()
   }
 
+  /** Deletes messages of the open chat from this computer. */
+  async function deleteMessages(ids: string[]) {
+    await deleteLocalMessages(ids)
+    const gone = new Set(ids)
+    setMessages((current) => current.filter((item) => !gone.has(item.id)))
+    reloadChats()
+  }
+
+  /** Deletes every message of the open chat from this computer. */
+  async function clear() {
+    const chat = selected
+    await clearLocalChat(chat)
+    if (selectedRef.current === chat) setMessages([])
+    reloadChats()
+  }
+
   /** Call on every change to the message box; hasText is false once it is empty or sent. */
   function onType(hasText: boolean) {
     if (!publicKey) return
@@ -309,6 +329,8 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     setVisible,
     select,
     send,
+    deleteMessages,
+    clear,
     onType,
     typists,
     chatName,
@@ -815,24 +837,41 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { setVisible, selected } = local
   const closeViewer = useCallback(() => setViewing(null), [])
+  // Choosing messages to delete, and the dialog that confirms clearing or deleting.
+  const selection = useMessageSelection(selected)
+  const [confirm, setConfirm] = useState<{ title: string; text: string; actions: ConfirmAction[] } | null>(null)
 
   useEffect(() => {
     setVisible(true)
     return () => setVisible(false)
   }, [setVisible])
 
+  // Keeps each chat's unsent text, so leaving the chat or the page does not lose it.
+  function updateBody(text: string) {
+    setBody(text)
+    saveDraft(userId, selected, text)
+  }
+
   useEffect(() => {
-    setBody("")
+    setBody(loadDraft(userId, selected))
     setSendError("")
     setReplyTo(null)
     setFile(null)
     bodyRef.current?.focus()
-  }, [selected])
+  }, [selected, userId])
 
   useEffect(() => {
     const log = logRef.current
     if (log) log.scrollTop = log.scrollHeight
   }, [local.messages])
+
+  // Grow the message box with its content, from one line up to six (the CSS max-height), then scroll.
+  useEffect(() => {
+    const box = bodyRef.current
+    if (!box) return
+    box.style.height = "auto"
+    box.style.height = `${box.scrollHeight + box.offsetHeight - box.clientHeight}px`
+  }, [body, selected])
 
   // A small picture of an image about to be sent.
   useEffect(() => {
@@ -845,8 +884,27 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     return () => URL.revokeObjectURL(url)
   }, [file])
 
-  const here = local.peers.some((peer) => peer.userId === selected)
+  const peer = local.peers.find((item) => item.userId === selected)
+  const here = peer !== undefined
   const isRoom = selected === LOCAL_ROOM
+  // A short line under the chat's name; the longer explanation shows on hover.
+  const others = local.peers.length
+  const status = isRoom
+    ? others === 0
+      ? "No one else here"
+      : others === 1
+        ? "1 person here"
+        : `${others} people here`
+    : !peer
+      ? "Not on the network"
+      : peer.idle
+        ? "Idle"
+        : "On this network"
+  const statusHint = isRoom
+    ? "Everyone with Novaroom open on this network. Only people here now receive new messages."
+    : here
+      ? "On this network now"
+      : "Not on the network now. Your messages wait on this computer until they are."
   const nameOf = (id: string, fallback: string) => (id === userId ? "You" : fallback || "Someone")
 
   function attach(next: File | undefined) {
@@ -868,6 +926,44 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     window.setTimeout(() => target.classList.remove("flash"), 1200)
   }
 
+  // Deleting here only removes messages from this computer; Local chat has no server to delete from.
+  function onDeleteChosen() {
+    const ids = local.messages.filter((message) => selection.chosen.has(message.id)).map((message) => message.id)
+    if (ids.length === 0) return
+    const these = ids.length === 1 ? "this message" : `these ${ids.length} messages`
+    setConfirm({
+      title: ids.length === 1 ? "Delete message?" : `Delete ${ids.length} messages?`,
+      text: `This deletes ${these} from this computer. Others keep their copies.`,
+      actions: [
+        {
+          label: "Delete",
+          danger: true,
+          onSelect: async () => {
+            await local.deleteMessages(ids)
+            selection.stop()
+          },
+        },
+      ],
+    })
+  }
+
+  function onClearChat() {
+    setConfirm({
+      title: "Clear this chat?",
+      text: "This deletes every message in this chat from this computer. Others keep their copies.",
+      actions: [
+        {
+          label: "Clear chat",
+          danger: true,
+          onSelect: async () => {
+            await local.clear()
+            selection.stop()
+          },
+        },
+      ],
+    })
+  }
+
   async function onSend(event: FormEvent) {
     event.preventDefault()
     const text = body.trim()
@@ -876,7 +972,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     setSending(true)
     try {
       await local.send(text, replyTo?.id ?? null, file)
-      setBody("")
+      updateBody("")
       setReplyTo(null)
       setFile(null)
     } catch (caught) {
@@ -918,15 +1014,23 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
       }}
     >
       <header className="thread-bar">
-        <div>
+        {isRoom ? (
+          <span className="avatar local-avatar thread-avatar">
+            <NetworkIcon />
+          </span>
+        ) : (
+          <LocalAvatar name={local.chatName(selected)} url={local.avatarOf(selected)} className="local-avatar thread-avatar">
+            <span className={`presence-dot thread-presence ${!peer ? "offline" : peer.idle ? "idle" : "online"}`} />
+          </LocalAvatar>
+        )}
+        <div className="thread-who">
           <h1>{local.chatName(selected)}</h1>
-          <p className="thread-email">
-            {isRoom
-              ? "Everyone with Novaroom open on this network. Only people here now receive new messages."
-              : here
-                ? "On this network now"
-                : "Not on the network now. Your messages wait on this computer until they are."}
+          <p className="thread-email" title={statusHint}>
+            {status}
           </p>
+        </div>
+        <div className="thread-actions">
+          <ThreadMenu onSelect={selection.start} onClear={onClearChat} disabled={!local.running} />
         </div>
       </header>
       {(local.error || local.setupError) && (
@@ -934,7 +1038,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           {local.error || `Local chat is not set up on the server yet: ${local.setupError}`}
         </p>
       )}
-      <div className="message-log" ref={logRef}>
+      <div className={selection.selecting ? "message-log selecting" : "message-log"} ref={logRef}>
         {local.messages.length === 0 ? (
           <p className="thread-note thread-empty-note">
             {local.running ? "No messages yet. Say hello." : "Starting Local chat…"}
@@ -947,13 +1051,18 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             const newDay = index === 0 || formatDay(local.messages[index - 1].sentAt) !== day
             const avatar = <LocalAvatar name={name} url={local.avatarOf(message.senderId)} className="message-avatar" />
             const reply = message.replyTo
+            const chosen = selection.selecting && selection.chosen.has(message.id)
             return (
               <Fragment key={message.id}>
                 {newDay && <p className="message-system-note">{day}</p>}
-                <div id={`local-message-${message.id}`} className={mine ? "message-row mine" : "message-row theirs"}>
+                <div
+                  id={`local-message-${message.id}`}
+                  className={`message-row ${mine ? "mine" : "theirs"}${selection.selecting ? " selectable" : ""}${chosen ? " chosen" : ""}`}
+                  {...selectableRow(selection, message.id)}
+                >
+                  {selection.selecting && <SelectCheck checked={chosen} />}
                   {!mine && avatar}
                   <article className={mine ? "bubble mine" : "bubble theirs"}>
-                    {isRoom && !mine && <p className="sender-name">{name}</p>}
                     {reply && (
                       <button type="button" className="bubble-quote" onClick={() => showMessage(reply.id)}>
                         <strong>{nameOf(reply.senderId, reply.senderName)}</strong>
@@ -1000,103 +1109,110 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           </>
         )}
       </p>
-      <form className="composer" onSubmit={(event) => void onSend(event)}>
-        {sendError && (
-          <p className="form-error" role="alert">
-            {sendError}
-          </p>
-        )}
-        {replyTo && (
-          <div className="composer-extra">
-            <span className="composer-extra-text">
-              <strong>Replying to {nameOf(replyTo.senderId, replyTo.senderName)}</strong>
-              <span>{localMessageLabel(replyTo)}</span>
-            </span>
-            <button type="button" className="composer-extra-close" aria-label="Cancel reply" onClick={() => setReplyTo(null)}>
-              ×
-            </button>
-          </div>
-        )}
-        {file && (
-          <div className="composer-extra">
-            {filePreview ? (
-              <img className="composer-extra-image" src={filePreview} alt="" />
-            ) : (
-              <span className="local-file-icon">
-                <FileIcon />
-              </span>
-            )}
-            <span className="composer-extra-text">
-              <strong>{file.name || "Pasted image"}</strong>
-              <span>{formatBytes(file.size)}</span>
-            </span>
-            <button type="button" className="composer-extra-close" aria-label="Remove file" onClick={() => setFile(null)}>
-              ×
-            </button>
-          </div>
-        )}
-        <div className="composer-row">
-          <input
-            ref={fileInputRef}
-            type="file"
-            hidden
-            onChange={(event) => {
-              attach(event.target.files?.[0])
-              event.target.value = ""
-            }}
-          />
-          <button
-            type="button"
-            className="attach-button"
-            aria-label="Attach a file"
-            title="Attach a file"
-            disabled={!local.running}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <AttachIcon />
-          </button>
-          <textarea
-            ref={bodyRef}
-            value={body}
-            maxLength={MAX_BODY}
-            rows={1}
-            placeholder={isRoom ? "Write to everyone on this network" : "Write a message"}
-            aria-label="Message"
-            disabled={!local.running}
-            onChange={(event) => {
-              setBody(event.target.value)
-              local.onType(event.target.value.trim() !== "")
-            }}
-            onPaste={(event) => {
-              const pasted = event.clipboardData.files[0]
-              if (!pasted) return
-              event.preventDefault()
-              attach(pasted)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault()
-                event.currentTarget.form?.requestSubmit()
-              }
-              if (event.key === "Escape" && replyTo) setReplyTo(null)
-            }}
-          />
-          <button
-            type="submit"
-            className="button send-button"
-            aria-label="Send"
-            disabled={!local.running || sending || (!body.trim() && !file)}
-          >
-            <SendIcon />
-          </button>
+      {selection.selecting ? (
+        <div className="composer">
+          <SelectionBar count={selection.chosen.size} onCancel={selection.stop} onDelete={onDeleteChosen} />
         </div>
-      </form>
+      ) : (
+        <form className="composer" onSubmit={(event) => void onSend(event)}>
+          {sendError && (
+            <p className="form-error" role="alert">
+              {sendError}
+            </p>
+          )}
+          {replyTo && (
+            <div className="composer-extra">
+              <span className="composer-extra-text">
+                <strong>Replying to {nameOf(replyTo.senderId, replyTo.senderName)}</strong>
+                <span>{localMessageLabel(replyTo)}</span>
+              </span>
+              <button type="button" className="composer-extra-close" aria-label="Cancel reply" onClick={() => setReplyTo(null)}>
+                ×
+              </button>
+            </div>
+          )}
+          {file && (
+            <div className="composer-extra">
+              {filePreview ? (
+                <img className="composer-extra-image" src={filePreview} alt="" />
+              ) : (
+                <span className="local-file-icon">
+                  <FileIcon />
+                </span>
+              )}
+              <span className="composer-extra-text">
+                <strong>{file.name || "Pasted image"}</strong>
+                <span>{formatBytes(file.size)}</span>
+              </span>
+              <button type="button" className="composer-extra-close" aria-label="Remove file" onClick={() => setFile(null)}>
+                ×
+              </button>
+            </div>
+          )}
+          <div className="composer-row">
+            <input
+              ref={fileInputRef}
+              type="file"
+              hidden
+              onChange={(event) => {
+                attach(event.target.files?.[0])
+                event.target.value = ""
+              }}
+            />
+            <button
+              type="button"
+              className="attach-button"
+              aria-label="Attach a file"
+              title="Attach a file"
+              disabled={!local.running}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <AttachIcon />
+            </button>
+            <textarea
+              ref={bodyRef}
+              value={body}
+              maxLength={MAX_BODY}
+              rows={1}
+              placeholder={isRoom ? "Write to everyone on this network" : "Write a message"}
+              aria-label="Message"
+              disabled={!local.running}
+              onChange={(event) => {
+                updateBody(event.target.value)
+                local.onType(event.target.value.trim() !== "")
+              }}
+              onPaste={(event) => {
+                const pasted = event.clipboardData.files[0]
+                if (!pasted) return
+                event.preventDefault()
+                attach(pasted)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault()
+                  event.currentTarget.form?.requestSubmit()
+                }
+                if (event.key === "Escape" && replyTo) setReplyTo(null)
+              }}
+            />
+            <button
+              type="submit"
+              className="button send-button"
+              aria-label="Send"
+              disabled={!local.running || sending || (!body.trim() && !file)}
+            >
+              <SendIcon />
+            </button>
+          </div>
+        </form>
+      )}
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
           Drop a file to send it
         </div>
       )}
       {viewing && <ImageViewer id={viewing.id} url={viewing.url} name={viewing.name} onClose={closeViewer} />}
+      {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
     </section>
   )
 }
