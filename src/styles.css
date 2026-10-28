@@ -4756,6 +4756,25 @@ code {
   fill: currentColor;
 }
 
+/* Every second column is shaded. On the <col>, so row and cell backgrounds still paint over it. */
+.vault-grid col.vault-col-alt {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+
+.vault-grid th.vault-col-alt {
+  background: color-mix(in srgb, var(--ink) 5%, var(--side-soft));
+}
+
+/* Row numbers, counted down the rows as shown. Not stored in the vault. */
+.vault-grid .vault-no,
+.vault-grid.vault-fit .vault-no {
+  width: 48px;
+  min-width: 48px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 .vault-grid tbody tr:hover td {
   background: color-mix(in srgb, var(--side-soft) 45%, transparent);
 }

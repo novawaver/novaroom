@@ -480,6 +480,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async signOut() {
         // Offline by choice has no sign-in with the server to end.
         if (supabase && !offlineChosen) {
+          // Recorded in the activity log while still signed in. A failed entry is ignored.
+          if (!offline) await supabase.rpc("log_sign_out")
           // Without internet, only this computer can forget the sign-in.
           const { error } = await supabase.auth.signOut(offline ? { scope: "local" } : undefined)
           if (error) throw error

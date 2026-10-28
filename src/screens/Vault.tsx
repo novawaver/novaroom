@@ -1099,6 +1099,9 @@ function VaultModal({
   )
 }
 
+/** Every second column is shaded (through its <col>, so row and cell highlights still show over it). */
+const altColumn = (index: number) => (index % 2 === 1 ? "vault-col-alt" : undefined)
+
 /** The items inside one Sub-table cell. Read-only unless onChange is given (Edit mode). */
 function SubTableDialog({
   column,
@@ -1127,10 +1130,20 @@ function SubTableDialog({
       ) : (
         <div className="vault-grid-wrap vault-sub-wrap">
           <table className={editing ? "vault-grid vault-fit" : "vault-grid vault-viewing vault-fit"}>
+            <colgroup>
+              <col />
+              {columns.map((sub, columnIndex) => (
+                <col key={sub.id} className={altColumn(columnIndex)} />
+              ))}
+              {editing && <col />}
+            </colgroup>
             <thead>
               <tr>
-                {columns.map((sub) => (
-                  <th key={sub.id} scope="col">
+                <th scope="col" className="vault-no">
+                  No
+                </th>
+                {columns.map((sub, columnIndex) => (
+                  <th key={sub.id} scope="col" className={altColumn(columnIndex)}>
                     <span className="vault-col-name">{sub.name}</span>
                   </th>
                 ))}
@@ -1140,13 +1153,14 @@ function SubTableDialog({
             <tbody>
               {rows.length === 0 ? (
                 <tr>
-                  <td className="vault-empty" colSpan={columns.length + (editing ? 1 : 0)}>
+                  <td className="vault-empty" colSpan={columns.length + (editing ? 2 : 1)}>
                     No items yet.
                   </td>
                 </tr>
               ) : (
-                rows.map((row) => (
+                rows.map((row, index) => (
                   <tr key={row.id}>
+                    <td className="vault-no">{index + 1}</td>
                     {columns.map((sub) => (
                       <td key={sub.id}>
                         {editing ? (
@@ -1556,7 +1570,8 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   // Reordering by hand only makes sense when every row is on screen.
   const canMove = editing && !duplicateColumnIds && shown.length === table.rows.length && table.rows.length > 1
   // Grip and delete columns either side of the cells, in Edit only.
-  const extraColumns = editing ? 2 : 0
+  // The No column, plus the row handles and row actions while editing.
+  const extraColumns = editing ? 3 : 1
   // Where to draw the drop line; none when letting go would leave the row where it is.
   const dragFrom = drag ? table.rows.findIndex((row) => row.id === drag.id) : -1
   const dropAt = drag && drag.target !== dragFrom && drag.target !== dragFrom + 1 ? drag.target : null
@@ -1938,11 +1953,27 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               .filter(Boolean)
               .join(" ")}
           >
+            <colgroup>
+              {editing && <col />}
+              <col />
+              {table.columns.map((column, columnIndex) => (
+                <col key={column.id} className={altColumn(columnIndex)} />
+              ))}
+              {editing && <col />}
+            </colgroup>
             <thead>
               <tr>
                 {editing && <th className="vault-grip-cell" aria-label="Move rows" />}
+                <th scope="col" className="vault-no">
+                  No
+                </th>
                 {table.columns.map((column, columnIndex) => (
-                  <th key={column.id} scope="col" data-column className={columnClass(column, columnIndex)}>
+                  <th
+                    key={column.id}
+                    scope="col"
+                    data-column
+                    className={[columnClass(column, columnIndex), altColumn(columnIndex)].filter(Boolean).join(" ") || undefined}
+                  >
                     <div className="vault-col-head">
                       {editing && table.columns.length > 1 && (
                         <button
@@ -2131,6 +2162,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         )}
                       </td>
                     )}
+                    <td className="vault-no">{index + 1}</td>
                     {table.columns.map((column, columnIndex) => (
                       <td
                         key={column.id}
@@ -2186,7 +2218,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                       <PlusIcon />
                     </button>
                   </td>
-                  <td className="vault-add-row-rest" colSpan={table.columns.length + 1} />
+                  <td className="vault-add-row-rest" colSpan={table.columns.length + 2} />
                 </tr>
               </tfoot>
             )}
