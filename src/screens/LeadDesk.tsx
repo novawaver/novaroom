@@ -45,6 +45,9 @@ import {
 
 export type LeadDeskTab = "tasks" | "schedule" | "notes"
 
+// A task or event to open, for example from a notification. `at` tells two requests for the same item apart.
+export type DeskFocus = { tab: "tasks" | "schedule"; id: string; at: number }
+
 export const LEADDESK_TABS: Array<{ id: LeadDeskTab; label: string }> = [
   { id: "tasks", label: "Tasks" },
   { id: "schedule", label: "Schedule" },
@@ -184,6 +187,8 @@ export function LeadDesk({
   newTaskIds,
   onTaskOpened,
   isAdmin,
+  focus,
+  onFocused,
 }: {
   tab: LeadDeskTab
   data: DeskData | null
@@ -197,6 +202,9 @@ export function LeadDesk({
   onTaskOpened: (taskId: string) => void
   // Admins skip the limits admins set for leaders: adding tasks, locked events, assignee notes.
   isAdmin: boolean
+  // A task or event to open once it has loaded; onFocused runs when it has been.
+  focus: DeskFocus | null
+  onFocused: () => void
 }) {
   const { session } = useAuth()
   const [editing, setEditing] = useState<{ kind: LeadDeskTab; item: DeskTask | DeskEvent | DeskNote | null } | null>(
@@ -205,6 +213,14 @@ export function LeadDesk({
   const [actionError, setActionError] = useState("")
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const closeTask = useCallback(() => setSelectedTaskId(null), [])
+
+  // Opens the task a notification was about, waiting for it if the list has not loaded it yet.
+  useEffect(() => {
+    if (focus?.tab !== "tasks" || !data?.tasks.some((task) => task.id === focus.id)) return
+    setSelectedTaskId(focus.id)
+    if (newTaskIds.has(focus.id)) onTaskOpened(focus.id)
+    onFocused()
+  }, [focus, data, newTaskIds, onTaskOpened, onFocused])
 
   if (!session) return null
   // Looked up by id so the drawer follows edits and closes if the task is deleted.
@@ -270,6 +286,8 @@ export function LeadDesk({
           newEventIds={newEventIds}
           isAdmin={isAdmin}
           covered={editing !== null}
+          focusId={focus?.tab === "schedule" ? focus.id : null}
+          onFocused={onFocused}
           onSelect={(event) => onEventOpened(event.id)}
           onEdit={(event) => setEditing({ kind: "schedule", item: event })}
         />
@@ -1257,6 +1275,12 @@ function nameOf(users: RegisteredUser[], id: string | null) {
 
 type ScheduleView = "daily" | "upcoming" | "all"
 
+const SCHEDULE_VIEWS: Array<{ id: ScheduleView; label: string }> = [
+  { id: "daily", label: "Daily" },
+  { id: "upcoming", label: "Upcoming" },
+  { id: "all", label: "All" },
+]
+
 function LockIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1531,6 +1555,8 @@ function Schedule({
   newEventIds,
   isAdmin,
   covered,
+  focusId,
+  onFocused,
   onSelect,
   onEdit,
 }: {
@@ -1540,18 +1566,46 @@ function Schedule({
   isAdmin: boolean
   // True while the editor is open over the event panel.
   covered: boolean
+  // An event to open (from a notification) once it has loaded; onFocused runs when it has been.
+  focusId: string | null
+  onFocused: () => void
   onSelect: (event: DeskEvent) => void
   onEdit: (event: DeskEvent) => void
 }) {
   const [view, setView] = useState<ScheduleView>("daily")
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const closeEvent = useCallback(() => setSelectedId(null), [])
+  const listRef = useRef<HTMLDivElement>(null)
   // Ticks so an event that ends while the page is open shows as past without a reload.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30 * 1000)
     return () => window.clearInterval(timer)
   }, [])
+
+  // Opens the event a notification was about: switches to the view that lists it, scrolls its card
+  // into sight and shows its panel.
+  const onSelectRef = useRef(onSelect)
+  onSelectRef.current = onSelect
+  const [scrollToId, setScrollToId] = useState<string | null>(null)
+  useEffect(() => {
+    const event = focusId ? events.find((item) => item.id === focusId) : undefined
+    if (!event) return
+    const ended = event.repeat !== "daily" && event.endsAt != null && new Date(event.endsAt).getTime() < Date.now()
+    setView(event.repeat === "daily" ? "daily" : ended ? "all" : "upcoming")
+    setSelectedId(event.id)
+    setScrollToId(event.id)
+    onSelectRef.current(event)
+    onFocused()
+  }, [focusId, events, onFocused])
+  // Runs after the view above has rendered, so the card is on the page.
+  useEffect(() => {
+    if (!scrollToId) return
+    listRef.current
+      ?.querySelector(`[data-event-id="${scrollToId}"]`)
+      ?.scrollIntoView({ block: "center", behavior: "smooth" })
+    setScrollToId(null)
+  }, [scrollToId, view])
 
   function switchView(next: ScheduleView) {
     setView(next)
@@ -1567,9 +1621,16 @@ function Schedule({
     // Order by time of day on the viewer's clock.
     .sort((a, b) => formatClock(a.startsAt).localeCompare(formatClock(b.startsAt)))
 
-  const oneOff = events
-    .filter((event) => event.repeat !== "daily" && event.startsAt && event.endsAt)
-    .filter((event) => view === "all" || new Date(event.endsAt!).getTime() >= now)
+  const allOneOff = events.filter((event) => event.repeat !== "daily" && event.startsAt && event.endsAt)
+  const upcoming = allOneOff.filter((event) => new Date(event.endsAt!).getTime() >= now)
+  // How many events each view lists, and how many of those are unread.
+  const viewEvents: Record<ScheduleView, DeskEvent[]> = {
+    daily: daily.map((occurrence) => occurrence.event),
+    upcoming,
+    all: allOneOff,
+  }
+
+  const oneOff = (view === "all" ? allOneOff : upcoming)
     .map((event) => ({ event, startsAt: event.startsAt!, endsAt: event.endsAt! }))
     .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
   const days = new Map<string, Occurrence[]>()
@@ -1595,7 +1656,7 @@ function Schedule({
       event.id === selectedId ? "selected" : "",
     ]
     return (
-      <div key={`${event.id}:${startsAt}`} className={classes.filter(Boolean).join(" ")}>
+      <div key={`${event.id}:${startsAt}`} className={classes.filter(Boolean).join(" ")} data-event-id={event.id}>
         <button
           type="button"
           className="event-card-main"
@@ -1666,18 +1727,23 @@ function Schedule({
   }
 
   return (
-    <div className="desk-body">
+    <div className="desk-body" ref={listRef}>
       <div className="desk-toolbar">
         <div className="desk-segmented" role="group" aria-label="Show events">
-          <button type="button" aria-pressed={view === "daily"} onClick={() => switchView("daily")}>
-            Daily
-          </button>
-          <button type="button" aria-pressed={view === "upcoming"} onClick={() => switchView("upcoming")}>
-            Upcoming
-          </button>
-          <button type="button" aria-pressed={view === "all"} onClick={() => switchView("all")}>
-            All
-          </button>
+          {SCHEDULE_VIEWS.map(({ id, label }) => {
+            const unread = viewEvents[id].filter((event) => newEventIds.has(event.id)).length
+            return (
+              <button key={id} type="button" aria-pressed={view === id} onClick={() => switchView(id)}>
+                {label}
+                <span className="desk-view-count">{viewEvents[id].length}</span>
+                {unread > 0 && (
+                  <span className="desk-view-unread" title={`${unread} unread`} aria-label={`${unread} unread`}>
+                    {unread > 99 ? "99+" : unread}
+                  </span>
+                )}
+              </button>
+            )
+          })}
         </div>
         <span className="desk-zone">
           Times in your time zone, {localTimeZone()} ({zoneAbbreviation(localTimeZone())})

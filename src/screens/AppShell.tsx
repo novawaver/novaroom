@@ -1,4 +1,14 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from "react"
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+  type FormEvent,
+  type ReactNode,
+} from "react"
 import { useAuth } from "../auth"
 import { notifyIncoming, onNotificationClick, setUnreadBadge, windowIsActive } from "../lib/desktop"
 import { useReconnectEpoch } from "../lib/network"
@@ -38,7 +48,7 @@ import {
   type ReadStates,
 } from "../lib/chats"
 import { PEOPLE_FILTERS, People, matchesFilter, type PeopleFilter } from "./People"
-import { LEADDESK_TABS, LeadDesk, leadDeskHints, useLeadDesk, type LeadDeskTab } from "./LeadDesk"
+import { LEADDESK_TABS, LeadDesk, leadDeskHints, useLeadDesk, type DeskFocus, type LeadDeskTab } from "./LeadDesk"
 import { LEADERSHIP } from "../lib/leaddesk"
 import { Toasts, useEventAlerts } from "./EventAlerts"
 import { TIMER_RANGES, Timer, rangeTotals, useTimer, useTimerHistory, type TimerRange } from "./Timer"
@@ -172,6 +182,9 @@ function DeskNotesIcon() {
     </svg>
   )
 }
+
+// How near the bottom (in pixels) the message log counts as scrolled to the bottom.
+const PINNED_SLACK = 80
 
 const LEADDESK_ICONS: Record<LeadDeskTab, ComponentType> = {
   tasks: DeskTasksIcon,
@@ -778,6 +791,9 @@ export function AppShell({ local }: { local: LocalChatState }) {
   // Which kind of chat the Chats page shows; Local chat is the "local" view.
   const [chatMode, setChatMode] = useState<ChatMode>("online")
   const [deskTab, setDeskTab] = useState<LeadDeskTab>("tasks")
+  // The task or event a clicked notification asked LeadDesk to open.
+  const [deskFocus, setDeskFocus] = useState<DeskFocus | null>(null)
+  const clearDeskFocus = useCallback(() => setDeskFocus(null), [])
   const isLeader = profile?.role === LEADERSHIP
   // Admins get everything Leadership members have, without the limits an admin sets for them.
   const [isAdmin, setIsAdmin] = useState(false)
@@ -908,6 +924,12 @@ export function AppShell({ local }: { local: LocalChatState }) {
   const selectedRef = useRef<string | null>(null)
   const blockedRef = useRef<string[]>([])
   const logRef = useRef<HTMLDivElement>(null)
+  // Whether the message log is at its bottom, so pictures that finish loading keep it there.
+  const pinnedRef = useRef(true)
+  // The message a clicked notification was about, to show once its chat has loaded.
+  const jumpToRef = useRef<{ chatId: string; messageId: string } | null>(null)
+  // Bumped to scroll the open chat again, such as for a notification about the chat already open.
+  const [scrollRequest, setScrollRequest] = useState(0)
   selectedRef.current = selectedId
   // Which page is showing, for deciding whether a new message was actually seen.
   const viewRef = useRef(view)
@@ -1112,7 +1134,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
               writeUnread(session.userId, next)
               return next
             })
-            void notifyIncoming(message.senderName || "Novaroom", messageLabel(message), `chat:${message.conversationId}`, {
+            void notifyIncoming(message.senderName || "Novaroom", messageLabel(message), `chat:${message.conversationId}:${message.id}`, {
               name: message.senderName || "Someone",
               avatarUrl: message.senderAvatarUrl ?? null,
             })
@@ -1178,10 +1200,26 @@ export function AppShell({ local }: { local: LocalChatState }) {
     }
   }, [session, epoch])
 
+  // Show the newest messages: when a chat opens or loads, when one arrives, and when the Chats page
+  // comes back into view. After a notification is clicked, show the message it was about instead.
   useEffect(() => {
     const node = logRef.current
-    if (node) node.scrollTop = node.scrollHeight
-  }, [messages, selectedId])
+    if (!node || loadingMessages) return
+    const jumpTo = jumpToRef.current
+    if (jumpTo && jumpTo.chatId === selectedId) {
+      jumpToRef.current = null
+      const row = node.querySelector<HTMLElement>(`[data-message-id="${jumpTo.messageId}"]`)
+      if (row) {
+        row.scrollIntoView({ block: "center" })
+        pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < PINNED_SLACK
+        row.classList.add("flash")
+        window.setTimeout(() => row.classList.remove("flash"), 1200)
+        return
+      }
+    }
+    node.scrollTop = node.scrollHeight
+    pinnedRef.current = true
+  }, [messages, selectedId, view, loadingMessages, scrollRequest])
 
   useEffect(() => onNotificationClick((target) => notificationClickRef.current(target)), [])
 
@@ -1585,10 +1623,22 @@ export function AppShell({ local }: { local: LocalChatState }) {
     markChatRead(chatId)
   }
 
-  // Clicking a desktop notification opens what it was about: the chat a message came from, or the
-  // LeadDesk tab for a task or event.
+  // Opens a LeadDesk tab, and the task or event given with its panel showing.
+  function openDesk(tab: "tasks" | "schedule", itemId: string | null) {
+    if (!hasLeadDesk) return
+    leaveTo(() => {
+      setDeskTab(tab)
+      setDeskFocus(itemId ? { tab, id: itemId, at: Date.now() } : null)
+      // Already open, so it won't load again on its own; a new item may not be on it yet.
+      if (itemId && view === "leaddesk") void desk.reload()
+      setView("leaddesk")
+    })
+  }
+
+  // Clicking a desktop notification opens what it was about: the message in the chat it came from,
+  // or the task or event on LeadDesk.
   notificationClickRef.current = (target) => {
-    const [kind, id] = [target.slice(0, target.indexOf(":")), target.slice(target.indexOf(":") + 1)]
+    const [kind, id, itemId = null] = target.split(":")
     if (kind === "local" && id) {
       leaveTo(() => {
         local.select(id)
@@ -1603,12 +1653,12 @@ export function AppShell({ local }: { local: LocalChatState }) {
         setComposer(null)
         setStartError("")
         openChat(id)
+        jumpToRef.current = itemId ? { chatId: id, messageId: itemId } : null
+        // The chat may be open already, with nothing new to load, so scroll on the next render.
+        setScrollRequest((count) => count + 1)
       })
-    } else if (kind === "desk" && hasLeadDesk && (id === "tasks" || id === "schedule")) {
-      leaveTo(() => {
-        setDeskTab(id)
-        setView("leaddesk")
-      })
+    } else if (kind === "desk" && (id === "tasks" || id === "schedule")) {
+      openDesk(id, itemId)
     }
   }
 
@@ -2035,6 +2085,8 @@ export function AppShell({ local }: { local: LocalChatState }) {
           newTaskIds={unreadTaskIds}
           onTaskOpened={markDeskTaskRead}
           isAdmin={isAdmin}
+          focus={deskFocus}
+          onFocused={clearDeskFocus}
         />
       ) : view === "people" ? (
         <People
@@ -2117,7 +2169,19 @@ export function AppShell({ local }: { local: LocalChatState }) {
           </header>
           {selected ? (
             <>
-              <div className={selection.selecting ? "message-log selecting" : "message-log"} ref={logRef}>
+              <div
+                className={selection.selecting ? "message-log selecting" : "message-log"}
+                ref={logRef}
+                onScroll={(event) => {
+                  const node = event.currentTarget
+                  pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < PINNED_SLACK
+                }}
+                // A picture that loads after the scroll above makes the log taller; stay at the bottom.
+                onLoadCapture={() => {
+                  const node = logRef.current
+                  if (node && pinnedRef.current) node.scrollTop = node.scrollHeight
+                }}
+              >
                 {loadingMessages ? (
                   <div className="thread-loading" role="status" aria-label="Loading messages">
                     <span className="loading-spinner" aria-hidden="true" />
@@ -2143,6 +2207,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
                       <Fragment key={message.id}>
                         <div
                           className={`message-row ${mine ? "mine" : "theirs"}${selection.selecting && choosable ? " selectable" : ""}${chosen ? " chosen" : ""}`}
+                          data-message-id={message.id}
                           {...selectableRow(selection, message.id, choosable)}
                         >
                           {selection.selecting && choosable && <SelectCheck checked={chosen} />}
@@ -2337,13 +2402,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
       <Toasts
         toasts={alerts.toasts}
         onDismiss={alerts.dismiss}
-        onOpen={(toast) => {
-          if (!hasLeadDesk) return
-          leaveTo(() => {
-            setDeskTab(toast.tab)
-            setView("leaddesk")
-          })
-        }}
+        onOpen={(toast) => openDesk(toast.tab, toast.itemId)}
       />
       <VaultLeaveDialog vault={vault} />
       {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}

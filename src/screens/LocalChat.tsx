@@ -630,6 +630,8 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   const [dragging, setDragging] = useState(false)
   const [viewing, setViewing] = useState<{ id: string; url: string; name: string } | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
+  // Whether the message log is at its bottom, so pictures that finish loading keep it there.
+  const pinnedRef = useRef(true)
   const bodyRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { setVisible, selected } = local
@@ -659,7 +661,9 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
 
   useEffect(() => {
     const log = logRef.current
-    if (log) log.scrollTop = log.scrollHeight
+    if (!log) return
+    log.scrollTop = log.scrollHeight
+    pinnedRef.current = true
   }, [local.messages])
 
   // Grow the message box with its content, from one line up to six (the CSS max-height), then scroll.
@@ -835,7 +839,19 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           {local.error || `Local chat is not set up on the server yet: ${local.setupError}`}
         </p>
       )}
-      <div className={selection.selecting ? "message-log selecting" : "message-log"} ref={logRef}>
+      <div
+        className={selection.selecting ? "message-log selecting" : "message-log"}
+        ref={logRef}
+        onScroll={(event) => {
+          const log = event.currentTarget
+          pinnedRef.current = log.scrollHeight - log.scrollTop - log.clientHeight < 80
+        }}
+        // A picture that loads after the scroll above makes the log taller; stay at the bottom.
+        onLoadCapture={() => {
+          const log = logRef.current
+          if (log && pinnedRef.current) log.scrollTop = log.scrollHeight
+        }}
+      >
         {local.messages.length === 0 ? (
           <p className="thread-note thread-empty-note">
             {local.running ? "No messages yet. Say hello." : "Starting Local chat…"}

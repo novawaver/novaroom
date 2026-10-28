@@ -2569,6 +2569,33 @@ code {
   color: var(--ink);
 }
 
+/* How many events a view lists, then how many of them are unread. */
+.desk-segmented button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.desk-view-count {
+  font-size: 12px;
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+.desk-view-unread {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .task-board {
   display: grid;
   grid-template-columns: repeat(3, minmax(220px, 1fr));

@@ -18,8 +18,8 @@ import {
 import { useReconnectEpoch } from "../lib/network"
 import { personById, type Person } from "../lib/users"
 
-// tab: the LeadDesk tab that clicking the toast opens.
-export type Toast = { id: string; title: string; body: string; tab: "schedule" | "tasks" }
+// tab: the LeadDesk tab that clicking the toast opens; itemId: the event or task it opens there.
+export type Toast = { id: string; title: string; body: string; tab: "schedule" | "tasks"; itemId: string | null }
 
 const CHECK_EVERY_MS = 30 * 1000
 const POLL_ALERTS_MS = 60 * 1000
@@ -56,14 +56,24 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
   // Subscriptions are made again, and missed changes loaded, each time the connection comes back.
   const epoch = useReconnectEpoch()
 
-  // from: whose picture the desktop notification shows.
-  const show = useCallback((key: string, title: string, body: string, tab: Toast["tab"] = "schedule", from?: Person | null) => {
-    if (shownRef.current.has(key)) return
-    shownRef.current.add(key)
-    void notifyIncoming(title, body, `desk:${tab}`, from)
-    setToasts((current) => [...current.slice(-3), { id: key, title, body, tab }])
-    window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== key)), TOAST_MS)
-  }, [])
+  // from: whose picture the desktop notification shows. itemId: the event or task clicking it opens.
+  const show = useCallback(
+    (
+      key: string,
+      title: string,
+      body: string,
+      tab: Toast["tab"] = "schedule",
+      from?: Person | null,
+      itemId: string | null = null,
+    ) => {
+      if (shownRef.current.has(key)) return
+      shownRef.current.add(key)
+      void notifyIncoming(title, body, itemId ? `desk:${tab}:${itemId}` : `desk:${tab}`, from)
+      setToasts((current) => [...current.slice(-3), { id: key, title, body, tab, itemId }])
+      window.setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== key)), TOAST_MS)
+    },
+    [],
+  )
 
   const refreshEvents = useCallback(async () => {
     try {
@@ -95,11 +105,13 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
       for (const alert of alerts) {
         void personById(alert.actorId).then((from) => {
           const who = from?.name || "Someone"
-          if (alert.kind === "task_assigned") show(`task:${alert.id}`, "Task assigned to you", alert.title, "tasks", from)
-          else if (alert.kind === "task_done") show(`signed:${alert.id}`, `${who} marked a task done`, alert.title, "tasks", from)
+          if (alert.kind === "task_assigned")
+            show(`task:${alert.id}`, "Task assigned to you", alert.title, "tasks", from, alert.taskId)
+          else if (alert.kind === "task_done")
+            show(`signed:${alert.id}`, `${who} marked a task done`, alert.title, "tasks", from, alert.taskId)
           else if (alert.kind === "task_failed")
-            show(`signed:${alert.id}`, `${who} marked a task failed`, alert.title, "tasks", from)
-          else show(`added:${alert.id}`, "Added to an event", alert.title, "schedule", from)
+            show(`signed:${alert.id}`, `${who} marked a task failed`, alert.title, "tasks", from, alert.taskId)
+          else show(`added:${alert.id}`, "Added to an event", alert.title, "schedule", from, alert.eventId)
         })
       }
       void markAlertsDelivered(alerts.map((alert) => alert.id)).catch(() => {})
@@ -151,7 +163,7 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
           const key = `start:${event.id}:${occurrence.startsAt}`
           const body = `${timeOf(occurrence.startsAt)}–${timeOf(occurrence.endsAt, true)}${event.location ? ` · ${event.location}` : ""}`
           void personById(event.createdBy).then((from) =>
-            show(key, `Starting now: ${event.title}`, body, "schedule", from),
+            show(key, `Starting now: ${event.title}`, body, "schedule", from, event.id),
           )
         }
       }
