@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { notifyIncoming } from "../lib/desktop"
 import { markAlertsDelivered, subscribeToAlerts, undeliveredAlerts, type EventAlert } from "../lib/eventAlerts"
 import {
+  alarmLabel,
   listEvents,
   listReadEventIds,
   listReadTaskIds,
@@ -145,7 +146,7 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
     }
   }, [userId, show, refreshEvents, refreshTasks, epoch])
 
-  // Start-time reminders for events this person takes part in.
+  // Alarms and start-time reminders for events this person takes part in.
   useEffect(() => {
     if (!userId || !isLeader) return
     let lastCheck = Date.now()
@@ -157,6 +158,21 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
       lastCheck = now
       for (const event of eventsRef.current) {
         if (!event.participantIds.includes(userId)) continue
+        // The alarm, when its time came since the last check and the event has not started yet. The
+        // countdown card (EventCountdowns) carries on from here until the start.
+        if (event.alarmMinutes) {
+          const lead = event.alarmMinutes * 60 * 1000
+          for (const occurrence of occurrencesOf(event, new Date(now), new Date(now + lead))) {
+            const start = new Date(occurrence.startsAt).getTime()
+            const alarmAt = start - lead
+            if (alarmAt <= from || alarmAt > now || start <= now) continue
+            const key = `alarm:${event.id}:${occurrence.startsAt}`
+            const body = `${timeOf(occurrence.startsAt)}–${timeOf(occurrence.endsAt, true)}${event.location ? ` · ${event.location}` : ""}`
+            void personById(event.createdBy).then((from) =>
+              show(key, `Starts in ${alarmLabel(event.alarmMinutes!)}: ${event.title}`, body, "schedule", from, event.id),
+            )
+          }
+        }
         for (const occurrence of occurrencesOf(event, new Date(from), new Date(now))) {
           const start = new Date(occurrence.startsAt).getTime()
           if (start <= from || start > now) continue
@@ -239,6 +255,8 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
   return {
     toasts,
     dismiss,
+    // Every event this person can see, kept fresh, for the alarm countdowns.
+    events,
     notify: show,
     refreshEvents,
     refreshTasks,
@@ -247,6 +265,88 @@ export function useEventAlerts(userId: string | null, isLeader: boolean, onRemot
     unreadTasks: unreadTaskList,
     markTaskRead,
   }
+}
+
+// "15 minutes", "1 h 5 min", "40 seconds": the time left until a start, rounded up to the minute
+// until the last one.
+function timeLeft(ms: number) {
+  const seconds = Math.max(1, Math.ceil(ms / 1000))
+  if (seconds < 60) return seconds === 1 ? "1 second" : `${seconds} seconds`
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return minutes === 1 ? "1 minute" : `${minutes} minutes`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`
+}
+
+type Countdown = { key: string; event: DeskEvent; startsAt: string }
+
+// A card for each of this person's events whose alarm time has come, counting down to the start.
+// It goes away when the event starts (the "Starting now" reminder takes over) or when dismissed.
+export function EventCountdowns({
+  events,
+  userId,
+  onOpen,
+}: {
+  events: DeskEvent[]
+  userId: string | null
+  onOpen: (eventId: string) => void
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  // Dismissed for this session, by event and start.
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
+  const due = useMemo(() => {
+    if (!userId) return []
+    const found: Countdown[] = []
+    for (const event of events) {
+      if (!event.alarmMinutes || !event.participantIds.includes(userId)) continue
+      const lead = event.alarmMinutes * 60 * 1000
+      for (const occurrence of occurrencesOf(event, new Date(now), new Date(now + lead))) {
+        const start = new Date(occurrence.startsAt).getTime()
+        const key = `${event.id}:${occurrence.startsAt}`
+        if (start > now && start - lead <= now && !dismissed.has(key)) {
+          found.push({ key, event, startsAt: occurrence.startsAt })
+        }
+      }
+    }
+    return found.sort((a, b) => a.startsAt.localeCompare(b.startsAt))
+  }, [events, userId, now, dismissed])
+
+  // Ticks every second, which keeps the countdown exact and shows a card as soon as its alarm time comes.
+  useEffect(() => {
+    if (!userId) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [userId])
+
+  if (due.length === 0) return null
+  // Pinned to the bottom of the sidebar. Not a live region: the alarm toast already announced it, and
+  // the countdown would otherwise be read out every second.
+  return (
+    <section className="rail-alarms" aria-label="Event alarms">
+      {due.map(({ key, event, startsAt }) => (
+        <div key={key} className="toast countdown">
+          <button type="button" className="toast-body" onClick={() => onOpen(event.id)}>
+            <strong>
+              {event.title} starts in {timeLeft(new Date(startsAt).getTime() - now)}
+            </strong>
+            <span>
+              {timeOf(startsAt, true)}
+              {event.location ? ` · ${event.location}` : ""}
+            </span>
+          </button>
+          <button
+            type="button"
+            className="toast-close"
+            aria-label="Dismiss"
+            onClick={() => setDismissed((current) => new Set(current).add(key))}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </section>
+  )
 }
 
 export function Toasts({

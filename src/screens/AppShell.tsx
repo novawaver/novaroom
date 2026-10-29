@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react"
 import { useAuth } from "../auth"
+import { accentFor } from "../lib/accent"
 import { notifyIncoming, onNotificationClick, setUnreadBadge, windowIsActive } from "../lib/desktop"
 import { useReconnectEpoch } from "../lib/network"
 import { readUnread, unreadTotal, writeUnread } from "../lib/unread"
@@ -50,7 +51,7 @@ import {
 import { PEOPLE_FILTERS, People, matchesFilter, type PeopleFilter } from "./People"
 import { LEADDESK_TABS, LeadDesk, leadDeskHints, useLeadDesk, type DeskFocus, type LeadDeskTab } from "./LeadDesk"
 import { LEADERSHIP } from "../lib/leaddesk"
-import { Toasts, useEventAlerts } from "./EventAlerts"
+import { EventCountdowns, Toasts, useEventAlerts } from "./EventAlerts"
 import { TIMER_RANGES, Timer, rangeTotals, useTimer, useTimerHistory, type TimerRange } from "./Timer"
 import { formatDuration } from "../lib/timer"
 import { isTimeZone, localTimeZone } from "../lib/timezone"
@@ -61,7 +62,7 @@ import { PROFILE_TABS, Profile, type ProfileTab } from "./Profile"
 import { SETTINGS_TABS, Settings, type SettingsTab } from "./Settings"
 import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
 import { groupTables } from "../lib/vault"
-import { Vault, VaultLeaveDialog, useVault, type VaultState } from "./Vault"
+import { Vault, VaultFileCard, VaultLeaveDialog, useVault, type VaultState } from "./Vault"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
 import {
   ConfirmDialog,
@@ -346,13 +347,6 @@ function ListSkeleton() {
   )
 }
 
-function ChevronIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M9 6l6 6-6 6" />
-    </svg>
-  )
-}
 
 const PROFILE_ICONS: Record<ProfileTab, ComponentType> = {
   edit: EditProfileIcon,
@@ -524,6 +518,7 @@ function SideMenu<T extends string>({
   items,
   active,
   onSelect,
+  header,
   footer,
   plain,
 }: {
@@ -532,12 +527,15 @@ function SideMenu<T extends string>({
   items: Array<{ id: T; label: string; hint: string; icon: ComponentType; badge?: number; group?: string }>
   active: T
   onSelect: (id: T) => void
+  // Above the items, e.g. Vault's New table button.
+  header?: ReactNode
   footer?: ReactNode
-  // A compact list without lines between items or the arrow on the right, e.g. Vault tables.
+  // A compact list without lines between items, e.g. Vault tables.
   plain?: boolean
 }) {
   return (
     <nav className={plain ? "side-menu side-menu-plain" : "side-menu"} aria-label={label}>
+      {header && <div className="side-menu-header">{header}</div>}
       {items.map(({ id, label: itemLabel, hint, icon: Icon, badge, group }, index) => [
         group && group !== items[index - 1]?.group && (
           <h3 key={`group-${group}`} className="side-menu-group">
@@ -549,6 +547,8 @@ function SideMenu<T extends string>({
           type="button"
           className="side-menu-item"
           aria-current={active === id ? "page" : undefined}
+          // Just the name shows; the hint (a count or short description) is on hover.
+          title={hint}
           onClick={() => onSelect(id)}
         >
           <span className="side-menu-icon">
@@ -556,16 +556,12 @@ function SideMenu<T extends string>({
           </span>
           <span className="side-menu-text">
             <strong>{itemLabel}</strong>
-            <span>{hint}</span>
           </span>
           {badge ? (
             <span className="unread-count" aria-label={`${badge} unread`}>
               {badge > 9 ? "9+" : badge}
             </span>
           ) : null}
-          <span className="side-menu-chevron">
-            <ChevronIcon />
-          </span>
         </button>,
       ])}
       {footer && <div className="side-menu-footer">{footer}</div>}
@@ -590,18 +586,21 @@ export function VaultRail({ vault }: { vault: VaultState }) {
       )}
       active={vault.table?.id ?? ""}
       onSelect={vault.selectTable}
-      footer={
-        vault.data && vault.editing ? (
-          <button type="button" className="side-menu-item" onClick={vault.addTable}>
-            <span className="side-menu-icon">
-              <NewTableIcon />
-            </span>
-            <span className="side-menu-text">
-              <strong>New table</strong>
-              <span>Add a table to this Vault</span>
-            </span>
-          </button>
-        ) : undefined
+      // The file, then New table once a file is open (adding a table switches to editing it).
+      header={
+        <>
+          <VaultFileCard vault={vault} />
+          {vault.data && (
+            <button type="button" className="side-menu-item" title="Add a table to this Vault" onClick={vault.addTable}>
+              <span className="side-menu-icon">
+                <NewTableIcon />
+              </span>
+              <span className="side-menu-text">
+                <strong>New table</strong>
+              </span>
+            </button>
+          )}
+        </>
       }
     />
   )
@@ -760,6 +759,11 @@ function initials(name: string) {
   const parts = name.split(/\s+/).filter(Boolean)
   if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
   return name.slice(0, 2).toUpperCase()
+}
+
+/** The minute a moment falls in, for telling whether two messages share a shown time. */
+function minuteOf(value: string) {
+  return Math.floor(new Date(value).getTime() / 60_000)
 }
 
 function formatTime(value: string) {
@@ -1855,13 +1859,17 @@ export function AppShell({ local }: { local: LocalChatState }) {
             active={profileTab}
             onSelect={setProfileTab}
             footer={
-              <button type="button" className="side-menu-item sign-out" onClick={() => void signOut()}>
+              <button
+                type="button"
+                className="side-menu-item sign-out"
+                title={`Signed in as ${session.email}`}
+                onClick={() => void signOut()}
+              >
                 <span className="side-menu-icon">
                   <SignOutIcon />
                 </span>
                 <span className="side-menu-text">
                   <strong>Sign out</strong>
-                  <span>{session.email}</span>
                 </span>
               </button>
             }
@@ -2058,6 +2066,13 @@ export function AppShell({ local }: { local: LocalChatState }) {
         </div>
           </>
         )}
+        {hasLeadDesk && (
+          <EventCountdowns
+            events={alerts.events}
+            userId={session.userId}
+            onOpen={(eventId) => openDesk("schedule", eventId)}
+          />
+        )}
       </aside>
       {view === "local" ? (
         <LocalChatThread local={local} userId={session.userId} />
@@ -2191,12 +2206,18 @@ export function AppShell({ local }: { local: LocalChatState }) {
                     {query ? "No messages match that search." : "No messages yet. Say hello."}
                   </p>
                 ) : (
-                  visible.map((message) => {
+                  visible.map((message, index) => {
                     const mine = message.senderId === session.userId
+                    // The time shows once for a run of messages from one person within the same minute.
+                    const previous = visible[index - 1]
+                    const sameMinute =
+                      previous?.senderId === message.senderId &&
+                      minuteOf(previous.createdAt) === minuteOf(message.createdAt)
                     const name = mine ? profile.displayName || session.email : message.senderName
                     const avatarUrl = mine ? profile.avatarUrl : message.senderAvatarUrl
-                    const avatar = (
-                      <span className="avatar message-avatar" title={name}>
+                    // A 1:1 chat has only two people, so a picture beside each bubble adds nothing.
+                    const avatar = selected.kind !== "direct" && (
+                      <span className={`avatar message-avatar accent-${accentFor(message.senderId)}`} title={name}>
                         {avatarUrl ? <img src={avatarUrl} alt="" /> : <span>{initials(name)}</span>}
                       </span>
                     )
@@ -2212,7 +2233,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
                         >
                           {selection.selecting && choosable && <SelectCheck checked={chosen} />}
                           {!mine && avatar}
-                          <article className={mine ? "bubble mine" : "bubble theirs"}>
+                          <article className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine ? " no-meta" : ""}`}>
                             {message.attachmentUrl && isImage(message.attachmentMime) && (
                               <img
                                 className="bubble-image"
@@ -2235,7 +2256,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
                             {message.body && <p>{message.body}</p>}
                             {message.deleted && <p className="deleted-note">Message deleted</p>}
                             <span className="bubble-meta">
-                              <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
+                              {!sameMinute && <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>}
                               {message.senderId === session.userId &&
                                 (sendingIds.has(message.id) ? (
                                   <span className="bubble-status sending" role="img" aria-label="Sending" />

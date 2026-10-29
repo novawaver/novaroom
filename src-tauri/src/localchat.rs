@@ -64,6 +64,12 @@ const PING_EVERY: Duration = Duration::from_secs(20);
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
 /// How often to try again to reach apps that were found on the network but are not connected.
 const RETRY_EVERY: Duration = Duration::from_secs(15);
+/// Each chat's messages are deleted from this computer this many hours after they arrive, unless the
+/// person sets another time for that chat. 0 keeps them.
+const AUTO_DELETE_DEFAULT_HOURS: i64 = 24;
+const AUTO_DELETE_MAX_HOURS: i64 = 365 * 24;
+/// How often to look for messages that have reached their auto-delete age.
+const SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
@@ -93,6 +99,12 @@ CREATE TABLE IF NOT EXISTS directory (
   name TEXT NOT NULL,
   PRIMARY KEY (user_id, public_key)
 );
+-- How long each chat keeps messages on this computer, for chats where this person changed it from
+-- the default. 0 keeps them.
+CREATE TABLE IF NOT EXISTS chat_settings (
+  chat TEXT PRIMARY KEY,
+  auto_delete_hours INTEGER NOT NULL
+);
 ";
 
 /// Columns added to `messages` after the first version, added to older files on start.
@@ -106,6 +118,8 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
     ("file_path", "TEXT"),
     // Own direct messages: whether the other person has seen it.
     ("read", "INTEGER NOT NULL DEFAULT 0"),
+    // When it was saved on this computer, which auto-delete counts from. Empty on older rows: use sent_at.
+    ("stored_at", "INTEGER"),
 ];
 
 fn migrate(db: &Connection) -> Result<(), String> {
@@ -515,15 +529,50 @@ impl Session {
         let _ = self.app.emit("local-chat-peers", self.peer_list());
     }
 
-    /// Saves a message unless it is already here or was deleted here. True if it was new.
+    /// Hours after which one chat's messages are deleted from this computer; 0 when they are kept.
+    fn auto_delete_hours(&self, chat: &str) -> i64 {
+        let db = self.db.lock().unwrap();
+        db.query_row("SELECT auto_delete_hours FROM chat_settings WHERE chat = ?1", params![chat], |row| row.get(0))
+            .unwrap_or(AUTO_DELETE_DEFAULT_HOURS)
+    }
+
+    /// Deletes messages past their chat's auto-delete age, with their files, and tells the window
+    /// which. The age counts from when a message reached this computer, so one that arrives late (its
+    /// sender was away) still stays the full time. This person's own direct messages that have not
+    /// reached the other person yet are kept, so they are still delivered when that person is back.
+    fn sweep(&self) {
+        let ids: Vec<String> = {
+            let db = self.db.lock().unwrap();
+            let Ok(mut statement) = db.prepare(
+                "SELECT m.id FROM messages m
+                 LEFT JOIN chat_settings s ON s.chat = m.chat
+                 WHERE COALESCE(s.auto_delete_hours, ?1) > 0
+                   AND COALESCE(m.stored_at, m.sent_at) < ?2 - COALESCE(s.auto_delete_hours, ?1) * 3600000
+                   AND NOT (m.sender_id = ?3 AND m.chat <> ?4 AND m.delivered = 0)",
+            ) else {
+                return;
+            };
+            let ids = statement
+                .query_map(params![AUTO_DELETE_DEFAULT_HOURS, now_ms(), self.user_id, ROOM], |row| row.get(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+                .unwrap_or_default();
+            ids
+        };
+        if !ids.is_empty() && self.remove(&ids).is_ok() {
+            let _ = self.app.emit("local-chat-expired", &ids);
+        }
+    }
+
+    /// Saves a message unless it is already here or was deleted here (auto-deleted ones included,
+    /// so a copy sent again on reconnecting does not come back). True if it was new.
     fn store(&self, item: &LocalMessage) -> bool {
         let db = self.db.lock().unwrap();
         let file = item.file.as_ref();
         db.execute(
             "INSERT OR IGNORE INTO messages
                (id, chat, sender_id, sender_name, body, sent_at, delivered, read, reply_to,
-                file_name, file_mime, file_size, file_state, file_path)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13
+                file_name, file_mime, file_size, file_state, file_path, stored_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13, ?14
              WHERE NOT EXISTS (SELECT 1 FROM removed WHERE id = ?1)",
             params![
                 item.id,
@@ -539,6 +588,7 @@ impl Session {
                 file.map(|file| file.size as i64),
                 file.map(|file| file.state.clone()),
                 item.file_path,
+                now_ms(),
             ],
         )
         .map(|changed| changed > 0)
@@ -1149,6 +1199,18 @@ async fn discovery_loop(session: Arc<Session>, events: mdns_sd::Receiver<Service
     }
 }
 
+/// Deletes messages past their auto-delete age now and every few minutes while Local chat runs.
+async fn sweep_loop(session: Arc<Session>) {
+    let mut stop = session.stop.subscribe();
+    let mut every = tokio::time::interval(SWEEP_EVERY);
+    loop {
+        tokio::select! {
+            _ = every.tick() => session.sweep(),
+            _ = stop.changed() => break,
+        }
+    }
+}
+
 fn shut_down(session: &Session) {
     let _ = session.stop.send(true);
     let _ = session.mdns.unregister(&session.service_name);
@@ -1237,6 +1299,7 @@ pub async fn local_chat_start(
     });
     tauri::async_runtime::spawn(accept_loop(session.clone(), listener));
     tauri::async_runtime::spawn(discovery_loop(session.clone(), events));
+    tauri::async_runtime::spawn(sweep_loop(session.clone()));
     *state.0.lock().unwrap() = Some(session);
     Ok(public_key)
 }
@@ -1507,6 +1570,37 @@ pub fn local_chat_clear(state: tauri::State<'_, LocalChat>, chat: String) -> Res
         ids
     };
     session.remove(&ids)
+}
+
+/// How many hours one chat keeps messages on this computer before they are deleted; 0 keeps them.
+#[tauri::command]
+pub fn local_chat_auto_delete(state: tauri::State<'_, LocalChat>, chat: String) -> Result<i64, String> {
+    Ok(running(&state)?.auto_delete_hours(&chat))
+}
+
+/// Sets how many hours one chat keeps messages on this computer (0 keeps them), then deletes any
+/// that are already older than that.
+#[tauri::command]
+pub fn local_chat_set_auto_delete(state: tauri::State<'_, LocalChat>, chat: String, hours: i64) -> Result<(), String> {
+    if chat != ROOM && !valid_user_id(&chat) {
+        return Err("That chat is not valid.".into());
+    }
+    if !(0..=AUTO_DELETE_MAX_HOURS).contains(&hours) {
+        return Err("Choose a time between 1 hour and 1 year, or keep messages.".into());
+    }
+    let session = running(&state)?;
+    session
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO chat_settings (chat, auto_delete_hours) VALUES (?1, ?2)
+             ON CONFLICT (chat) DO UPDATE SET auto_delete_hours = excluded.auto_delete_hours",
+            params![chat, hours],
+        )
+        .map_err(message)?;
+    session.sweep();
+    Ok(())
 }
 
 /// Tells the room, or the other person in a direct chat, that this person started or stopped typing.

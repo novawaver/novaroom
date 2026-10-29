@@ -371,6 +371,8 @@ pub fn run() {
             localchat::local_chat_mark_read,
             localchat::local_chat_delete_messages,
             localchat::local_chat_clear,
+            localchat::local_chat_auto_delete,
+            localchat::local_chat_set_auto_delete,
             watchdog::watchdog_beat
         ])
         .on_window_event(|window, event| {

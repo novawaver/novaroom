@@ -31,6 +31,8 @@
   --stat-cool: linear-gradient(135deg, #fd791e, #ffb27a);
   --stat-warm: linear-gradient(135deg, #d14a1d, #fd791e);
   --read-tick: #1d5fc4;
+  /* Schedule events you take part in. */
+  --participant: #2f7fd8;
 }
 
 :root[data-theme="dark"] {
@@ -59,6 +61,7 @@
   --stat-cool: linear-gradient(135deg, #fd791e, #ffb27a);
   --stat-warm: linear-gradient(135deg, #d14a1d, #fd791e);
   --read-tick: #8cc0ff;
+  --participant: #6ab7f0;
 }
 
 * {
@@ -781,15 +784,21 @@ textarea:focus {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 4px;
+}
+
+/* Set off from the list below it by a line. */
+.side-menu-header {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 4px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--side-line);
 }
 
 .side-menu-footer {
   margin-top: auto;
   padding-top: 12px;
-}
-
-.side-menu-plain .side-menu-chevron {
-  display: none;
 }
 
 .side-menu-item.sign-out,
@@ -802,7 +811,7 @@ textarea:focus {
   align-items: center;
   gap: 14px;
   width: 100%;
-  padding: 12px 8px;
+  padding: 8px;
   border: 0;
   border-radius: 12px;
   background: transparent;
@@ -817,24 +826,17 @@ textarea:focus {
   background: var(--side-soft);
 }
 
-/* Keep the round icon visible against the shaded row. */
-.side-menu-item:hover .side-menu-icon {
-  background: var(--side);
-}
-
+/* A bare icon; the selected row's takes the brand colour. */
 .side-menu-item[aria-current="page"] .side-menu-icon {
-  background: var(--brand);
-  color: #fff;
+  color: var(--brand);
 }
 
 .side-menu-icon {
   flex: none;
-  width: 40px;
-  height: 40px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  background: var(--side-soft);
   color: var(--side-ink);
 }
 
@@ -857,8 +859,7 @@ textarea:focus {
   white-space: nowrap;
 }
 
-.side-menu-icon svg,
-.side-menu-chevron svg {
+.side-menu-icon svg {
   width: 20px;
   height: 20px;
   fill: none;
@@ -866,18 +867,6 @@ textarea:focus {
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-.side-menu-chevron {
-  flex: none;
-  display: grid;
-  color: var(--side-ink);
-}
-
-.side-menu-chevron svg {
-  width: 18px;
-  height: 18px;
-  stroke-width: 2.2;
 }
 
 .contact-list {
@@ -1195,6 +1184,19 @@ textarea:focus {
   font-size: 13px;
 }
 
+/* How many are in a room, in a quiet pill at the row's right (unread counts are the loud ones). */
+.member-count {
+  flex: 0 0 auto;
+  min-width: 1.4rem;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+}
+
 .avatar {
   width: 36px;
   height: 36px;
@@ -1359,6 +1361,54 @@ textarea:focus {
   width: 18px;
   height: 18px;
   fill: currentColor;
+}
+
+/* Local chat's auto-delete: a clock and how soon messages go ("24h", "Off"). */
+.thread-menu-button.auto-delete-button {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.auto-delete-button svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Kept forever: the clock fades, so a chat that deletes stands out. */
+.thread-menu-button.auto-delete-button.off {
+  opacity: 0.7;
+}
+
+.bar-menu-title {
+  margin: 4px 12px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.bar-menu-note {
+  margin: 6px 12px 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.bar-menu button[aria-checked="true"] {
+  color: var(--brand);
+  font-weight: 650;
+}
+
+.bar-menu button[aria-checked="true"]::after {
+  content: "✓";
+  float: right;
 }
 
 /* Choosing messages to delete: the whole row is the checkbox. */
@@ -1677,34 +1727,35 @@ select {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* Messages read in Inter, bundled with the app so it works offline. */
+  font-family: "Inter Variable", "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .bubble {
   position: relative;
   max-width: min(72%, 460px);
-  padding: 9px 14px;
-  border-radius: 12px;
+  /* Room above for the time and ticks, which sit outside the bubble. */
+  margin-top: 18px;
+  padding: 10px 14px;
+  border-radius: 16px;
 }
 
-/* iMessage-style tail: a bubble-coloured curve, with a paper-coloured curve carving its inner edge. */
+/* Nothing to show above it (a follow-up within the same minute), so it sits close under the last one. */
+.bubble.no-meta {
+  margin-top: 0;
+}
+
+/* A small tail sweeping out from the bubble's squared bottom corner. */
 .bubble.mine::before,
 .bubble.theirs::before {
   content: "";
   position: absolute;
   bottom: 0;
-  width: 20px;
-  height: 20px;
+  width: 8px;
+  height: 10px;
   background: inherit;
-}
-
-.bubble.mine::after,
-.bubble.theirs::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  width: 10px;
-  height: 20px;
-  background: var(--paper);
 }
 
 .bubble p {
@@ -1713,13 +1764,17 @@ select {
   word-break: break-word;
 }
 
+/* Time and ticks, just above the bubble on its outer side. */
 .bubble-meta {
+  position: absolute;
+  bottom: calc(100% + 2px);
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.75;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .bubble time {
@@ -1781,18 +1836,17 @@ select {
   color: var(--ink);
 }
 
-.bubble.mine::before {
-  right: -7px;
-  border-bottom-left-radius: 16px;
+.bubble.mine {
+  border-bottom-right-radius: 0;
 }
 
-.bubble.mine::after {
-  right: -10px;
-  border-bottom-left-radius: 10px;
+.bubble.mine::before {
+  right: -8px;
+  clip-path: path("M0 0 C1 5 4 8.5 8 10 L0 10 Z");
 }
 
 .bubble.mine .bubble-meta {
-  justify-content: flex-end;
+  right: 0;
 }
 
 .bubble.theirs {
@@ -1800,14 +1854,17 @@ select {
   color: var(--ink);
 }
 
-.bubble.theirs::before {
-  left: -7px;
-  border-bottom-right-radius: 16px;
+.bubble.theirs {
+  border-bottom-left-radius: 0;
 }
 
-.bubble.theirs::after {
-  left: -10px;
-  border-bottom-right-radius: 10px;
+.bubble.theirs::before {
+  left: -8px;
+  clip-path: path("M8 0 C7 5 4 8.5 0 10 L8 10 Z");
+}
+
+.bubble.theirs .bubble-meta {
+  left: 0;
 }
 
 .message-row {
@@ -1833,7 +1890,9 @@ select {
   width: 36px;
   height: 36px;
   font-size: 13px;
-  /* Drawn above the bubble's tail and its paper-coloured cut-out, which reach into the gap. */
+  /* A ring in the sender's accent colour, so people are told apart at a glance. */
+  border: 2px solid var(--accent, var(--line));
+  /* Drawn above the bubble's tail, which reaches into the gap. */
   position: relative;
   z-index: 1;
 }
@@ -1854,6 +1913,20 @@ select {
   max-height: 280px;
   border-radius: 6px;
   margin-bottom: 6px;
+}
+
+/* A picture sits in an even frame of bubble on every side; any text under it keeps the usual inset. */
+.bubble:has(.bubble-image, .local-image-placeholder) {
+  padding: 6px;
+}
+
+.bubble:has(.bubble-image, .local-image-placeholder) :is(.bubble-image, .local-image-placeholder) {
+  margin-bottom: 0;
+  border-radius: 10px;
+}
+
+.bubble:has(.bubble-image, .local-image-placeholder) p {
+  padding: 6px 8px 4px;
 }
 
 .file-link {
@@ -3068,6 +3141,12 @@ code {
   border-color: var(--brand-bright);
 }
 
+/* An event you take part in. Before .past and .new so those still win. */
+.schedule-item.participating {
+  border-left-color: var(--participant);
+  background: color-mix(in srgb, var(--participant) 7%, var(--card));
+}
+
 .schedule-item.past {
   border-left-color: var(--line);
   /* A little greyer than upcoming events, towards the page colour. */
@@ -3207,8 +3286,9 @@ code {
 .schedule-item.event-card {
   display: block;
   padding: 0;
-  border-left-width: 1px;
-  border-radius: 14px;
+  border-left-width: 3px;
+  /* Square on the left, rounded on the right. */
+  border-radius: 0 14px 14px 0;
   cursor: default;
 }
 
@@ -3291,6 +3371,122 @@ code {
   font-size: 13px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+/* Event tags: a soft chip with a dot in the tag's accent colour (set by an accent-* class). */
+.event-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.event-tag,
+.schedule-tag-filter button,
+.event-tag-picker button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.event-tag {
+  padding: 2px 9px;
+  background: color-mix(in srgb, var(--accent, var(--muted)) 16%, var(--card));
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.event-tag-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent, var(--muted));
+}
+
+/* "For me": shows only events you take part in. Sits in the toolbar beside the views. */
+.desk-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.desk-toggle:hover {
+  color: var(--ink);
+}
+
+.desk-toggle[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--participant) 60%, var(--card));
+  background: color-mix(in srgb, var(--participant) 16%, var(--card));
+  color: var(--ink);
+}
+
+/* Filter chips under the schedule toolbar, and the picker in the event form. Pick one or none. */
+.schedule-tag-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -6px 0 16px;
+}
+
+.event-tag-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.event-tag-picker legend {
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.event-tag-picker .hint {
+  margin: 0;
+}
+
+.schedule-tag-filter button,
+.event-tag-picker button {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.schedule-tag-filter button:hover,
+.event-tag-picker button:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+.schedule-tag-filter button[aria-pressed="true"],
+.event-tag-picker button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent, var(--brand-bright)) 60%, var(--card));
+  background: color-mix(in srgb, var(--accent, var(--brand-bright)) 18%, var(--card));
+  color: var(--ink);
+}
+
+.event-tag-picker button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Stands in for a picture: the event's month, day and weekday, or "Every day". */
@@ -4076,6 +4272,27 @@ code {
   box-shadow: var(--shadow);
 }
 
+/* Event alarms counting down to the start, pinned to the bottom of the sidebar whatever it shows.
+   Sticky so they stay in sight while a long list scrolls behind them. */
+.rail-alarms {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: grid;
+  gap: 8px;
+  margin: auto -16px -16px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--side-line);
+  background: var(--side);
+}
+
+/* Tinted like the events you take part in. */
+.toast.countdown {
+  border-left-color: var(--participant);
+  background: color-mix(in srgb, var(--participant) 8%, var(--card));
+  box-shadow: none;
+}
+
 .toast-body {
   flex: 1;
   display: grid;
@@ -4783,13 +5000,10 @@ code {
   fill: currentColor;
 }
 
-/* Every second column is shaded. On the <col>, so row and cell backgrounds still paint over it. */
-.vault-grid col.vault-col-alt {
+/* Every second row is shaded. On the <tr>, so cell backgrounds (hover, duplicates, a followed
+   link) still paint over it. */
+.vault-grid tbody tr:nth-child(even) {
   background: color-mix(in srgb, var(--ink) 4%, transparent);
-}
-
-.vault-grid th.vault-col-alt {
-  background: color-mix(in srgb, var(--ink) 5%, var(--side-soft));
 }
 
 /* Row numbers, counted down the rows as shown. Not stored in the vault. */
@@ -4825,22 +5039,79 @@ code {
 }
 
 /* Long paths are cut from the start, so the file name at the end stays visible. */
-.vault-title .thread-email.vault-path {
-  display: flex;
+/* The open Vault file, at the top of the sidebar's table list. */
+.vault-file {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--side-line);
+  border-radius: 12px;
+  background: var(--side-soft);
+}
+
+.vault-file-info {
+  display: grid;
+  gap: 2px;
   min-width: 0;
+}
+
+.vault-file-info strong,
+.vault-file-folder,
+.vault-file-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.vault-path-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.vault-file-info strong {
+  font-weight: 650;
+}
+
+.vault-file-folder,
+.vault-file-meta {
+  color: var(--side-muted);
+  font-size: 12px;
+}
+
+/* Long folders are cut from the start, keeping the part nearest the file. */
+.vault-file-folder {
   direction: rtl;
   text-align: left;
 }
 
-.vault-unsaved {
-  flex: none;
+.vault-file-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.vault-file-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--side-line);
+  border-radius: 8px;
+  background: var(--side);
+  color: var(--side-ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.vault-file-actions button:hover {
+  border-color: var(--brand-bright);
+}
+
+.vault-file-actions svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* Shown in place of Edit while editing, shaded so it is clear the table is being edited. */

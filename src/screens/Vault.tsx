@@ -1099,9 +1099,6 @@ function VaultModal({
   )
 }
 
-/** Every second column is shaded (through its <col>, so row and cell highlights still show over it). */
-const altColumn = (index: number) => (index % 2 === 1 ? "vault-col-alt" : undefined)
-
 /** The items inside one Sub-table cell. Read-only unless onChange is given (Edit mode). */
 function SubTableDialog({
   column,
@@ -1130,20 +1127,13 @@ function SubTableDialog({
       ) : (
         <div className="vault-grid-wrap vault-sub-wrap">
           <table className={editing ? "vault-grid vault-fit" : "vault-grid vault-viewing vault-fit"}>
-            <colgroup>
-              <col />
-              {columns.map((sub, columnIndex) => (
-                <col key={sub.id} className={altColumn(columnIndex)} />
-              ))}
-              {editing && <col />}
-            </colgroup>
             <thead>
               <tr>
                 <th scope="col" className="vault-no">
                   No
                 </th>
-                {columns.map((sub, columnIndex) => (
-                  <th key={sub.id} scope="col" className={altColumn(columnIndex)}>
+                {columns.map((sub) => (
+                  <th key={sub.id} scope="col">
                     <span className="vault-col-name">{sub.name}</span>
                   </th>
                 ))}
@@ -1953,14 +1943,6 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               .filter(Boolean)
               .join(" ")}
           >
-            <colgroup>
-              {editing && <col />}
-              <col />
-              {table.columns.map((column, columnIndex) => (
-                <col key={column.id} className={altColumn(columnIndex)} />
-              ))}
-              {editing && <col />}
-            </colgroup>
             <thead>
               <tr>
                 {editing && <th className="vault-grip-cell" aria-label="Move rows" />}
@@ -1972,7 +1954,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                     key={column.id}
                     scope="col"
                     data-column
-                    className={[columnClass(column, columnIndex), altColumn(columnIndex)].filter(Boolean).join(" ") || undefined}
+                    className={columnClass(column, columnIndex)}
                   >
                     <div className="vault-col-head">
                       {editing && table.columns.length > 1 && (
@@ -2262,34 +2244,11 @@ export function Vault({ vault }: { vault: VaultState }) {
       <header className="thread-bar profile-bar">
         <div className="vault-title">
           <h1>{opened ? vault.table?.name || "Vault" : "Vault"}</h1>
-          {opened && (
-            <p className="thread-email vault-path" title={vault.file!}>
-              {/* Marks keep the path in reading order while long ones are cut from the start. */}
-              <span className="vault-path-text">{`‎${vault.file}‎`}</span>
-              {vault.dirty && <span className="vault-unsaved"> · Unsaved changes</span>}
-            </p>
-          )}
+          {/* The file itself, with Open and New, is at the top of the sidebar. */}
+          {opened && vault.dirty && <p className="thread-email vault-unsaved">Unsaved changes</p>}
         </div>
         {opened && (
           <div className="profile-bar-actions">
-            <button
-              type="button"
-              className="bar-icon"
-              aria-label="Open another Vault file"
-              title="Open another Vault file"
-              onClick={() => vault.chooseFile("open")}
-            >
-              <OpenFileIcon />
-            </button>
-            <button
-              type="button"
-              className="bar-icon"
-              aria-label="Create a new Vault file"
-              title="Create a new Vault file"
-              onClick={() => vault.chooseFile("create")}
-            >
-              <NewFileIcon />
-            </button>
             <button
               type="button"
               className="bar-icon vault-save"
@@ -2369,6 +2328,48 @@ export function Vault({ vault }: { vault: VaultState }) {
           </div>
         </div>
       )}
+    </section>
+  )
+}
+
+/**
+ * The open Vault file at the top of the sidebar: its name, folder, size and save state, with buttons
+ * to open another file or create a new one.
+ */
+export function VaultFileCard({ vault }: { vault: VaultState }) {
+  const { file, data } = vault
+  const name = file ? fileName(file) : null
+  // The folder, without the file name and the slash before it.
+  const folder = file && name ? file.slice(0, file.length - name.length).replace(/[\\/]$/, "") : ""
+  const rows = data?.tables.reduce((total, table) => total + table.rows.length, 0) ?? 0
+  return (
+    <section className="vault-file" aria-label="Vault file">
+      <div className="vault-file-info">
+        <strong title={file ?? undefined}>{name ?? "No Vault file open"}</strong>
+        {folder && (
+          <span className="vault-file-folder" title={file ?? undefined}>
+            {/* Marks keep the path in reading order while long ones are cut from the start. */}
+            {`‎${folder}‎`}
+          </span>
+        )}
+        {data && (
+          <span className="vault-file-meta">
+            {data.tables.length === 1 ? "1 table" : `${data.tables.length} tables`} ·{" "}
+            {rows === 1 ? "1 row" : `${rows} rows`}
+            {vault.dirty ? <b className="vault-unsaved"> · Unsaved changes</b> : " · Saved"}
+          </span>
+        )}
+      </div>
+      <div className="vault-file-actions">
+        <button type="button" title="Open another Vault file" onClick={() => vault.chooseFile("open")}>
+          <OpenFileIcon />
+          Open
+        </button>
+        <button type="button" title="Create a new Vault file" onClick={() => vault.chooseFile("create")}>
+          <NewFileIcon />
+          New
+        </button>
+      </div>
     </section>
   )
 }

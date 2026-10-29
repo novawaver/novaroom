@@ -4,6 +4,7 @@ import App from "./App"
 import { AuthProvider } from "./auth"
 import { inTauri } from "./lib/desktop"
 import { applyStoredTheme } from "./lib/theme"
+import "@fontsource-variable/inter/index.css"
 import "./styles.css"
 
 applyStoredTheme()

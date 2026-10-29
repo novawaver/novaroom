@@ -1,13 +1,16 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
+import { accentFor } from "../lib/accent"
 import { notifyIncoming, windowIsActive } from "../lib/desktop"
 import { loadDraft, saveDraft } from "../lib/drafts"
 import { useIdle } from "../lib/presence"
 import { typingText } from "../lib/typing"
 import {
+  AUTO_DELETE_CHOICES,
   LOCAL_FILE_LIMIT,
   LOCAL_ROOM,
   clearLocalChat,
   deleteLocalMessages,
+  localAutoDelete,
   localAvatars,
   localChatAvailable,
   localFileUrl,
@@ -20,6 +23,7 @@ import {
   saveLocalFile,
   sendLocalMessage,
   sendLocalTyping,
+  setLocalAutoDelete,
   setLocalIdle,
   startLocalChat,
   stopLocalChat,
@@ -75,6 +79,8 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
       .catch(() => {})
   }, [])
   const lastTypingRef = useRef<{ chat: string; at: number } | null>(null)
+  // Hours until the open chat's messages are deleted from this computer (0: never); null until loaded.
+  const [autoDeleteHours, setAutoDeleteHours] = useState<number | null>(null)
 
   const reloadChats = useCallback(() => {
     void localChats()
@@ -106,6 +112,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
       setMessages([])
       setUnread({})
       setAvatars({})
+      setAutoDeleteHours(null)
       void stopLocalChat().catch(() => {})
     }
     // The name is sent separately below, so renaming does not restart everything.
@@ -150,6 +157,21 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
   useEffect(() => {
     if (publicKey) loadMessages(selected)
   }, [publicKey, selected, loadMessages])
+
+  // The open chat's auto-delete time.
+  useEffect(() => {
+    if (!publicKey) return
+    let active = true
+    setAutoDeleteHours(null)
+    void localAutoDelete(selected)
+      .then((hours) => {
+        if (active) setAutoDeleteHours(hours)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [publicKey, selected])
 
   // Clear the open chat's count whenever it is on screen.
   useEffect(() => {
@@ -199,6 +221,11 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
         setMessages((current) =>
           current.map((item) => (item.id === id && item.file ? { ...item, file: { ...item.file, state } } : item)),
         )
+      },
+      expired(ids) {
+        const gone = new Set(ids)
+        setMessages((current) => current.filter((item) => !gone.has(item.id)))
+        reloadChats()
       },
     })
   }, [publicKey, userId, reloadChats])
@@ -280,6 +307,19 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     reloadChats()
   }
 
+  /** Changes how long the open chat keeps messages on this computer. Older ones go at once (the expired event). */
+  async function changeAutoDelete(hours: number) {
+    const chat = selected
+    const before = autoDeleteHours
+    setAutoDeleteHours(hours)
+    try {
+      await setLocalAutoDelete(chat, hours)
+    } catch (caught) {
+      if (selectedRef.current === chat) setAutoDeleteHours(before)
+      setError(caught instanceof Error ? caught.message : "Could not change the auto-delete time.")
+    }
+  }
+
   /** Call on every change to the message box; hasText is false once it is empty or sent. */
   function onType(hasText: boolean) {
     if (!publicKey) return
@@ -331,6 +371,8 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     send,
     deleteMessages,
     clear,
+    autoDeleteHours,
+    changeAutoDelete,
     onType,
     typists,
     chatName,
@@ -426,6 +468,12 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
         <strong>{local.chatName(chat)}</strong>
         <span>{hint}</span>
       </span>
+      {chat === LOCAL_ROOM && (
+        // Everyone in the room now: the people on the network, and you.
+        <span className="member-count" title={`${local.peers.length + 1} on this network, including you`}>
+          {local.peers.length + 1}
+        </span>
+      )}
       {local.unread[chat] > 0 && (
         <span className="unread-count">{local.unread[chat] > 9 ? "9+" : local.unread[chat]}</span>
       )}
@@ -486,6 +534,91 @@ function formatBytes(size: number) {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${Math.ceil(size / 1024)} KB`
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * A clock in the chat's header showing how soon its messages are deleted from this computer (24h,
+ * Off…), which opens the choices.
+ */
+function AutoDeleteMenu({
+  hours,
+  onChange,
+  disabled,
+}: {
+  // null while it loads.
+  hours: number | null
+  onChange: (hours: number) => void
+  disabled?: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function onPointer(event: PointerEvent) {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false)
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false)
+    }
+    document.addEventListener("pointerdown", onPointer)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("pointerdown", onPointer)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [open])
+
+  const current = AUTO_DELETE_CHOICES.find((choice) => choice.hours === hours)
+  // A time set some other way still shows, as hours.
+  const short = hours === null ? "" : (current?.short ?? `${hours}h`)
+  const label =
+    hours === null
+      ? "Auto-delete"
+      : hours === 0
+        ? "Messages in this chat are kept"
+        : `Messages in this chat are deleted ${(current?.label ?? `after ${hours} hours`).toLowerCase()}`
+
+  return (
+    <div className="thread-menu" ref={ref}>
+      <button
+        type="button"
+        className={hours === 0 ? "thread-menu-button auto-delete-button off" : "thread-menu-button auto-delete-button"}
+        aria-label={`${label}. Change auto-delete`}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled || hours === null}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 7.5V12l3 2" />
+        </svg>
+        {short && <span>{short}</span>}
+      </button>
+      {open && (
+        <div className="bar-menu" role="menu" aria-label="Delete messages in this chat">
+          <p className="bar-menu-title">Delete messages in this chat</p>
+          {AUTO_DELETE_CHOICES.map((choice) => (
+            <button
+              key={choice.hours}
+              type="button"
+              role="menuitemradio"
+              aria-checked={choice.hours === hours}
+              onClick={() => {
+                setOpen(false)
+                if (choice.hours !== hours) onChange(choice.hours)
+              }}
+            >
+              {choice.label}
+            </button>
+          ))}
+          <p className="bar-menu-note">Only on this computer, counted from when each message arrived.</p>
+        </div>
+      )}
+    </div>
+  )
 }
 
 /** One check when sent or delivered, two when the other person has seen it. */
@@ -831,6 +964,11 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           </p>
         </div>
         <div className="thread-actions">
+          <AutoDeleteMenu
+            hours={local.autoDeleteHours}
+            onChange={(hours) => void local.changeAutoDelete(hours)}
+            disabled={!local.running}
+          />
           <ThreadMenu onSelect={selection.start} onClear={onClearChat} disabled={!local.running} />
         </div>
       </header>
@@ -862,7 +1000,13 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             const name = message.senderName || "Someone"
             const day = formatDay(message.sentAt)
             const newDay = index === 0 || formatDay(local.messages[index - 1].sentAt) !== day
-            const avatar = <LocalAvatar name={name} url={local.avatarOf(message.senderId)} className="message-avatar" />
+            // The time shows once for a run of messages from one person within the same minute.
+            const previous = local.messages[index - 1]
+            const sameMinute =
+              previous?.senderId === message.senderId &&
+              Math.floor(previous.sentAt / 60_000) === Math.floor(message.sentAt / 60_000)
+            // A 1:1 chat has only two people, so a picture beside each bubble adds nothing.
+            const avatar = isRoom && <LocalAvatar name={name} url={local.avatarOf(message.senderId)} className={`message-avatar accent-${accentFor(message.senderId)}`} />
             const reply = message.replyTo
             const chosen = selection.selecting && selection.chosen.has(message.id)
             return (
@@ -875,7 +1019,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                 >
                   {selection.selecting && <SelectCheck checked={chosen} />}
                   {!mine && avatar}
-                  <article className={mine ? "bubble mine" : "bubble theirs"}>
+                  <article className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine ? " no-meta" : ""}`}>
                     {reply && (
                       <button type="button" className="bubble-quote" onClick={() => showMessage(reply.id)}>
                         <strong>{nameOf(reply.senderId, reply.senderName)}</strong>
@@ -885,7 +1029,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                     <LocalFileView message={message} onOpenImage={(url, imageName) => setViewing({ id: message.id, url, name: imageName })} />
                     {message.body && <p>{message.body}</p>}
                     <span className="bubble-meta">
-                      <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>
+                      {!sameMinute && <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>}
                       {mine && <LocalStatus message={message} isRoom={isRoom} />}
                     </span>
                     <button

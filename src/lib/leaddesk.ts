@@ -53,6 +53,10 @@ export type DeskEvent = {
   visibility: EventVisibility
   // Set by admins. Leaders can see a locked event but not change or delete it.
   locked: boolean
+  // Tags from the list admins keep, in the order they were picked.
+  tagIds: string[]
+  // How many minutes before each start participants are alerted; null for no alarm.
+  alarmMinutes: number | null
   // Attached files, oldest first. Changed with addEventFiles and removeEventFiles, not saveEvent.
   files: EventFile[]
 }
@@ -64,6 +68,22 @@ export type EventFile = {
   name: string
   mime: string
   size: number
+}
+
+// A label admins set up for events. color is one of the accent names (see lib/accent.ts).
+export type EventTag = { id: string; name: string; color: string }
+
+// At most this many tags on one event; the database holds to it too.
+export const EVENT_TAGS_MAX = 10
+
+// The alarm times offered in the event form, in minutes before the start. The database allows 1 to 1440.
+export const ALARM_CHOICES = [5, 10, 15, 30, 60, 120, 1440]
+
+// "15 minutes", "1 hour", "1 day".
+export function alarmLabel(minutes: number) {
+  if (minutes % 1440 === 0) return minutes === 1440 ? "1 day" : `${minutes / 1440} days`
+  if (minutes % 60 === 0) return minutes === 60 ? "1 hour" : `${minutes / 60} hours`
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`
 }
 
 // One appearance of an event on the schedule. A daily event has one per day.
@@ -352,6 +372,8 @@ type EventRow = {
   participant_ids: string[] | null
   visibility: EventVisibility
   locked: boolean
+  tag_ids: string[] | null
+  alarm_minutes: number | null
 }
 
 type EventFileRow = { id: string; event_id: string; path: string; name: string; mime: string; size: number }
@@ -372,6 +394,8 @@ const toEvent = (row: EventRow): Omit<DeskEvent, "files"> => ({
   participantIds: row.participant_ids ?? [],
   visibility: row.visibility,
   locked: row.locked,
+  tagIds: row.tag_ids ?? [],
+  alarmMinutes: row.alarm_minutes,
 })
 
 export async function listEvents(): Promise<DeskEvent[]> {
@@ -382,6 +406,8 @@ export async function listEvents(): Promise<DeskEvent[]> {
       participantIds: event.participantIds ?? [],
       visibility: event.visibility ?? "leaders",
       locked: event.locked ?? false,
+      tagIds: event.tagIds ?? [],
+      alarmMinutes: event.alarmMinutes ?? null,
       files: event.files ?? [],
     }))
   }
@@ -389,7 +415,7 @@ export async function listEvents(): Promise<DeskEvent[]> {
     supabase
       .from("leaddesk_events")
       .select(
-        "id, title, notes, location, repeat, time_zone, starts_at, ends_at, start_time, end_time, created_by, participant_ids, visibility, locked",
+        "id, title, notes, location, repeat, time_zone, starts_at, ends_at, start_time, end_time, created_by, participant_ids, visibility, locked, tag_ids, alarm_minutes",
       ),
     supabase.from("leaddesk_event_files").select("id, event_id, path, name, mime, size").order("created_at"),
   ])
@@ -417,8 +443,14 @@ export async function saveEvent(event: Omit<DeskEvent, "id" | "files"> & { id?: 
     end_time: daily ? event.endTime : null,
     participant_ids: [...new Set(event.participantIds)],
     visibility: event.visibility,
+    tag_ids: [...new Set(event.tagIds)],
+    alarm_minutes: event.alarmMinutes,
   }
   if (!fields.title) throw new Error("Give the event a title.")
+  if (fields.tag_ids.length > EVENT_TAGS_MAX) throw new Error(`An event can have up to ${EVENT_TAGS_MAX} tags.`)
+  if (fields.alarm_minutes !== null && !(fields.alarm_minutes >= 1 && fields.alarm_minutes <= 1440)) {
+    throw new Error("Set the alarm between 1 minute and 1 day before the start.")
+  }
   if (!isTimeZone(fields.time_zone)) throw new Error("Choose a valid time zone.")
   if (daily) {
     if (!fields.start_time || !fields.end_time) throw new Error("Set a start and end time.")
@@ -446,6 +478,8 @@ export async function saveEvent(event: Omit<DeskEvent, "id" | "files"> & { id?: 
       participantIds: fields.participant_ids,
       visibility: fields.visibility,
       locked: event.locked,
+      tagIds: fields.tag_ids,
+      alarmMinutes: fields.alarm_minutes,
       files: desk.events.find((item) => item.id === event.id)?.files ?? [],
     }
     desk.events = event.id ? desk.events.map((item) => (item.id === event.id ? saved : item)) : [...desk.events, saved]
@@ -460,6 +494,18 @@ export async function saveEvent(event: Omit<DeskEvent, "id" | "files"> & { id?: 
   const { data, error } = await supabase.from("leaddesk_events").insert(fields).select("id").single()
   fail(error)
   return (data as { id: string }).id
+}
+
+// The tags admins have set up, in the order they set. Preview has none: tags are kept on the admin site.
+export async function listEventTags(): Promise<EventTag[]> {
+  if (!supabase) return []
+  const { data, error } = await supabase
+    .from("leaddesk_event_tags")
+    .select("id, name, color")
+    .order("position")
+    .order("name")
+  fail(error)
+  return data as EventTag[]
 }
 
 export async function deleteEvent(id: string) {
@@ -709,6 +755,7 @@ export function subscribeToDeskChanges(onChange: () => void) {
     .channel(`leaddesk-changes:${crypto.randomUUID()}`)
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_events" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_event_files" }, () => onChange())
+    .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_event_tags" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_tasks" }, () => onChange())
     .on("postgres_changes", { event: "*", schema: "public", table: "leaddesk_task_signoffs" }, () => onChange())
     // Someone may have lost access to an event, which the events stream above cannot tell them.

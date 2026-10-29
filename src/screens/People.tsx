@@ -1,11 +1,10 @@
 import { useAuth } from "../auth"
 import { useState } from "react"
 import type { RegisteredUser } from "../lib/users"
+import { accentFor } from "../lib/accent"
 import { ROLES } from "../types"
 import { LEADERSHIP } from "../lib/leaddesk"
 import { PRESENCE_LABELS, type PresenceStatus } from "../lib/presence"
-
-const ACCENTS = ["violet", "green", "indigo", "blue", "amber", "red"]
 
 // "all", "none" (users without a known role), or one of ROLES.
 export type PeopleFilter = string
@@ -34,11 +33,6 @@ function initials(name: string) {
   return name.slice(0, 1).toUpperCase() || "?"
 }
 
-function accentFor(userId: string) {
-  let hash = 0
-  for (const char of userId) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
-  return ACCENTS[hash % ACCENTS.length]
-}
 
 // Small icon badges over the bottom-left corner of a person's photo.
 function UserBadges({ user }: { user: RegisteredUser }) {

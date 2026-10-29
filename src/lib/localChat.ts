@@ -124,6 +124,25 @@ export const deleteLocalMessages = (ids: string[]) => call<void>("local_chat_del
 /** Deletes every message of a chat from this computer only. Others keep their copies. */
 export const clearLocalChat = (chat: string) => call<void>("local_chat_clear", { chat })
 
+/**
+ * The auto-delete choices for a chat, in hours; 0 keeps messages. short is shown beside the clock in
+ * the chat's header. Messages count from when they arrived on this computer.
+ */
+export const AUTO_DELETE_CHOICES: Array<{ hours: number; label: string; short: string }> = [
+  { hours: 1, label: "After 1 hour", short: "1h" },
+  { hours: 24, label: "After 24 hours", short: "24h" },
+  { hours: 7 * 24, label: "After 7 days", short: "7d" },
+  { hours: 30 * 24, label: "After 30 days", short: "30d" },
+  { hours: 0, label: "Never", short: "Off" },
+]
+
+/** How many hours a chat's messages stay on this computer (24 unless changed); 0 keeps them. */
+export const localAutoDelete = (chat: string) => call<number>("local_chat_auto_delete", { chat })
+
+/** Sets a chat's auto-delete time, and deletes any of its messages already older than it. */
+export const setLocalAutoDelete = (chat: string, hours: number) =>
+  call<void>("local_chat_set_auto_delete", { chat, hours })
+
 type KeyRow = {
   user_id: string
   public_key: string
@@ -161,6 +180,8 @@ export function onLocalChat(handlers: {
   typing: (event: { chat: string; userId: string; typing: boolean }) => void
   read: (event: { chat: string; upTo: number }) => void
   file: (event: { id: string; state: LocalFile["state"] }) => void
+  // Messages auto-deleted from this computer.
+  expired: (ids: string[]) => void
 }) {
   if (!inTauri()) return () => {}
   let stopped = false
@@ -173,6 +194,7 @@ export function onLocalChat(handlers: {
       listen<{ chat: string; userId: string; typing: boolean }>("local-chat-typing", (event) => handlers.typing(event.payload)),
       listen<{ chat: string; upTo: number }>("local-chat-read", (event) => handlers.read(event.payload)),
       listen<{ id: string; state: LocalFile["state"] }>("local-chat-file", (event) => handlers.file(event.payload)),
+      listen<string[]>("local-chat-expired", (event) => handlers.expired(event.payload)),
     ])
     if (stopped) stops.forEach((stop) => stop())
     else unlisten.push(...stops)

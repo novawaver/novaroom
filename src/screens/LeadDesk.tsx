@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
 import { useAuth } from "../auth"
 import {
+  ALARM_CHOICES,
   EVENT_FILES_MAX,
   EVENT_FILE_LIMIT,
+  EVENT_TAGS_MAX,
   LEADERSHIP,
   addEventFiles,
+  alarmLabel,
   deleteEvent,
   eventFileDownloadUrl,
   eventFileUrls,
@@ -12,6 +15,7 @@ import {
   deleteNote,
   deleteTask,
   listEvents,
+  listEventTags,
   listNotes,
   listTasks,
   readCanAddTasks,
@@ -25,6 +29,7 @@ import {
   type DeskNote,
   type DeskTask,
   type EventFile,
+  type EventTag,
   type EventVisibility,
   type Occurrence,
   type TaskPriority,
@@ -73,6 +78,8 @@ const PRIORITIES: Array<{ id: TaskPriority; label: string }> = [
 export type DeskData = {
   tasks: DeskTask[]
   events: DeskEvent[]
+  // The tags admins have set up for events, in the order they set.
+  tags: EventTag[]
   notes: DeskNote[]
   leaders: RegisteredUser[]
   // Everyone, for showing who created an event or took part after leaving Leadership.
@@ -90,14 +97,23 @@ export function useLeadDesk(open: boolean) {
 
   const reload = useCallback(async () => {
     try {
-      const [tasks, events, notes, users, canAddTasks] = await Promise.all([
+      const [tasks, events, tags, notes, users, canAddTasks] = await Promise.all([
         listTasks(),
         listEvents(),
+        listEventTags(),
         listNotes(),
         listUsers(),
         userId ? readCanAddTasks(userId) : Promise.resolve(false),
       ])
-      setData({ tasks, events, notes, users, leaders: users.filter((user) => user.role === LEADERSHIP), canAddTasks })
+      setData({
+        tasks,
+        events,
+        tags,
+        notes,
+        users,
+        leaders: users.filter((user) => user.role === LEADERSHIP),
+        canAddTasks,
+      })
       setError("")
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not load LeadDesk.")
@@ -282,7 +298,9 @@ export function LeadDesk({
       ) : tab === "schedule" ? (
         <Schedule
           events={data.events}
+          tags={data.tags}
           users={data.users}
+          selfId={session.userId}
           newEventIds={newEventIds}
           isAdmin={isAdmin}
           covered={editing !== null}
@@ -321,6 +339,7 @@ export function LeadDesk({
       {editing?.kind === "schedule" && (
         <EventEditor
           event={editing.item as DeskEvent | null}
+          tags={data?.tags ?? []}
           users={data?.users ?? []}
           leaders={data?.leaders ?? []}
           selfId={session.userId}
@@ -683,10 +702,33 @@ function BoardIcon() {
 function FactIcon({
   kind,
 }: {
-  kind: "status" | "priority" | "due" | "assignees" | "creator" | "description" | "location" | "visibility" | "zone"
+  kind:
+    | "status"
+    | "priority"
+    | "due"
+    | "assignees"
+    | "creator"
+    | "description"
+    | "location"
+    | "visibility"
+    | "zone"
+    | "tags"
+    | "alarm"
 }) {
   return (
     <svg className="fact-icon" viewBox="0 0 24 24" aria-hidden="true">
+      {kind === "alarm" && (
+        <>
+          <circle cx="12" cy="13" r="7.5" />
+          <path d="M12 9.5V13l2.5 2M4.5 5.5l3-2.5M19.5 5.5l-3-2.5" />
+        </>
+      )}
+      {kind === "tags" && (
+        <>
+          <path d="M3.5 12.6V4.5a1 1 0 0 1 1-1h8.1a1 1 0 0 1 .7.3l7.2 7.2a1 1 0 0 1 0 1.4l-8.1 8.1a1 1 0 0 1-1.4 0l-7.2-7.2a1 1 0 0 1-.3-.7z" />
+          <circle cx="8" cy="8" r="1.6" />
+        </>
+      )}
       {kind === "location" && (
         <>
           <path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11z" />
@@ -1551,7 +1593,9 @@ function EventFilesField({
 
 function Schedule({
   events,
+  tags,
   users,
+  selfId,
   newEventIds,
   isAdmin,
   covered,
@@ -1561,7 +1605,9 @@ function Schedule({
   onEdit,
 }: {
   events: DeskEvent[]
+  tags: EventTag[]
   users: RegisteredUser[]
+  selfId: string
   newEventIds: Set<string>
   isAdmin: boolean
   // True while the editor is open over the event panel.
@@ -1572,9 +1618,15 @@ function Schedule({
   onSelect: (event: DeskEvent) => void
   onEdit: (event: DeskEvent) => void
 }) {
-  const [view, setView] = useState<ScheduleView>("daily")
+  const [view, setView] = useState<ScheduleView>("all")
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const closeEvent = useCallback(() => setSelectedId(null), [])
+  // Only events with this tag are listed. Dropped if an admin deletes the tag.
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const activeTag = tags.some((tag) => tag.id === tagFilter) ? tagFilter : null
+  // Only events this person is a participant in.
+  const [forMe, setForMe] = useState(false)
+  const participating = (event: DeskEvent) => event.participantIds.includes(selfId)
   const listRef = useRef<HTMLDivElement>(null)
   // Ticks so an event that ends while the page is open shows as past without a reload.
   const [now, setNow] = useState(() => Date.now())
@@ -1593,11 +1645,14 @@ function Schedule({
     if (!event) return
     const ended = event.repeat !== "daily" && event.endsAt != null && new Date(event.endsAt).getTime() < Date.now()
     setView(event.repeat === "daily" ? "daily" : ended ? "all" : "upcoming")
+    // Show everything again if the tag filter would hide it.
+    setTagFilter((current) => (current && !event.tagIds.includes(current) ? null : current))
+    if (!event.participantIds.includes(selfId)) setForMe(false)
     setSelectedId(event.id)
     setScrollToId(event.id)
     onSelectRef.current(event)
     onFocused()
-  }, [focusId, events, onFocused])
+  }, [focusId, events, onFocused, selfId])
   // Runs after the view above has rendered, so the card is on the page.
   useEffect(() => {
     if (!scrollToId) return
@@ -1614,14 +1669,17 @@ function Schedule({
   // Looked up by id so the panel follows edits and disappears if the event is deleted.
   const selected = events.find((event) => event.id === selectedId) ?? null
 
-  const daily = events
+  const listed = events.filter(
+    (event) => (!activeTag || event.tagIds.includes(activeTag)) && (!forMe || participating(event)),
+  )
+  const daily = listed
     .filter((event) => event.repeat === "daily")
     .map(todayOf)
     .filter((item): item is Occurrence => item !== null)
     // Order by time of day on the viewer's clock.
     .sort((a, b) => formatClock(a.startsAt).localeCompare(formatClock(b.startsAt)))
 
-  const allOneOff = events.filter((event) => event.repeat !== "daily" && event.startsAt && event.endsAt)
+  const allOneOff = listed.filter((event) => event.repeat !== "daily" && event.startsAt && event.endsAt)
   const upcoming = allOneOff.filter((event) => new Date(event.endsAt!).getTime() >= now)
   // How many events each view lists, and how many of those are unread.
   const viewEvents: Record<ScheduleView, DeskEvent[]> = {
@@ -1632,7 +1690,8 @@ function Schedule({
 
   const oneOff = (view === "all" ? allOneOff : upcoming)
     .map((event) => ({ event, startsAt: event.startsAt!, endsAt: event.endsAt! }))
-    .sort((a, b) => a.startsAt.localeCompare(b.startsAt))
+    // All: latest first. Upcoming: soonest first.
+    .sort((a, b) => (view === "all" ? b.startsAt.localeCompare(a.startsAt) : a.startsAt.localeCompare(b.startsAt)))
   const days = new Map<string, Occurrence[]>()
   for (const item of oneOff) {
     const key = localDate(new Date(item.startsAt))
@@ -1651,6 +1710,7 @@ function Schedule({
     const classes = [
       "schedule-item",
       "event-card",
+      participating(event) ? "participating" : "",
       past ? "past" : "",
       isNew ? "new" : "",
       event.id === selectedId ? "selected" : "",
@@ -1678,6 +1738,7 @@ function Schedule({
               )}
             </strong>
             {description && <span className="event-card-description">{description}</span>}
+            <EventTags tags={tags} ids={event.tagIds} />
           </span>
           <span className="event-card-tile" aria-hidden="true">
             {event.repeat === "daily" ? (
@@ -1745,13 +1806,45 @@ function Schedule({
             )
           })}
         </div>
+        <button
+          type="button"
+          className="desk-toggle"
+          aria-pressed={forMe}
+          title="Only events you are a participant in"
+          onClick={() => setForMe((current) => !current)}
+        >
+          For me
+        </button>
         <span className="desk-zone">
           Times in your time zone, {localTimeZone()} ({zoneAbbreviation(localTimeZone())})
         </span>
       </div>
+      {tags.length > 0 && (
+        <div className="schedule-tag-filter" role="group" aria-label="Show events with tag">
+          <button type="button" aria-pressed={activeTag === null} onClick={() => setTagFilter(null)}>
+            All tags
+          </button>
+          {tags.map((tag) => (
+            <button
+              key={tag.id}
+              type="button"
+              className={`accent-${tag.color}`}
+              aria-pressed={activeTag === tag.id}
+              onClick={() => setTagFilter(activeTag === tag.id ? null : tag.id)}
+            >
+              <span className="event-tag-dot" aria-hidden="true" />
+              {tag.name}
+            </button>
+          ))}
+        </div>
+      )}
       {view === "daily" ? (
         daily.length === 0 ? (
-          <p className="hint">No daily events yet. Admins can set an event to repeat every day.</p>
+          <p className="hint">
+            {activeTag || forMe
+              ? "No daily events match these filters."
+              : "No daily events yet. Admins can set an event to repeat every day."}
+          </p>
         ) : (
           <section className="schedule-day">
             <h2>Every day</h2>
@@ -1760,18 +1853,30 @@ function Schedule({
           </section>
         )
       ) : days.size === 0 ? (
-        <p className="hint">{view === "all" ? "No one-off events yet." : "Nothing coming up."}</p>
+        <p className="hint">
+          {activeTag || forMe
+            ? view === "all"
+              ? "No one-off events match these filters."
+              : "Nothing coming up that matches these filters."
+            : view === "all"
+              ? "No one-off events yet."
+              : "Nothing coming up."}
+        </p>
       ) : (
         [...days.entries()].map(([day, items]) => (
           <section key={day} className="schedule-day">
             <h2 className={day < todayKey() ? "past" : undefined}>{formatDay(day)}</h2>
-            {items.map((occurrence) => item(occurrence, new Date(occurrence.endsAt).getTime() < now))}
+            {/* All lists days latest first, but today reads through the day, earliest first. */}
+            {(day === todayKey() ? [...items].sort((a, b) => a.startsAt.localeCompare(b.startsAt)) : items).map(
+              (occurrence) => item(occurrence, new Date(occurrence.endsAt).getTime() < now),
+            )}
           </section>
         ))
       )}
       {selected && (
         <EventDetail
           event={selected}
+          tags={tags}
           users={users}
           canEdit={!selected.locked || isAdmin}
           isAdmin={isAdmin}
@@ -1781,6 +1886,22 @@ function Schedule({
         />
       )}
     </div>
+  )
+}
+
+// An event's tags as small coloured chips, in the order they were picked. Nothing when it has none.
+function EventTags({ tags, ids }: { tags: EventTag[]; ids: string[] }) {
+  const shown = ids.map((id) => tags.find((tag) => tag.id === id)).filter((tag): tag is EventTag => tag !== undefined)
+  if (shown.length === 0) return null
+  return (
+    <span className="event-tags">
+      {shown.map((tag) => (
+        <span key={tag.id} className={`event-tag accent-${tag.color}`}>
+          <span className="event-tag-dot" aria-hidden="true" />
+          {tag.name}
+        </span>
+      ))}
+    </span>
   )
 }
 
@@ -1797,6 +1918,7 @@ function PersonAvatar({ users, id, prefix = "" }: { users: RegisteredUser[]; id:
 
 function EventDetail({
   event,
+  tags,
   users,
   canEdit,
   isAdmin,
@@ -1805,6 +1927,7 @@ function EventDetail({
   onClose,
 }: {
   event: DeskEvent
+  tags: EventTag[]
   users: RegisteredUser[]
   // Locked events can only be changed by admins.
   canEdit: boolean
@@ -1904,6 +2027,28 @@ function EventDetail({
             </dt>
             <dd>{event.location || <span className="task-fact-muted">None</span>}</dd>
             <dt>
+              <FactIcon kind="alarm" />
+              Alarm
+            </dt>
+            <dd>
+              {event.alarmMinutes ? (
+                `${alarmLabel(event.alarmMinutes)} before`
+              ) : (
+                <span className="task-fact-muted">None</span>
+              )}
+            </dd>
+            <dt>
+              <FactIcon kind="tags" />
+              Tags
+            </dt>
+            <dd>
+              {event.tagIds.some((id) => tags.some((tag) => tag.id === id)) ? (
+                <EventTags tags={tags} ids={event.tagIds} />
+              ) : (
+                <span className="task-fact-muted">None</span>
+              )}
+            </dd>
+            <dt>
               <FactIcon kind="creator" />
               Created by
             </dt>
@@ -1968,6 +2113,7 @@ function EventDetail({
 
 function EventEditor({
   event,
+  tags,
   users,
   leaders,
   selfId,
@@ -1975,6 +2121,7 @@ function EventEditor({
   onSaved,
 }: {
   event: DeskEvent | null
+  tags: EventTag[]
   users: RegisteredUser[]
   leaders: RegisteredUser[]
   selfId: string
@@ -1993,6 +2140,10 @@ function EventEditor({
   const [notes, setNotes] = useState(event?.notes ?? "")
   const [participantIds, setParticipantIds] = useState<string[]>(event?.participantIds ?? [])
   const [visibility, setVisibility] = useState<EventVisibility>(event?.visibility ?? "leaders")
+  const [tagIds, setTagIds] = useState<string[]>(event?.tagIds ?? [])
+  const [alarmMinutes, setAlarmMinutes] = useState<number | null>(event?.alarmMinutes ?? null)
+  // An alarm an admin set to a time the form doesn't offer stays a choice, so saving keeps it.
+  const alarmChoices = [...new Set([...ALARM_CHOICES, ...(alarmMinutes ? [alarmMinutes] : [])])].sort((a, b) => a - b)
   const [keptFiles, setKeptFiles] = useState<EventFile[]>(event?.files ?? [])
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   // A new event's id once it is saved, so saving again after a file fails updates it, not adds another.
@@ -2020,6 +2171,9 @@ function EventEditor({
           participantIds,
           visibility,
           locked: event?.locked ?? false,
+          // Leave out tags an admin has deleted since the form opened.
+          tagIds: tagIds.filter((id) => tags.some((tag) => tag.id === id)),
+          alarmMinutes,
         })
         savedIdRef.current = id
         try {
@@ -2064,6 +2218,33 @@ function EventEditor({
           Location or link
           <input value={location} maxLength={120} onChange={(change) => setLocation(change.target.value)} />
         </label>
+        <fieldset className="event-tag-picker">
+          <legend>Tags</legend>
+          {tags.length === 0 ? (
+            <p className="hint">No tags yet. Admins add them on the admin site.</p>
+          ) : (
+            tags.map((tag) => {
+              const picked = tagIds.includes(tag.id)
+              const full = !picked && tagIds.length >= EVENT_TAGS_MAX
+              return (
+                <button
+                  key={tag.id}
+                  type="button"
+                  className={`accent-${tag.color}`}
+                  aria-pressed={picked}
+                  disabled={full}
+                  title={full ? `An event can have up to ${EVENT_TAGS_MAX} tags` : undefined}
+                  onClick={() =>
+                    setTagIds((current) => (picked ? current.filter((id) => id !== tag.id) : [...current, tag.id]))
+                  }
+                >
+                  <span className="event-tag-dot" aria-hidden="true" />
+                  {tag.name}
+                </button>
+              )
+            })
+          )}
+        </fieldset>
       </div>
       <div className="task-form-card">
         <div className={daily ? "desk-form-row" : "desk-form-row three"}>
@@ -2092,6 +2273,23 @@ function EventEditor({
               </option>
             ))}
           </select>
+        </label>
+        <label>
+          Alarm
+          <select
+            value={alarmMinutes ?? ""}
+            onChange={(change) => setAlarmMinutes(change.target.value ? Number(change.target.value) : null)}
+          >
+            <option value="">No alarm</option>
+            {alarmChoices.map((minutes) => (
+              <option key={minutes} value={minutes}>
+                {alarmLabel(minutes)} before
+              </option>
+            ))}
+          </select>
+          <span className="hint task-form-hint">
+            Participants get a notification then, and a countdown until it starts while Novaroom is open.
+          </span>
         </label>
         <fieldset className="task-form-priority task-form-visibility">
           <legend>Who can see it</legend>
