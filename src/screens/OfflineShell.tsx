@@ -1,29 +1,33 @@
 import { useEffect, useRef, useState } from "react"
 import { onNotificationClick, setUnreadBadge } from "../lib/desktop"
 import type { Session } from "../types"
-import { VaultRail } from "./AppShell"
+import { CaptureRail, VaultRail } from "./AppShell"
+import { Capture, type CaptureState, type CaptureTab } from "./Capture"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
 import { Vault, VaultLeaveDialog, useVault } from "./Vault"
 
-type OfflineView = "local" | "vault"
+type OfflineView = "local" | "vault" | "capture"
 
 /**
- * The whole app without the server: Local chat and Vault, which both keep everything on this
- * computer. `chosen` means the person picked offline mode on the sign-in screen; otherwise the app
+ * The whole app without the server: Local chat, Vault and Capture, which all keep everything on
+ * this computer. `chosen` means the person picked offline mode on the sign-in screen; otherwise the app
  * opened without internet and the full app takes over once the server is reached again.
  */
 export function OfflineShell({
   local,
+  capture,
   session,
   chosen,
   onSignOut,
 }: {
   local: LocalChatState
+  capture: CaptureState
   session: Session
   chosen: boolean
   onSignOut: () => void
 }) {
   const [view, setView] = useState<OfflineView>("local")
+  const [captureTab, setCaptureTab] = useState<CaptureTab>("record")
   const vault = useVault(session.userId, view === "vault")
   // Leaving the Vault with unsaved changes first asks whether to save or discard them.
   const leaveTo = (go: () => void) => (view === "vault" ? vault.guard(go) : go())
@@ -54,6 +58,7 @@ export function OfflineShell({
   const tabs: Array<{ id: OfflineView; label: string; hint: string; count: number }> = [
     { id: "local", label: "Local chat", hint: "Chats with people on this network", count: local.unreadTotal },
     { id: "vault", label: "Vault", hint: "Your tables, kept on this computer", count: 0 },
+    { id: "capture", label: "Capture", hint: "Record your screen, microphone and speaker", count: 0 },
   ]
 
   return (
@@ -61,11 +66,11 @@ export function OfflineShell({
       <p className="offline-banner" role="status">
         {chosen ? (
           <>
-            <strong>Offline mode.</strong> Local chat and Vault work without the server. Sign in to use everything else.
+            <strong>Offline mode.</strong> Local chat, Vault and Capture work without the server. Sign in to use everything else.
           </>
         ) : (
           <>
-            <strong>No internet connection.</strong> Local chat and Vault still work. Everything else comes back once
+            <strong>No internet connection.</strong> Local chat, Vault and Capture still work. Everything else comes back once
             Novaroom reaches the server again.
           </>
         )}
@@ -90,13 +95,26 @@ export function OfflineShell({
                 }}
               >
                 {label}
+                {id === "capture" && capture.live && <span className="nav-live inline" aria-label="Recording" />}
                 {count > 0 && view !== id && <span className="chat-mode-count">{count > 9 ? "9+" : count}</span>}
               </button>
             ))}
           </div>
-          {view === "local" ? <LocalChatRail local={local} /> : <VaultRail vault={vault} />}
+          {view === "local" ? (
+            <LocalChatRail local={local} />
+          ) : view === "capture" ? (
+            <CaptureRail capture={capture} tab={captureTab} onSelect={setCaptureTab} />
+          ) : (
+            <VaultRail vault={vault} />
+          )}
         </aside>
-        {view === "local" ? <LocalChatThread local={local} userId={session.userId} /> : <Vault vault={vault} />}
+        {view === "local" ? (
+          <LocalChatThread local={local} userId={session.userId} />
+        ) : view === "capture" ? (
+          <Capture tab={captureTab} capture={capture} />
+        ) : (
+          <Vault vault={vault} />
+        )}
       </div>
       <VaultLeaveDialog vault={vault} />
     </div>

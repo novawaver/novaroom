@@ -5,6 +5,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
+mod capture;
 mod localchat;
 mod shortcut;
 mod vault;
@@ -334,6 +335,7 @@ pub fn run() {
         )
         .manage(UnsavedChanges::default())
         .manage(localchat::LocalChat::default())
+        .manage(capture::Capture::default())
         .manage(watchdog::Watchdog::new())
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -373,6 +375,16 @@ pub fn run() {
             localchat::local_chat_clear,
             localchat::local_chat_auto_delete,
             localchat::local_chat_set_auto_delete,
+            capture::capture_folder,
+            capture::capture_list,
+            capture::capture_begin,
+            capture::capture_write,
+            capture::capture_finish,
+            capture::capture_open,
+            capture::capture_reveal,
+            capture::capture_delete,
+            capture::capture_speaker_start,
+            capture::capture_speaker_stop,
             watchdog::watchdog_beat
         ])
         .on_window_event(|window, event| {

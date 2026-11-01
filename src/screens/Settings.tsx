@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { useAuth } from "../auth"
+import { Help } from "./Help"
 import { APP_VERSION, PRIVACY, TERMS } from "../legal"
 import { listBlocked, unblockUser, type BlockedPerson } from "../lib/safety"
 import {
@@ -14,13 +15,14 @@ import { readStartup, writeStartup, type StartupSettings } from "../lib/startup"
 import { applyTheme, readTheme, writeTheme, type ThemeChoice } from "../lib/theme"
 import { canUpdate, checkNow, installUpdate, setAutoUpdate, useUpdates } from "../lib/updater"
 
-export type SettingsTab = "appearance" | "startup" | "shortcut" | "updates" | "about" | "safety"
+export type SettingsTab = "appearance" | "startup" | "shortcut" | "updates" | "help" | "about" | "safety"
 
 export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "appearance", label: "Appearance" },
   { id: "startup", label: "Startup" },
   { id: "shortcut", label: "Shortcut" },
   { id: "updates", label: "Updates" },
+  { id: "help", label: "Help" },
   { id: "about", label: "About" },
   { id: "safety", label: "Safety" },
 ]
@@ -45,6 +47,7 @@ export function Settings({ tab }: { tab: SettingsTab }) {
       {tab === "startup" && <Startup />}
       {tab === "shortcut" && <Shortcut />}
       {tab === "updates" && <Updates />}
+      {tab === "help" && <Help />}
       {tab === "about" && <AboutNovaroom />}
       {tab === "safety" && <AccountSafety />}
     </section>

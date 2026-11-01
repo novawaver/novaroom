@@ -162,6 +162,17 @@ Coding, Writing, Math, and Rating are open rooms. A signed-in trainer chooses **
 
 For a private beta, ask 10 to 20 trainers to install Novaroom, sign in with the email code, and join the room that matches their work. Direct chats and groups are still there for people who already know each other.
 
+## Capture
+
+**Capture** in the sidebar records the screen, the microphone, and the speaker (everything the computer plays), in any mix. It also works in offline mode and in local preview. Recordings are saved on this computer in `Videos\Novaroom` while they record, and nothing is uploaded.
+
+1. Turn on what to record. To use a microphone other than the default, choose it from the list.
+2. Choose the record button (a red dot) at the top right of the Record page. With the screen on, Windows asks which screen or window to share.
+3. While recording, that button is replaced by **Pause** (or **Resume**) and **Stop and save**, next to the timer. A red dot on Capture shows that a recording is running while another page is open.
+4. **Recordings** lists the saved files, with **Open**, **Show in folder**, and **Delete**.
+
+The window records the screen and the microphone. The desktop app hears the speaker through Windows' loopback capture and mixes it in, so the file has one sound track. Files are MP4 when WebView2 can encode it, otherwise WebM. In the browser-only preview (`npm run dev`), the speaker is recorded only when you turn on sharing audio in the browser's screen picker, and the file downloads when you stop.
+
 ## Publish an update on GitHub
 
 The code lives at [github.com/novawaver/novaroom](https://github.com/novawaver/novaroom). Pushing a commit to `main` only saves the code. Installed copies of Novaroom update only when you push a version tag such as `v0.2.0`. The tag starts `.github/workflows/release.yml`, which builds the installer on GitHub and publishes it as a release. Installed apps check that release and offer the update.
@@ -297,5 +308,13 @@ A direct download outside the Store waits until code signing is set up.
 **The code email never arrives.** Check the Magic Link template includes `{{ .Token }}`, and look in the Supabase **Authentication → Logs** for the send attempt. Also check spam.
 
 **Start chat says no account uses that email.** With Supabase connected, the other person must complete sign-in once. Preview mode does not require that.
+
+**Novaroom closes about 10 seconds after it opens, every time, with no error.** A VPN that filters traffic, in particular Astrill, has left a broken filter in Windows' network stack (Winsock). It stays there even while the VPN is off. Reset the stack: quit Novaroom and the VPN, open Windows Terminal as administrator, run the three commands below, and restart Windows. Then open Novaroom before the VPN. The same steps are in the app under **Settings → Help**. If it comes back after the VPN updates, run the reset again, or turn off the VPN's application filter. If the commands are not enough, use **Settings → Network & internet → Advanced network settings → Network reset**.
+
+```powershell
+netsh winsock reset
+netsh int ip reset
+ipconfig /flushdns
+```
 
 **Messages send but the other person does not see them live.** Re-run the messages script so `public.messages` is added to `supabase_realtime`. History still loads when they open the chat.

@@ -3,6 +3,7 @@ import { useAuth } from "./auth"
 import { inTauri } from "./lib/desktop"
 import { listenForQuit } from "./lib/unsaved"
 import { AppShell } from "./screens/AppShell"
+import { useCapture } from "./screens/Capture"
 import { useLocalChat } from "./screens/LocalChat"
 import { OfflineShell } from "./screens/OfflineShell"
 import { SignIn } from "./screens/SignIn"
@@ -13,6 +14,8 @@ function Screen() {
   const { ready, session, profile, offline, offlineChosen, signOut } = useAuth()
   // Local chat keeps running when the app switches between offline and online.
   const local = useLocalChat(session, profile?.displayName || session?.email || "", offline, profile?.avatarUrl ?? null)
+  // So does a recording, whichever page is open.
+  const capture = useCapture(Boolean(session))
   if (!ready) {
     return (
       <div className="boot">
@@ -22,9 +25,9 @@ function Screen() {
   }
   if (!session) return <SignIn />
   if (offline) {
-    return <OfflineShell local={local} session={session} chosen={offlineChosen} onSignOut={() => void signOut()} />
+    return <OfflineShell local={local} capture={capture} session={session} chosen={offlineChosen} onSignOut={() => void signOut()} />
   }
-  return <AppShell local={local} />
+  return <AppShell local={local} capture={capture} />
 }
 
 export default function App() {

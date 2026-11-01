@@ -64,6 +64,7 @@ import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
 import { groupTables } from "../lib/vault"
 import { Vault, VaultFileCard, VaultLeaveDialog, useVault, type VaultState } from "./Vault"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
+import { CAPTURE_TABS, Capture, formatElapsed, type CaptureState, type CaptureTab } from "./Capture"
 import {
   ConfirmDialog,
   SelectCheck,
@@ -138,6 +139,36 @@ function VaultNavIcon() {
     </svg>
   )
 }
+
+function CaptureNavIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4.5" width="18" height="12" rx="2" />
+      <path d="M8.5 20h7M12 16.5V20" />
+      <circle cx="12" cy="10.5" r="2.6" />
+    </svg>
+  )
+}
+
+function CaptureRecordIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="3.5" />
+    </svg>
+  )
+}
+
+function CaptureListIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="5" width="17" height="14" rx="2" />
+      <path d="M10 9.5v5l4.5-2.5z" />
+    </svg>
+  )
+}
+
+const CAPTURE_ICONS: Record<CaptureTab, ComponentType> = { record: CaptureRecordIcon, recordings: CaptureListIcon }
 
 function VaultTableIcon() {
   return (
@@ -391,6 +422,16 @@ function UpdatesIcon() {
   )
 }
 
+function HelpIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.5" />
+      <circle cx="12" cy="12" r="3.5" />
+      <path d="M6 6l3.5 3.5M18 6l-3.5 3.5M6 18l3.5-3.5M18 18l-3.5-3.5" />
+    </svg>
+  )
+}
+
 function AboutIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -500,6 +541,7 @@ const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
   startup: StartupIcon,
   shortcut: ShortcutIcon,
   updates: UpdatesIcon,
+  help: HelpIcon,
   about: AboutIcon,
   safety: SafetyIcon,
 }
@@ -509,6 +551,7 @@ const SETTINGS_HINTS: Record<SettingsTab, string> = {
   startup: "Open when Windows starts",
   shortcut: "Open Novaroom from anywhere",
   updates: "Check and install new versions",
+  help: "Fix common problems",
   about: "Version, privacy, terms",
   safety: "Blocked people",
 }
@@ -569,6 +612,33 @@ function SideMenu<T extends string>({
   )
 }
 
+/** Capture's two pages, for the sidebar. Also used by the offline app. */
+export function CaptureRail({
+  capture,
+  tab,
+  onSelect,
+}: {
+  capture: CaptureState
+  tab: CaptureTab
+  onSelect: (tab: CaptureTab) => void
+}) {
+  const count = capture.recordings?.length
+  const hints: Record<CaptureTab, string> = {
+    record: capture.live
+      ? `${capture.phase === "paused" ? "Paused" : "Recording"} ${formatElapsed(capture.elapsed)}`
+      : "Screen, microphone and speaker",
+    recordings: count === undefined ? "On this computer" : count === 1 ? "1 recording" : `${count} recordings`,
+  }
+  return (
+    <SideMenu
+      label="Capture sections"
+      items={CAPTURE_TABS.map(({ id, label }) => ({ id, label, hint: hints[id], icon: CAPTURE_ICONS[id] }))}
+      active={tab}
+      onSelect={onSelect}
+    />
+  )
+}
+
 /** The Vault's tables, grouped by category, for the sidebar. Also used by the offline app. */
 export function VaultRail({ vault }: { vault: VaultState }) {
   return (
@@ -606,7 +676,7 @@ export function VaultRail({ vault }: { vault: VaultState }) {
   )
 }
 
-type NavItem = "chats" | "rooms" | "people" | "leaddesk" | "timer" | "vault" | "settings"
+type NavItem = "chats" | "rooms" | "people" | "leaddesk" | "timer" | "vault" | "capture" | "settings"
 
 const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
   { id: "chats", label: "Chats", icon: ChatsNavIcon },
@@ -615,6 +685,7 @@ const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
   { id: "leaddesk", label: "LeadDesk", icon: LeadDeskNavIcon },
   { id: "timer", label: "Tracker", icon: TimerNavIcon },
   { id: "vault", label: "Vault", icon: VaultNavIcon },
+  { id: "capture", label: "Capture", icon: CaptureNavIcon },
   { id: "settings", label: "Settings", icon: SettingsNavIcon },
 ]
 
@@ -703,6 +774,7 @@ function NavBar({
   active,
   showLeadDesk,
   badges,
+  live,
   onSelect,
   footer,
   expanded,
@@ -711,6 +783,8 @@ function NavBar({
   active: NavItem | null
   showLeadDesk: boolean
   badges?: Partial<Record<NavItem, number>>
+  // A red dot, with this description, for something running on that page, such as a recording.
+  live?: Partial<Record<NavItem, string>>
   onSelect: (item: NavItem) => void
   footer?: ReactNode
   // Icons only when collapsed (it widens over the sidebar on hover to show the labels); labels beside them when expanded.
@@ -745,6 +819,8 @@ function NavBar({
               <span className="nav-badge" aria-label={`${badges[id]} unread`}>
                 {badges[id]! > 9 ? "9+" : badges[id]}
               </span>
+            ) : live?.[id] ? (
+              <span className="nav-live" role="status" aria-label={live[id]} title={live[id]} />
             ) : null}
           </span>
           <span className="nav-label">{label}</span>
@@ -785,9 +861,12 @@ function isImage(mime: string | null) {
 }
 
 // local: Local chat, which runs for the whole app (see App.tsx) so it keeps going offline.
-export function AppShell({ local }: { local: LocalChatState }) {
+export function AppShell({ local, capture }: { local: LocalChatState; capture: CaptureState }) {
   const { session, profile, roleChange, dismissRoleChange, signOut } = useAuth()
-  const [view, setView] = useState<"chats" | "profile" | "local" | "people" | "leaddesk" | "timer" | "vault" | "settings">("chats")
+  const [view, setView] = useState<
+    "chats" | "profile" | "local" | "people" | "leaddesk" | "timer" | "vault" | "capture" | "settings"
+  >("chats")
+  const [captureTab, setCaptureTab] = useState<CaptureTab>("record")
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance")
   const [profileTab, setProfileTab] = useState<ProfileTab>("edit")
   const [peopleFilter, setPeopleFilter] = useState<PeopleFilter>("all")
@@ -1683,7 +1762,8 @@ export function AppShell({ local }: { local: LocalChatState }) {
       item === "people" ||
       item === "leaddesk" ||
       item === "timer" ||
-      item === "vault"
+      item === "vault" ||
+      item === "capture"
     ) {
       // Clicking the page that is already open takes it back to its first tab.
       if (item === view) {
@@ -1691,6 +1771,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
         if (item === "people") setPeopleFilter("all")
         if (item === "leaddesk") setDeskTab("tasks")
         if (item === "timer") setTimerRange("today")
+        if (item === "capture") setCaptureTab("record")
       }
       setView(item)
       return
@@ -1734,7 +1815,8 @@ export function AppShell({ local }: { local: LocalChatState }) {
           view === "people" ||
           view === "leaddesk" ||
           view === "timer" ||
-          view === "vault"
+          view === "vault" ||
+          view === "capture"
             ? view
             : view === "profile"
               ? null
@@ -1748,6 +1830,7 @@ export function AppShell({ local }: { local: LocalChatState }) {
           rooms: unreadRooms,
           leaddesk: unreadDeskEvents.length + unreadDeskTasks.length,
         }}
+        live={capture.live ? { capture: `Recording ${formatElapsed(capture.elapsed)}` } : undefined}
         onSelect={(item) => {
           if (item === "vault" && view === "vault") {
             vault.selectTable(vault.data?.tables[0]?.id ?? null)
@@ -1835,6 +1918,8 @@ export function AppShell({ local }: { local: LocalChatState }) {
           />
         ) : view === "vault" ? (
           <VaultRail vault={vault} />
+        ) : view === "capture" ? (
+          <CaptureRail capture={capture} tab={captureTab} onSelect={setCaptureTab} />
         ) : view === "settings" ? (
           <SideMenu
             label="Settings sections"
@@ -2122,6 +2207,8 @@ export function AppShell({ local }: { local: LocalChatState }) {
         />
       ) : view === "vault" ? (
         <Vault vault={vault} />
+      ) : view === "capture" ? (
+        <Capture tab={captureTab} capture={capture} />
       ) : view === "settings" ? (
         <Settings tab={settingsTab} />
       ) : view === "profile" ? (

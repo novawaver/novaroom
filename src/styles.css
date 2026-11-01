@@ -1631,6 +1631,55 @@ select {
   line-height: 1.5;
 }
 
+/* Settings > Help: one fix per entry, with the commands in a block that can be copied. */
+.help-panel .help-fix h3 {
+  margin: 16px 0 4px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.help-panel .help-fix h2 + h3 {
+  margin-top: 8px;
+}
+
+.help-steps {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.help-steps li {
+  margin: 0 0 8px;
+}
+
+.help-commands {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 8px 0 4px;
+}
+
+.help-commands pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-x: auto;
+  user-select: all;
+}
+
+.help-copy {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 
 .startup-row {
   display: flex;
@@ -6974,4 +7023,202 @@ code {
 *::before,
 *::after {
   outline: none !important;
+}
+
+/* Capture: recording the screen, microphone and speaker. */
+.nav-live {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--side);
+  border-radius: 999px;
+  background: #e0322b;
+  animation: capture-pulse 1.6s ease-in-out infinite;
+}
+
+.nav-live.inline {
+  position: static;
+  display: inline-block;
+  margin-left: 6px;
+  border: 0;
+}
+
+.capture-live {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.capture-live::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #e0322b;
+  animation: capture-pulse 1.6s ease-in-out infinite;
+}
+
+.capture-live.paused::before {
+  background: var(--muted);
+  animation: none;
+}
+
+@keyframes capture-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-live,
+  .capture-live::before {
+    animation: none;
+  }
+}
+
+.capture .settings-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.capture-mic {
+  margin: -4px 0 16px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.capture-icon {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.capture-icon:hover:not(:disabled) {
+  background: var(--side-soft);
+}
+
+.capture-icon:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.capture-icon:disabled:hover {
+  background: transparent;
+}
+
+.capture-icon .capture-icon-fill {
+  fill: currentColor;
+  stroke: none;
+}
+
+.capture-icon.start,
+.capture-icon.stop {
+  color: #e0322b;
+}
+
+.capture-icon:focus-visible {
+  box-shadow: 0 0 0 3px var(--chip-soft);
+}
+
+.capture-preview {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  margin: 4px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #000;
+  object-fit: contain;
+}
+
+.capture-saved {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.capture-saved-actions,
+.capture-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.text-button.danger {
+  color: var(--danger);
+}
+
+.capture-recordings {
+  width: min(720px, 100%);
+}
+
+.capture-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.capture-toolbar .hint {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.capture-toolbar .button {
+  flex-shrink: 0;
+}
+
+.capture-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+.capture-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+}
+
+.capture-item + .capture-item {
+  border-top: 1px solid var(--line);
+}
+
+.capture-item-text {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.capture-item-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-item-text span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.capture-item-actions {
+  flex-shrink: 0;
 }

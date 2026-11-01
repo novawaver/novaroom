@@ -1,6 +1,6 @@
 [package]
 name = "novaroom-app"
-version = "0.3.0"
+version = "0.4.0"
 description = "Chat for AI trainers"
 authors = ["Novawave"]
 edition = "2021"
@@ -34,6 +34,8 @@ mdns-sd = "0.21"
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt"] }
 tauri-plugin-global-shortcut = "2"
 base64 = "0.22"
+# Hears what the speakers play (WASAPI loopback) for Capture recordings. See capture.rs.
+cpal = "0.16"
 
 # Reads how long the computer has had no keyboard or mouse input, for the Timer. Threading and
 # Foundation are for the watchdog's restart (see watchdog.rs).
