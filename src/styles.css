@@ -5502,6 +5502,127 @@ code {
   min-width: 0;
 }
 
+/* Files cells: each attachment opens on click; Attach copies new ones next to the Vault file. */
+.vault-cell-view.vault-files {
+  min-width: 0;
+}
+
+/* Long names shorten with "…" instead of pushing the buttons beside them out of the cell. */
+.vault-files {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.vault-files .vault-link-chip {
+  min-width: 0;
+  padding-left: 0;
+}
+
+.vault-files .vault-link-chip > .vault-cell-action {
+  flex: none;
+}
+
+.vault-files .vault-link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Image previews: small in the table, larger in the row panel, and across the top of a card. */
+.vault-attachment {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  min-width: 0;
+}
+
+/* The preview keeps its own size; the name and buttons below it take the cell's width. */
+.vault-attachment > .vault-thumb {
+  justify-self: start;
+}
+
+.vault-thumb {
+  display: block;
+  width: 96px;
+  height: 64px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--side-soft);
+  cursor: zoom-in;
+}
+
+.vault-thumb.loading {
+  cursor: default;
+}
+
+.vault-thumb img,
+.vault-card-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.vault-thumb:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.vault-panel-fields .vault-thumb {
+  width: 100%;
+  height: auto;
+  max-height: 260px;
+  aspect-ratio: 16 / 10;
+}
+
+.vault-card-cover {
+  display: block;
+  height: 120px;
+  margin: -14px -16px 0;
+  overflow: hidden;
+  border-radius: 11px 11px 0 0;
+  background: var(--side-soft);
+}
+
+.vault-preview-toggle {
+  margin-left: 2px;
+  vertical-align: middle;
+}
+
+.vault-preview-toggle[aria-pressed="true"] {
+  color: var(--brand-ink);
+}
+
+.vault-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-self: start;
+  padding: 5px 8px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.vault-attach:hover {
+  border-color: var(--brand-bright);
+  color: var(--ink);
+}
+
+.vault-attach svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
 .vault-link-chip .vault-no,
 .vault-cell-view.vault-list .vault-no {
   color: var(--muted);
@@ -5599,6 +5720,237 @@ code {
   margin-top: 0;
 }
 
+/* Vault Cards: rows as cards; clicking one opens all its values in a panel sliding in from the right. */
+.vault-cards-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  margin: 0 24px 24px;
+  gap: 16px;
+}
+
+.vault-cards {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  align-content: start;
+  gap: 12px;
+  padding: 2px;
+}
+
+.vault-card {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s,
+    transform 0.15s;
+}
+
+.vault-card:hover {
+  border-color: color-mix(in srgb, var(--brand-bright) 45%, var(--line));
+  transform: translateY(-1px);
+}
+
+.vault-card:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 2px;
+}
+
+.vault-card.selected {
+  border-color: var(--brand-bright);
+  box-shadow: 0 0 0 1px var(--brand-bright);
+}
+
+.vault-card.vault-dup-even {
+  background: color-mix(in srgb, var(--brand-bright) 8%, var(--card));
+}
+
+.vault-card.vault-dup-odd {
+  background: color-mix(in srgb, var(--brand-bright) 16%, var(--card));
+}
+
+.vault-card.vault-highlight {
+  animation: vault-highlight 2s ease-out;
+}
+
+.vault-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.vault-card-no {
+  flex: none;
+  margin-right: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.vault-card-title .vault-card-no {
+  margin-right: 0;
+}
+
+.vault-card-fields {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.vault-card-fields dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vault-card-fields dd {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.vault-card-empty,
+.vault-cards-empty {
+  color: var(--muted);
+}
+
+.vault-cards-empty {
+  grid-column: 1 / -1;
+  padding: 24px 0;
+  text-align: center;
+}
+
+.vault-card.vault-card-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 88px;
+  border-style: dashed;
+  background: transparent;
+  color: var(--muted);
+}
+
+.vault-card-add svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.vault-row-panel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(420px, 45%);
+  overflow: auto;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  animation: vault-panel-in 0.22s ease-out;
+}
+
+.vault-row-panel .vault-modal-head h2 {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+@keyframes vault-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(40px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.vault-panel-fields {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.vault-panel-field {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vault-panel-label {
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.vault-panel-fields input:not([type="checkbox"]),
+:root[data-theme="dark"] .vault-panel-fields input:not([type="checkbox"]) {
+  width: 100%;
+  border-color: var(--line);
+}
+
+.vault-panel-fields .vault-cell-view {
+  min-height: 0;
+  padding: 4px 8px;
+}
+
+.vault-row-panel .form-actions {
+  margin-top: auto;
+}
+
+/* On a narrow window the panel covers the cards instead of squeezing them. */
+@media (max-width: 760px) {
+  .vault-row-panel {
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: min(420px, 100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vault-card,
+  .vault-row-panel {
+    animation: none;
+    transition: none;
+  }
+
+  .vault-card:hover {
+    transform: none;
+  }
+}
+
 .vault-grid-wrap.vault-sub-wrap {
   max-height: 60vh;
 }
@@ -5610,7 +5962,9 @@ code {
 
 .vault-sub-column {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr;
+  grid-auto-columns: auto;
+  grid-auto-flow: column;
   align-items: center;
   gap: 8px;
 }

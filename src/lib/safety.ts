@@ -5,7 +5,8 @@ import { supabase } from "./supabase"
 const BLOCKS_KEY = "novaroom.preview.blocks"
 const REPORTS_KEY = "novaroom.preview.reports"
 
-export type MessagingLock = "open" | "blocked-by-you" | "blocked" | "deleted"
+// "muted": an admin muted this group or room, so nobody can send in it until it is unmuted.
+export type MessagingLock = "open" | "blocked-by-you" | "blocked" | "deleted" | "muted"
 
 export type BlockedPerson = {
   userId: string
@@ -50,6 +51,7 @@ export function messagingLockMessage(lock: MessagingLock) {
   if (lock === "blocked-by-you") return "You blocked this person. Unblock them to send messages."
   if (lock === "blocked") return "You cannot message this person."
   if (lock === "deleted") return "This account was deleted."
+  if (lock === "muted") return "An admin muted this chat. Nobody can send messages until it is unmuted."
   return ""
 }
 
@@ -208,13 +210,17 @@ export async function messagingLock(session: Session, conversationId: string): P
     return "open"
   }
 
-  const { data: conversation, error } = await supabase
-    .from("conversations")
-    .select("id, kind")
-    .eq("id", conversationId)
-    .maybeSingle()
+  const first = await supabase.from("conversations").select("id, kind, muted").eq("id", conversationId).maybeSingle()
+  // Before the chat mute SQL is run there is no muted column, and no chat is muted.
+  const { data: conversation, error } =
+    first.error && /muted/.test(first.error.message)
+      ? await supabase.from("conversations").select("id, kind").eq("id", conversationId).maybeSingle()
+      : first
   if (error) throw safetyError(error)
-  if (!conversation || conversation.kind === "group" || conversation.kind === "room") return "open"
+  if (!conversation) return "open"
+  if (conversation.kind === "group" || conversation.kind === "room") {
+    return (conversation as { muted?: boolean }).muted ? "muted" : "open"
+  }
 
   const { data: members, error: membersError } = await supabase
     .from("conversation_members")
@@ -240,6 +246,27 @@ export async function messagingLock(session: Session, conversationId: string): P
   })
   if (closedError) throw safetyError(closedError)
   return closed ? "blocked" : "open"
+}
+
+/**
+ * Calls onChange when a chat's settings change, such as an admin muting or unmuting it, so an open
+ * chat can check its lock again. Returns a function that stops listening.
+ */
+export function watchConversation(conversationId: string, onChange: () => void) {
+  if (!supabase) return () => {}
+  const client = supabase
+  const channel = client
+    // A fresh topic each time: reusing one that is still closing would leave this subscription dead.
+    .channel(`conversation:${conversationId}:${crypto.randomUUID()}`)
+    .on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "conversations", filter: `id=eq.${conversationId}` },
+      () => onChange(),
+    )
+    .subscribe()
+  return () => {
+    void client.removeChannel(channel)
+  }
 }
 
 export async function reportMessage(

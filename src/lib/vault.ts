@@ -15,6 +15,7 @@ export type VaultColumnKind =
   | "list"
   | "links"
   | "subtable"
+  | "files"
 
 export const VAULT_COLUMN_KINDS: Array<{ id: VaultColumnKind; label: string }> = [
   { id: "text", label: "Text" },
@@ -29,6 +30,7 @@ export const VAULT_COLUMN_KINDS: Array<{ id: VaultColumnKind; label: string }> =
   { id: "list", label: "List" },
   { id: "links", label: "List of links" },
   { id: "subtable", label: "Sub-table" },
+  { id: "files", label: "Files" },
 ]
 
 /** Kinds a Sub-table's own columns can have: no Links and no Sub-tables inside Sub-tables. */
@@ -44,8 +46,8 @@ export function linksRows(kind: VaultColumnKind): kind is "link" | "links" {
   return kind === "link" || kind === "links"
 }
 
-// List cells hold their lines, List of links cells the ids of the rows they point to, and
-// Sub-table cells their own rows.
+// List cells hold their lines, List of links cells the ids of the rows they point to, Files cells
+// the paths of their attachments (e.g. "attachments/Documents/Passport.pdf"), and Sub-table cells their own rows.
 export type VaultCell = string | number | boolean | null | string[] | VaultRow[]
 
 export type VaultColumn = {
@@ -57,6 +59,13 @@ export type VaultColumn = {
   target?: string
   // Sub-table columns: the columns of the small table inside each cell.
   columns?: VaultColumn[]
+  // Files columns: false to list image attachments by name only, without their preview.
+  preview?: boolean
+}
+
+/** Whether a Files column shows previews of its images. On unless turned off. */
+export function showsPreview(column: VaultColumn) {
+  return column.kind === "files" && column.preview !== false
 }
 export type VaultRow = { id: string; cells: Record<string, VaultCell> }
 export type VaultTable = {
@@ -89,6 +98,40 @@ export const pickVaultFile = () => call<string | null>("vault_pick")
 export const readVault = (path: string) => call<VaultData>("vault_read", { path })
 
 export const writeVault = (path: string, data: VaultData) => call<void>("vault_write", { path, data })
+
+/**
+ * Asks which files to attach and copies them into the table's folder inside the attachments folder
+ * next to the Vault file. Returns the paths a Files cell keeps, or null if the person cancels.
+ */
+export const attachVaultFiles = (path: string, table: string) =>
+  call<string[] | null>("vault_attach", { path, table })
+
+/** Opens an attachment in the app the computer uses for its type. */
+export const openVaultAttachment = (path: string, file: string) => call<void>("vault_open_attachment", { path, file })
+
+/** Shows an attachment selected in its folder. */
+export const revealVaultAttachment = (path: string, file: string) =>
+  call<void>("vault_reveal_attachment", { path, file })
+
+/** Whether an attachment is an image that can be previewed, judged by its extension. */
+export function isImageAttachment(file: string) {
+  return /\.(png|jpe?g|jfif|gif|webp|bmp|avif|ico|svg)$/i.test(file)
+}
+
+// Previews already loaded, or loading, by Vault file and attachment, so each image is read once.
+const previews = new Map<string, Promise<string>>()
+
+/** An image attachment as a data URL for its preview. A failed load is tried again next time. */
+export function vaultAttachmentPreview(path: string, file: string) {
+  const key = `${path}\n${file}`
+  let preview = previews.get(key)
+  if (!preview) {
+    preview = call<string>("vault_attachment_preview", { path, file })
+    preview.catch(() => previews.delete(key))
+    previews.set(key, preview)
+  }
+  return preview
+}
 
 // The last Vault file each person used on this computer, so the page reopens it.
 const fileKey = (userId: string) => `novaroom.vault-file.${userId}`
@@ -169,8 +212,9 @@ export function convertCell(value: VaultCell, kind: VaultColumnKind): VaultCell 
   if (value === null || value === "") return null
   // Sub-table rows only fit a Sub-table; nothing else can become one.
   if (kind === "subtable" || (Array.isArray(value) && subRows(value).length > 0)) return null
-  // Row ids only mean something to a Link column, so other values cannot become links.
-  if (linksRows(kind)) return null
+  // Row ids only mean something to a Link column, so other values cannot become links, and only
+  // attached files belong in a Files column.
+  if (linksRows(kind) || kind === "files") return null
   if (kind === "list") {
     const text = typeof value === "boolean" ? (value ? "Yes" : "No") : String(value)
     const lines = Array.isArray(value) ? listItems(value) : text.split(/\r?\n/)
@@ -205,6 +249,11 @@ export function fileName(path: string) {
   return path.split(/[\\/]/).pop() ?? path
 }
 
+/** What an attachment is called: its file name without the folder, e.g. "Passport.pdf". */
+export function attachmentName(file: string) {
+  return fileName(file)
+}
+
 /** The text a search matches a cell against. Passwords are never matched. */
 export function cellText(value: VaultCell, kind: VaultColumnKind, linkLabel?: (rowId: string) => string) {
   if (value === null || value === undefined || kind === "password") return ""
@@ -212,6 +261,7 @@ export function cellText(value: VaultCell, kind: VaultColumnKind, linkLabel?: (r
   if (kind === "link") return linkLabel && typeof value === "string" ? linkLabel(value) : ""
   if (kind === "links") return linkLabel ? listItems(value).map(linkLabel).join(" ") : ""
   if (kind === "list") return listItems(value).join(" ")
+  if (kind === "files") return listItems(value).map(attachmentName).join(" ")
   if (kind === "subtable") return ""
   return String(value)
 }
@@ -288,6 +338,8 @@ export function sortRows(
           ? (listItems(value).map((id) => linkLabel?.(id) ?? "")[0] ?? null)
           : column.kind === "list"
             ? (listItems(value)[0] ?? null)
+            : column.kind === "files"
+            ? (listItems(value).map(attachmentName)[0] ?? null)
             : column.kind === "subtable"
               ? subRows(value).length || null
               : value
@@ -387,6 +439,7 @@ export function filterOps(kind: VaultColumnKind): Array<{ id: FilterOp; label: s
       ]
     case "list":
     case "links":
+    case "files":
       return [
         { id: "contains", label: "has an item containing" },
         { id: "notContains", label: "has no item containing" },
@@ -426,7 +479,7 @@ export function passesFilter(
   const isEmpty =
     column.kind === "subtable"
       ? subRows(value).length === 0
-      : column.kind === "list" || column.kind === "links"
+      : column.kind === "list" || column.kind === "links" || column.kind === "files"
         ? listItems(value).length === 0
         : value === null || value === ""
   switch (filter.op) {
@@ -475,6 +528,8 @@ export function passesFilter(
       ? listItems(value).map((item) => item.toLowerCase())
       : column.kind === "links"
         ? listItems(value).map((id) => (linkLabel?.(id) ?? "").toLowerCase())
+        : column.kind === "files"
+        ? listItems(value).map((file) => attachmentName(file).toLowerCase())
         : [
             (column.kind === "subtable"
               ? subTableText(value, column.columns ?? [])

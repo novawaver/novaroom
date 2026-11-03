@@ -1,8 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react"
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent,
+  type ReactNode,
+} from "react"
 import { createPortal } from "react-dom"
 import {
   VAULT_COLUMN_KINDS,
   VAULT_SUB_KINDS,
+  attachVaultFiles,
+  attachmentName,
   cellText,
   convertCell,
   createVaultFile,
@@ -16,6 +28,7 @@ import {
   newFilter,
   newRow,
   newTable,
+  openVaultAttachment,
   passesFilter,
   pickVaultFile,
   linksRows,
@@ -25,6 +38,10 @@ import {
   readVault,
   rememberVaultFile,
   rememberedVaultFile,
+  isImageAttachment,
+  showsPreview,
+  vaultAttachmentPreview,
+  revealVaultAttachment,
   rowLabel,
   sortRows,
   subRows,
@@ -44,6 +61,7 @@ import {
   type VaultTable,
 } from "../lib/vault"
 import { setExitGuard } from "../lib/unsaved"
+import { ImageViewer } from "./ImageViewer"
 
 function SaveIcon() {
   return (
@@ -202,6 +220,42 @@ function readFit() {
     return localStorage.getItem(FIT_KEY) === "true"
   } catch {
     return false
+  }
+}
+
+function CardsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="4" width="7" height="7" rx="1.5" />
+      <rect x="13" y="4" width="7" height="7" rx="1.5" />
+      <rect x="4" y="13" width="7" height="7" rx="1.5" />
+      <rect x="13" y="13" width="7" height="7" rx="1.5" />
+    </svg>
+  )
+}
+
+// Whether a table shows its rows as cards instead of a grid. Set per table on this computer, so
+// switching never leaves the Vault file with unsaved changes.
+const cardsKey = (tableId: string) => `novaroom.vault-cards.${tableId}`
+
+function readCards(tableId: string) {
+  try {
+    return localStorage.getItem(cardsKey(tableId)) === "true"
+  } catch {
+    return false
+  }
+}
+
+// The columns a table's cards show, in column order; nothing stored means the first few filled-in
+// values. Set per table on this computer, like the Cards view itself.
+const cardFieldsKey = (tableId: string) => `novaroom.vault-card-fields.${tableId}`
+
+function readCardFields(tableId: string): string[] | null {
+  try {
+    const stored = JSON.parse(localStorage.getItem(cardFieldsKey(tableId)) ?? "null")
+    return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : null
+  } catch {
+    return null
   }
 }
 
@@ -444,6 +498,7 @@ export function useVault(userId: string | null, active: boolean) {
     loading: status === "loading",
     saving: status === "saving",
     error,
+    reportError: setError,
     pending,
     setPending,
     selectTable: setTableId,
@@ -462,6 +517,233 @@ export function useVault(userId: string | null, active: boolean) {
     addTable,
     removeTable,
   }
+}
+
+/**
+ * The open Vault file, which Files cells need to find their attachments, the table whose folder new
+ * attachments go in, and where to report problems.
+ */
+const AttachmentsContext = createContext<{ file: string | null; table: string; report: (message: string) => void }>({
+  file: null,
+  table: "",
+  report: () => {},
+})
+
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3.5V8h4.5" />
+    </svg>
+  )
+}
+
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+    </svg>
+  )
+}
+
+/** Opening and showing attachments, with any problem shown at the top of the Vault. */
+function useAttachments() {
+  const { file, table, report } = useContext(AttachmentsContext)
+  const run = (action: (vault: string) => Promise<unknown>) => {
+    if (!file) return
+    action(file).catch((caught) => report(caught instanceof Error ? caught.message : "Could not use that file."))
+  }
+  return {
+    open: (attachment: string) => run((vault) => openVaultAttachment(vault, attachment)),
+    reveal: (attachment: string) => run((vault) => revealVaultAttachment(vault, attachment)),
+    attach: (then: (attached: string[]) => void) =>
+      run((vault) => attachVaultFiles(vault, table).then((attached) => attached && then(attached))),
+  }
+}
+
+function ImageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+      <circle cx="9" cy="10" r="1.6" />
+      <path d="M4 17.5l4.5-4.5 3.5 3.5 3-3 5 5" />
+    </svg>
+  )
+}
+
+/**
+ * An image attachment's preview, loaded once its element scrolls into view, so a long table only
+ * reads the images on screen. The url is null until it loads, and stays null if it cannot.
+ */
+function useAttachmentPreview<T extends Element>(file: string) {
+  const { file: vault } = useContext(AttachmentsContext)
+  const ref = useRef<T>(null)
+  const [url, setUrl] = useState<string | null>(null)
+  useEffect(() => {
+    const element = ref.current
+    if (!vault || !element) return
+    let cancelled = false
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return
+      observer.disconnect()
+      vaultAttachmentPreview(vault, file)
+        .then((loaded) => !cancelled && setUrl(loaded))
+        .catch(() => {
+          // No preview; the attachment is still listed by name and opens in its own app.
+        })
+    })
+    observer.observe(element)
+    return () => {
+      cancelled = true
+      observer.disconnect()
+    }
+  }, [vault, file])
+  return { ref, url }
+}
+
+/** An image attachment's preview; clicking it shows the image over the app. */
+function AttachmentThumb({ file }: { file: string }) {
+  const { ref, url } = useAttachmentPreview<HTMLButtonElement>(file)
+  const [viewing, setViewing] = useState(false)
+  const name = attachmentName(file)
+  return (
+    <>
+      <button
+        ref={ref}
+        type="button"
+        className={url ? "vault-thumb" : "vault-thumb loading"}
+        aria-label={`View ${name}`}
+        title={`View ${name}`}
+        disabled={!url}
+        onClick={() => setViewing(true)}
+      >
+        {url && <img src={url} alt="" draggable={false} />}
+      </button>
+      {viewing && url && <ImageViewer url={url} name={name} onClose={() => setViewing(false)} />}
+    </>
+  )
+}
+
+/** The first image of a row, across the top of its card. */
+function CardCover({ file }: { file: string }) {
+  const { ref, url } = useAttachmentPreview<HTMLSpanElement>(file)
+  return <span ref={ref} className="vault-card-cover">{url && <img src={url} alt="" draggable={false} />}</span>
+}
+
+/** Turns image previews on or off for a Files column. */
+function PreviewToggle({ column, onChange }: { column: VaultColumn; onChange: (preview: boolean) => void }) {
+  const on = showsPreview(column)
+  return (
+    <button
+      type="button"
+      className="vault-cell-action vault-preview-toggle"
+      aria-pressed={on}
+      aria-label={`Show image previews in ${column.name || "this column"}`}
+      title={
+        on
+          ? "Images show a preview. Click to list them by name only."
+          : "Images are listed by name only. Click to show a preview of each image."
+      }
+      onClick={() => onChange(!on)}
+    >
+      <ImageIcon />
+    </button>
+  )
+}
+
+/** One attachment: its name opens it, and the folder button shows it in its folder. */
+function AttachmentChip({ file, preview, children }: { file: string; preview: boolean; children?: ReactNode }) {
+  const attachments = useAttachments()
+  const name = attachmentName(file)
+  const chip = (
+    <span className="vault-link-chip">
+      <button type="button" className="vault-link" title={`Open ${name}`} onClick={() => attachments.open(file)}>
+        <FileIcon />
+        {name}
+      </button>
+      <button
+        type="button"
+        className="vault-cell-action"
+        aria-label={`Show ${name} in its folder`}
+        title="Show in folder"
+        onClick={() => attachments.reveal(file)}
+      >
+        <FolderIcon />
+      </button>
+      {children}
+    </span>
+  )
+  if (!preview || !isImageAttachment(file)) return chip
+  return (
+    <span className="vault-attachment">
+      <AttachmentThumb file={file} />
+      {chip}
+    </span>
+  )
+}
+
+function FilesView({ value, preview }: { value: VaultCell; preview: boolean }) {
+  const files = listItems(value)
+  if (files.length === 0) return <span className="vault-cell-view" />
+  return (
+    <span className="vault-cell-view vault-links vault-files">
+      {files.map((file) => (
+        <AttachmentChip key={file} file={file} preview={preview} />
+      ))}
+    </span>
+  )
+}
+
+/**
+ * A Files cell in Edit. Attaching copies the files into the attachments folder right away;
+ * removing one only takes it out of the cell, and the file stays in the folder.
+ */
+function FilesEditor({
+  label,
+  value,
+  preview,
+  onChange,
+}: {
+  label: string
+  value: VaultCell
+  preview: boolean
+  onChange: (value: VaultCell) => void
+}) {
+  const attachments = useAttachments()
+  const files = listItems(value)
+  return (
+    <span className="vault-links vault-files">
+      {files.map((file) => (
+        <AttachmentChip key={file} file={file} preview={preview}>
+          <button
+            type="button"
+            className="vault-cell-action"
+            aria-label={`Remove ${attachmentName(file)} from ${label}`}
+            title="Remove from this cell. The file stays in the attachments folder."
+            onClick={() => {
+              const next = files.filter((item) => item !== file)
+              onChange(next.length > 0 ? next : null)
+            }}
+          >
+            <RemoveIcon />
+          </button>
+        </AttachmentChip>
+      ))}
+      <button
+        type="button"
+        className="vault-attach"
+        title="Copies the files into this table's folder inside the attachments folder next to the Vault file"
+        onClick={() =>
+          attachments.attach((attached) => {
+            const next = [...files, ...attached.filter((file) => !files.includes(file))]
+            onChange(next.length > 0 ? next : null)
+          })
+        }
+      >
+        <PlusIcon /> Attach files
+      </button>
+    </span>
+  )
 }
 
 /** A link's target: the table it points to, the name to show, and how to go there. */
@@ -515,6 +797,8 @@ function CellEditor({
       return <ListEditor label={label} value={value} onChange={onChange} />
     case "links":
       return <LinksEditor label={label} value={value} onChange={onChange} link={link} />
+    case "files":
+      return <FilesEditor label={label} value={value} preview={showsPreview(column)} onChange={onChange} />
     case "subtable":
       return <SubTableCell column={column} value={value} editing onChange={onChange} />
     case "email":
@@ -687,6 +971,8 @@ function copyText(column: VaultColumn, value: VaultCell, link?: LinkTarget) {
       return typeof value === "string" ? formatDate(value) : ""
     case "list":
       return listItems(value).join("\n")
+    case "files":
+      return listItems(value).map(attachmentName).join("\n")
     case "subtable":
       return ""
     default:
@@ -745,6 +1031,7 @@ function CellView({ column, value, link }: { column: VaultColumn; value: VaultCe
     )
   }
   if (column.kind === "subtable") return <SubTableCell column={column} value={value} editing={false} />
+  if (column.kind === "files") return <FilesView value={value} preview={showsPreview(column)} />
   if (column.kind === "notes") {
     return typeof value === "string" && value ? (
       <NotesView title={column.name || "Notes"} text={value} />
@@ -1077,7 +1364,8 @@ function VaultModal({
 }) {
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose()
+      // An image being viewed over the dialog closes first.
+      if (event.key === "Escape" && !document.querySelector(".image-viewer")) onClose()
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
@@ -1242,6 +1530,16 @@ function SubColumnsDialog({
                 </option>
               ))}
             </select>
+            {sub.kind === "files" && (
+              <PreviewToggle
+                column={sub}
+                onChange={(preview) =>
+                  onChange(
+                    columns.map((item) => (item.id === sub.id ? { ...item, preview: preview ? undefined : false } : item)),
+                  )
+                }
+              />
+            )}
             <button
               type="button"
               className="vault-remove"
@@ -1452,12 +1750,250 @@ function DuplicatesBar({
   )
 }
 
+/** How many fields a card shows under its title; the rest are in the row panel. */
+const CARD_FIELDS = 4
+
+/** The short text a card shows for one value. */
+function cardText(column: VaultColumn, value: VaultCell, label: (rowId: string) => string) {
+  if (value === null || value === "") return ""
+  if (column.kind === "password") return typeof value === "string" && value ? "••••••••" : ""
+  if (column.kind === "subtable") {
+    const count = subRows(value).length
+    return count > 0 ? itemCount(count) : ""
+  }
+  if (column.kind === "checkbox") return value === true ? "Yes" : ""
+  if (column.kind === "date" && typeof value === "string") return formatDate(value)
+  if (column.kind === "list" || column.kind === "links" || column.kind === "files") {
+    const items = listItems(value)
+    return (column.kind === "links" ? items.map(label) : column.kind === "files" ? items.map(attachmentName) : items)
+      .filter(Boolean)
+      .join(", ")
+  }
+  return cellText(value, column.kind, label)
+}
+
+/** One row as a card: its name, then its first few filled-in values. */
+function RowCard({
+  table,
+  row,
+  index,
+  selected,
+  fieldIds,
+  className,
+  labelIn,
+  onOpen,
+}: {
+  table: VaultTable
+  row: VaultRow
+  index: number
+  selected: boolean
+  /** The columns to show; null for the first few filled-in values. */
+  fieldIds: string[] | null
+  className?: string
+  labelIn: (column: VaultColumn) => (rowId: string) => string
+  onOpen: () => void
+}) {
+  const title = rowLabel(table, row.id) ?? `Row ${index + 1}`
+  const columns = fieldIds ? table.columns.filter((column) => fieldIds.includes(column.id)) : table.columns
+  const cover = columns
+    .filter(showsPreview)
+    .flatMap((column) => listItems(row.cells[column.id]))
+    .find(isImageAttachment)
+  const values = columns
+    .map((column) => ({ column, text: cardText(column, row.cells[column.id] ?? null, labelIn(column)) }))
+  const fields = fieldIds
+    ? values.filter(({ text }) => text)
+    : values
+        // The title is already shown above the fields.
+        .filter(({ text }, at, all) => text && !(text === title && all.findIndex((item) => item.text) === at))
+        .slice(0, CARD_FIELDS)
+  return (
+    <button
+      type="button"
+      className={["vault-card", selected && "selected", className].filter(Boolean).join(" ")}
+      data-row-id={row.id}
+      aria-pressed={selected}
+      onClick={onOpen}
+    >
+      {cover && <CardCover key={cover} file={cover} />}
+      <span className="vault-card-title">
+        <span className="vault-card-no">{index + 1}</span>
+        {title}
+      </span>
+      {fields.length > 0 ? (
+        <dl className="vault-card-fields">
+          {fields.map(({ column, text }) => (
+            <div key={column.id}>
+              <dt>{column.name || "Untitled"}</dt>
+              <dd>{text}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <span className="vault-card-empty">{fieldIds ? "No values in the chosen fields" : "No values yet"}</span>
+      )}
+    </button>
+  )
+}
+
+/** Picks the columns a table's cards show, under the toolbar. */
+function CardFieldsBar({
+  table,
+  fieldIds,
+  onChange,
+  onClose,
+}: {
+  table: VaultTable
+  fieldIds: string[] | null
+  onChange: (fieldIds: string[] | null) => void
+  onClose: () => void
+}) {
+  return (
+    <div className="vault-filters vault-duplicates" role="group" aria-label="Card fields">
+      <div className="vault-duplicates-head">
+        <strong>Show on cards</strong>
+        <button type="button" className="vault-chip" aria-pressed={fieldIds === null} onClick={() => onChange(null)}>
+          Automatic
+        </button>
+        {table.columns.map((column) => {
+          const on = fieldIds?.includes(column.id) ?? false
+          return (
+            <button
+              key={column.id}
+              type="button"
+              className="vault-chip"
+              aria-pressed={on}
+              onClick={() =>
+                onChange(on ? fieldIds!.filter((id) => id !== column.id) : [...(fieldIds ?? []), column.id])
+              }
+            >
+              {column.name || "Untitled"}
+            </button>
+          )
+        })}
+      </div>
+      <p className="hint" role="status">
+        {fieldIds === null
+          ? `Cards show the first ${CARD_FIELDS} filled-in values. Pick columns to choose them yourself.`
+          : fieldIds.length === 0
+            ? "Cards show only their title. Click a card to see all its values."
+            : "Cards show the chosen columns, in table order, when they have a value."}{" "}
+        Remembered for this table on this computer.
+      </p>
+      <div className="vault-filter-actions">
+        <button type="button" className="button secondary vault-small" onClick={onClose}>
+          Done
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Every value of one row, in a panel that slides in from the right. Editable in Edit. */
+function RowPanel({
+  table,
+  row,
+  index,
+  editing,
+  links,
+  onChange,
+  onRemove,
+  onClose,
+}: {
+  table: VaultTable
+  row: VaultRow
+  index: number
+  editing: boolean
+  links: Map<string, LinkTarget | undefined>
+  onChange: (columnId: string, value: VaultCell) => void
+  onRemove: () => void
+  onClose: () => void
+}) {
+  const title = rowLabel(table, row.id) ?? `Row ${index + 1}`
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      // A dialog opened from inside the panel closes first.
+      if (event.key === "Escape" && !document.querySelector(".desk-backdrop, .image-viewer")) onClose()
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  return (
+    <aside className="vault-row-panel" aria-label={title}>
+      <div className="vault-modal-head">
+        <h2>
+          <span className="vault-card-no">{index + 1}</span>
+          {title}
+        </h2>
+        <button type="button" className="vault-remove" aria-label="Close" title="Close" onClick={onClose}>
+          <RemoveIcon />
+        </button>
+      </div>
+      <div className={["vault-grid vault-panel-fields", !editing && "vault-viewing"].filter(Boolean).join(" ")}>
+        {table.columns.map((column) => (
+          <div key={column.id} className="vault-panel-field">
+            <span className="vault-panel-label">{column.name || "Untitled"}</span>
+            {editing ? (
+              <CellEditor
+                column={column}
+                value={row.cells[column.id] ?? null}
+                onChange={(value) => onChange(column.id, value)}
+                link={links.get(column.id)}
+              />
+            ) : (
+              <CopyableCell column={column} value={row.cells[column.id] ?? null} link={links.get(column.id)} />
+            )}
+          </div>
+        ))}
+      </div>
+      {editing && (
+        <div className="form-actions">
+          <button type="button" className="button danger vault-small" onClick={onRemove}>
+            <TrashIcon /> Delete row
+          </button>
+        </div>
+      )}
+    </aside>
+  )
+}
+
 function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable }) {
   const change = (next: (current: VaultTable) => VaultTable) => vault.updateTable(table.id, next)
   const { editing } = vault
   const [query, setQuery] = useState("")
   const [fit, setFit] = useState(readFit)
   const [markRepeated, setMarkRepeated] = useState(() => readMarkRepeated(table.id))
+  const [cards, setCards] = useState(() => readCards(table.id))
+  // In Cards, the row open in the side panel.
+  const [selected, setSelected] = useState<string | null>(null)
+  const closePanel = useCallback(() => setSelected(null), [])
+  const [cardFields, setCardFieldsState] = useState(() => readCardFields(table.id))
+  const [showCardFields, setShowCardFields] = useState(false)
+  // Columns deleted since the choice was made are left out.
+  const cardFieldIds = cardFields && cardFields.filter((id) => table.columns.some((column) => column.id === id))
+
+  function setCardFields(next: string[] | null) {
+    setCardFieldsState(next)
+    try {
+      if (next) localStorage.setItem(cardFieldsKey(table.id), JSON.stringify(next))
+      else localStorage.removeItem(cardFieldsKey(table.id))
+    } catch {
+      // Not remembered; the choice still applies until the page is closed.
+    }
+  }
+
+  function toggleCards() {
+    const next = !cards
+    setCards(next)
+    setSelected(null)
+    try {
+      if (next) localStorage.setItem(cardsKey(table.id), "true")
+      else localStorage.removeItem(cardsKey(table.id))
+    } catch {
+      // Not remembered; the choice still applies until the page is closed.
+    }
+  }
 
   function toggleMarkRepeated() {
     const next = !markRepeated
@@ -1499,6 +2035,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   const [focusGrip, setFocusGrip] = useState<string | null>(null)
   const bodyRef = useRef<HTMLTableSectionElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const cardsRef = useRef<HTMLDivElement>(null)
 
   const tables = vault.data?.tables ?? []
   /** Where a Link column points, for showing, searching, and following its cells. */
@@ -1557,6 +2094,18 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
         ? // Each group of duplicates is listed together, groups in the order they first appear.
           [...matching].sort((a, b) => duplicates.get(a.id)! - duplicates.get(b.id)!)
         : matching
+  const emptyMessage =
+    table.rows.length === 0
+      ? "No rows yet."
+      : duplicateColumnIds && !search && !filters.length
+        ? "No duplicate rows."
+        : search && filters.length
+          ? "No rows match your search and filters."
+          : search
+            ? "No rows match your search."
+            : "No rows match your filters."
+  // The row open in the Cards panel; it stays open while a search or filter hides its card.
+  const selectedRow = cards && selected ? (table.rows.find((row) => row.id === selected) ?? null) : null
   // Reordering by hand only makes sense when every row is on screen.
   const canMove = editing && !duplicateColumnIds && shown.length === table.rows.length && table.rows.length > 1
   // Grip and delete columns either side of the cells, in Edit only.
@@ -1590,10 +2139,11 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   }, [focusRow, clearFocusRow])
   useEffect(() => {
     if (!highlight) return
-    bodyRef.current?.querySelector(`[data-row-id="${highlight}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" })
+    if (cards) setSelected(highlight)
+    ;(bodyRef.current ?? cardsRef.current)?.querySelector(`[data-row-id="${highlight}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" })
     const timer = window.setTimeout(() => setHighlight(null), 2000)
     return () => window.clearTimeout(timer)
-  }, [highlight])
+  }, [highlight, cards])
 
   // Keep focus on a row's or column's handle after moving it with the keyboard.
   useEffect(() => {
@@ -1701,8 +2251,10 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
       }
       // Links become the names they showed; everything else converts by value.
       if (before.kind === "link") return convertCell(typeof value === "string" ? label(value) || null : null, kind)
-      if (before.kind === "links") {
-        const names = listItems(value).map(label).filter(Boolean)
+      if (before.kind === "links" || before.kind === "files") {
+        const names = listItems(value)
+          .map(before.kind === "links" ? label : attachmentName)
+          .filter(Boolean)
         return convertCell(names.length > 0 ? names : null, kind)
       }
       return convertCell(value, kind)
@@ -1774,9 +2326,13 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
     setQuery("")
     setFilters([])
     setDuplicateColumnIds(null)
-    change((current) => ({ ...current, rows: [...current.rows, newRow()] }))
+    const row = newRow()
+    change((current) => ({ ...current, rows: [...current.rows, row] }))
+    // In Cards, open the new row to fill in.
+    if (cards) setSelected(row.id)
     // Show the new row, which is added at the bottom.
-    window.requestAnimationFrame(() => wrapRef.current?.scrollTo({ top: wrapRef.current.scrollHeight, behavior: "smooth" }))
+    const scroller = cards ? cardsRef : wrapRef
+    window.requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }))
   }
 
   function removeColumn(columnId: string) {
@@ -1886,17 +2442,48 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
         <button
           type="button"
           className="button secondary vault-small vault-icon-button vault-fit-toggle"
-          aria-pressed={fit}
-          aria-label="Fit to width"
+          aria-pressed={cards}
+          aria-label="Show as cards"
           title={
-            fit
-              ? "Columns fit the page and long values wrap. Click to keep each value on one line and scroll sideways."
-              : "Each value stays on one line and wide tables scroll sideways. Click to fit columns to the page."
+            cards
+              ? "Rows show as cards; click one to see all its values. Click to show the table instead."
+              : "Click to show rows as cards. This is remembered for this table."
           }
-          onClick={toggleFit}
+          onClick={toggleCards}
         >
-          <FitWidthIcon />
+          <CardsIcon />
         </button>
+        {cards && (
+          <button
+            type="button"
+            className="button secondary vault-small vault-filter-toggle"
+            aria-pressed={showCardFields}
+            aria-expanded={showCardFields}
+            title="Choose which fields cards show"
+            disabled={table.columns.length === 0}
+            onClick={() => setShowCardFields(!showCardFields)}
+          >
+            <EyeIcon open /> Card fields
+            {cardFieldIds && <span className="vault-filter-count">{cardFieldIds.length}</span>}
+          </button>
+        )}
+        {/* Cards always wrap their values, so fitting only applies to the table. */}
+        {!cards && (
+          <button
+            type="button"
+            className="button secondary vault-small vault-icon-button vault-fit-toggle"
+            aria-pressed={fit}
+            aria-label="Fit to width"
+            title={
+              fit
+                ? "Columns fit the page and long values wrap. Click to keep each value on one line and scroll sideways."
+                : "Each value stays on one line and wide tables scroll sideways. Click to fit columns to the page."
+            }
+            onClick={toggleFit}
+          >
+            <FitWidthIcon />
+          </button>
+        )}
         {editing && (
           <>
             <button
@@ -1915,6 +2502,14 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
           </>
         )}
       </div>
+      {cards && showCardFields && table.columns.length > 0 && (
+        <CardFieldsBar
+          table={table}
+          fieldIds={cardFieldIds}
+          onChange={setCardFields}
+          onClose={() => setShowCardFields(false)}
+        />
+      )}
       {showFilters && table.columns.length > 0 && <FilterBar table={table} filters={filters} onChange={setFilters} />}
       {duplicateColumnIds && table.columns.length > 0 && (
         <DuplicatesBar
@@ -1936,6 +2531,58 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
             "This table has no columns yet. Click Edit to add some."
           )}
         </p>
+      ) : cards ? (
+        <div className="vault-cards-area">
+          <div className="vault-cards" ref={cardsRef}>
+            {shown.length === 0 && !editing ? (
+              <p className="hint vault-cards-empty">{emptyMessage}</p>
+            ) : (
+              shown.map((row, index) => (
+                <RowCard
+                  key={row.id}
+                  table={table}
+                  row={row}
+                  index={index}
+                  selected={selected === row.id}
+                  fieldIds={cardFieldIds}
+                  className={
+                    [
+                      highlight === row.id && "vault-highlight",
+                      duplicates?.has(row.id) && (duplicates.get(row.id)! % 2 === 0 ? "vault-dup-even" : "vault-dup-odd"),
+                    ]
+                      .filter(Boolean)
+                      .join(" ") || undefined
+                  }
+                  labelIn={labelIn}
+                  onOpen={() => setSelected(selected === row.id ? null : row.id)}
+                />
+              ))
+            )}
+            {editing && (
+              <button type="button" className="vault-card vault-card-add" onClick={addRow}>
+                <PlusIcon /> Add row
+              </button>
+            )}
+          </div>
+          {selectedRow && (
+            <RowPanel
+              key={selectedRow.id}
+              table={table}
+              row={selectedRow}
+              index={
+                shown.includes(selectedRow) ? shown.indexOf(selectedRow) : table.rows.indexOf(selectedRow)
+              }
+              editing={editing}
+              links={links}
+              onChange={(columnId, value) => setCell(selectedRow.id, columnId, value)}
+              onRemove={() => {
+                setSelected(null)
+                change((current) => ({ ...current, rows: current.rows.filter((item) => item.id !== selectedRow.id) }))
+              }}
+              onClose={closePanel}
+            />
+          )}
+        </div>
       ) : (
         <div className="vault-grid-wrap" ref={wrapRef}>
           <table
@@ -2038,6 +2685,12 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         ))}
                       </select>
                     )}
+                    {editing && column.kind === "files" && (
+                      <PreviewToggle
+                        column={column}
+                        onChange={(preview) => setColumn(column.id, { preview: preview ? undefined : false })}
+                      />
+                    )}
                     {editing && column.kind === "subtable" && (
                       <SubColumnsButton
                         column={column}
@@ -2075,15 +2728,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               {shown.length === 0 ? (
                 <tr>
                   <td className="vault-empty" colSpan={table.columns.length + extraColumns}>
-                    {table.rows.length === 0
-                      ? "No rows yet."
-                      : duplicateColumnIds && !search && !filters.length
-                        ? "No duplicate rows."
-                        : search && filters.length
-                        ? "No rows match your search and filters."
-                        : search
-                          ? "No rows match your search."
-                          : "No rows match your filters."}
+                    {emptyMessage}
                   </td>
                 </tr>
               ) : (
@@ -2240,95 +2885,97 @@ export function Vault({ vault }: { vault: VaultState }) {
   const opened = vault.file && vault.data
 
   return (
-    <section className="settings vault">
-      <header className="thread-bar profile-bar">
-        <div className="vault-title">
-          <h1>{opened ? vault.table?.name || "Vault" : "Vault"}</h1>
-          {/* The file itself, with Open and New, is at the top of the sidebar. */}
-          {opened && vault.dirty && <p className="thread-email vault-unsaved">Unsaved changes</p>}
-        </div>
-        {opened && (
-          <div className="profile-bar-actions">
-            <button
-              type="button"
-              className="bar-icon vault-save"
-              aria-label="Save (Ctrl+S)"
-              title={vault.dirty ? "Save (Ctrl+S)" : vault.editing ? "Done editing" : "All changes saved"}
-              // In Edit it stays on, so it also leaves Edit when there is nothing to save.
-              disabled={(!vault.dirty && !vault.editing) || vault.saving}
-              onClick={() => {
-                void vault.save().then((ok) => {
-                  if (ok) vault.setEditing(false)
-                })
-              }}
-            >
-              <SaveIcon />
-              {vault.dirty && <span className="vault-dot" aria-hidden="true" />}
-            </button>
-            {vault.table &&
-              (vault.editing ? (
-                <button
-                  type="button"
-                  className="bar-icon vault-cancel"
-                  aria-label="Cancel editing"
-                  title="Cancel editing"
-                  // With unsaved changes, first asks whether to save or discard them.
-                  onClick={() => vault.guard(() => vault.setEditing(false))}
-                >
-                  <CancelIcon />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="bar-icon"
-                  aria-label="Edit table"
-                  title="Edit table"
-                  onClick={() => vault.setEditing(true)}
-                >
-                  <EditIcon />
-                </button>
-              ))}
+    <AttachmentsContext.Provider value={{ file: vault.file, table: vault.table?.name ?? "", report: vault.reportError }}>
+      <section className="settings vault">
+        <header className="thread-bar profile-bar">
+          <div className="vault-title">
+            <h1>{opened ? vault.table?.name || "Vault" : "Vault"}</h1>
+            {/* The file itself, with Open and New, is at the top of the sidebar. */}
+            {opened && vault.dirty && <p className="thread-email vault-unsaved">Unsaved changes</p>}
+          </div>
+          {opened && (
+            <div className="profile-bar-actions">
+              <button
+                type="button"
+                className="bar-icon vault-save"
+                aria-label="Save (Ctrl+S)"
+                title={vault.dirty ? "Save (Ctrl+S)" : vault.editing ? "Done editing" : "All changes saved"}
+                // In Edit it stays on, so it also leaves Edit when there is nothing to save.
+                disabled={(!vault.dirty && !vault.editing) || vault.saving}
+                onClick={() => {
+                  void vault.save().then((ok) => {
+                    if (ok) vault.setEditing(false)
+                  })
+                }}
+              >
+                <SaveIcon />
+                {vault.dirty && <span className="vault-dot" aria-hidden="true" />}
+              </button>
+              {vault.table &&
+                (vault.editing ? (
+                  <button
+                    type="button"
+                    className="bar-icon vault-cancel"
+                    aria-label="Cancel editing"
+                    title="Cancel editing"
+                    // With unsaved changes, first asks whether to save or discard them.
+                    onClick={() => vault.guard(() => vault.setEditing(false))}
+                  >
+                    <CancelIcon />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="bar-icon"
+                    aria-label="Edit table"
+                    title="Edit table"
+                    onClick={() => vault.setEditing(true)}
+                  >
+                    <EditIcon />
+                  </button>
+                ))}
+            </div>
+          )}
+        </header>
+        {vault.error && (
+          <p className="form-error vault-note" role="alert">
+            {vault.error}
+          </p>
+        )}
+        {vault.loading ? (
+          <div className="page-loading" role="status" aria-label="Opening your Vault">
+            <span className="loading-spinner" aria-hidden="true" />
+          </div>
+        ) : !opened ? (
+          <div className="settings-panel vault-welcome">
+            <h2>Keep important data on your computer</h2>
+            <p className="hint">
+              Your Vault is a file on this computer. It is never uploaded to the cloud. Choose where to keep it, or
+              open a Vault file you already have.
+            </p>
+            <div className="form-actions">
+              <button type="button" className="button" onClick={() => vault.chooseFile("create")}>
+                Create a Vault file
+              </button>
+              <button type="button" className="button secondary" onClick={() => vault.chooseFile("open")}>
+                Open a Vault file
+              </button>
+            </div>
+          </div>
+        ) : vault.table ? (
+          <TableEditor key={vault.table.id} vault={vault} table={vault.table} />
+        ) : (
+          <div className="settings-panel">
+            <p className="hint">This Vault has no tables yet.</p>
+            <div className="form-actions">
+              <button type="button" className="button" onClick={vault.addTable}>
+                Create a table
+              </button>
+            </div>
           </div>
         )}
-      </header>
-      {vault.error && (
-        <p className="form-error vault-note" role="alert">
-          {vault.error}
-        </p>
-      )}
-      {vault.loading ? (
-        <div className="page-loading" role="status" aria-label="Opening your Vault">
-          <span className="loading-spinner" aria-hidden="true" />
-        </div>
-      ) : !opened ? (
-        <div className="settings-panel vault-welcome">
-          <h2>Keep important data on your computer</h2>
-          <p className="hint">
-            Your Vault is a file on this computer. It is never uploaded to the cloud. Choose where to keep it, or
-            open a Vault file you already have.
-          </p>
-          <div className="form-actions">
-            <button type="button" className="button" onClick={() => vault.chooseFile("create")}>
-              Create a Vault file
-            </button>
-            <button type="button" className="button secondary" onClick={() => vault.chooseFile("open")}>
-              Open a Vault file
-            </button>
-          </div>
-        </div>
-      ) : vault.table ? (
-        <TableEditor key={vault.table.id} vault={vault} table={vault.table} />
-      ) : (
-        <div className="settings-panel">
-          <p className="hint">This Vault has no tables yet.</p>
-          <div className="form-actions">
-            <button type="button" className="button" onClick={vault.addTable}>
-              Create a table
-            </button>
-          </div>
-        </div>
-      )}
-    </section>
+      </section>
+    </AttachmentsContext.Provider>
   )
 }
 

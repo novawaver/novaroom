@@ -10,16 +10,23 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 /// Marks a SQLite file as a Novaroom Vault, so opening some other database is refused.
 const VAULT_APP: &str = "novaroom-vault";
 /// The newest Vault this app can open. New files start at 1, and a save only raises the version
 /// when the Vault needs it, so older Novaroom versions keep opening files that do not.
-const VAULT_VERSION: i64 = 3;
+const VAULT_VERSION: i64 = 4;
 /// Version 2 added List and Sub-table columns, whose cells hold arrays an older app cannot show.
 const NESTED_KINDS: [&str; 2] = ["list", "subtable"];
 /// Version 3 added List of links columns, whose cells hold row ids an older app would show as text.
 const LINK_LIST_KINDS: [&str; 1] = ["links"];
+/// Version 4 added Files columns, whose cells hold paths into the attachments folder.
+const FILE_KINDS: [&str; 1] = ["files"];
+/// Attached files are copied into this folder next to the Vault file, in a folder named after their
+/// table. Cells keep paths relative to the Vault's folder, so moving the Vault together with this
+/// folder keeps every attachment, and renaming a table later does not break its files.
+const ATTACHMENTS_DIR: &str = "attachments";
 const VAULT_EXTENSION: &str = "vault";
 
 const SCHEMA: &str = "
@@ -242,12 +249,31 @@ fn write(connection: &mut Connection, data: &VaultData) -> Result<(), String> {
             }
         }
     }
-    let uses = |kinds: &[&str]| {
-        data.tables
-            .iter()
-            .any(|table| table.columns.iter().any(|column| kinds.contains(&column.kind.as_str())))
+    // A Sub-table's own columns are kept in its options, so they are checked too.
+    let sub_kinds = |column: &VaultColumn| -> Vec<String> {
+        column
+            .options
+            .get("columns")
+            .and_then(|columns| columns.as_array())
+            .map(|columns| {
+                columns
+                    .iter()
+                    .filter_map(|sub| sub.get("kind").and_then(|kind| kind.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
     };
-    let version = if uses(&LINK_LIST_KINDS) {
+    let uses = |kinds: &[&str]| {
+        data.tables.iter().any(|table| {
+            table.columns.iter().any(|column| {
+                kinds.contains(&column.kind.as_str())
+                    || sub_kinds(column).iter().any(|kind| kinds.contains(&kind.as_str()))
+            })
+        })
+    };
+    let version = if uses(&FILE_KINDS) {
+        "4"
+    } else if uses(&LINK_LIST_KINDS) {
         "3"
     } else if uses(&NESTED_KINDS) {
         "2"
@@ -310,4 +336,194 @@ pub async fn vault_read(path: String) -> Result<VaultData, String> {
 #[tauri::command]
 pub async fn vault_write(path: String, data: VaultData) -> Result<(), String> {
     write(&mut connect(Path::new(&path))?, &data)
+}
+
+/// The folder a Vault keeps its attachments in.
+fn attachments_dir(vault: &Path) -> Result<PathBuf, String> {
+    vault
+        .parent()
+        .map(|folder| folder.join(ATTACHMENTS_DIR))
+        .ok_or_else(|| "Could not find the Vault's folder.".to_string())
+}
+
+/// The folder name a table's attachments go in: its name, with what Windows does not allow in a
+/// folder name taken out. A table without a usable name gets "Untitled".
+fn table_folder(table: &str) -> String {
+    let cleaned: String = table
+        .chars()
+        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { ' ' } else { c })
+        .collect();
+    // Windows drops trailing dots and spaces from folder names, so they are left out here too.
+    let mut name = cleaned.split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches('.').trim().to_string();
+    if name.is_empty() || name == "." || name == ".." {
+        name = "Untitled".into();
+    }
+    // Names Windows keeps for devices, with or without an extension, cannot be folders.
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        name.push('_');
+    }
+    name
+}
+
+/// Whether one part of an attachment's path is a plain name, not a way out of its folder.
+fn plain_part(part: &str) -> bool {
+    !part.is_empty() && part != "." && part != ".." && !part.contains(':')
+}
+
+/// A free file name in the attachments folder: the original name, or "name (2).ext" and so on.
+fn free_name(dir: &Path, original: &Path) -> PathBuf {
+    let stem = original.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let extension = original.extension().map(|extension| format!(".{}", extension.to_string_lossy())).unwrap_or_default();
+    let mut candidate = dir.join(format!("{stem}{extension}"));
+    let mut number = 2;
+    while candidate.exists() {
+        candidate = dir.join(format!("{stem} ({number}){extension}"));
+        number += 1;
+    }
+    candidate
+}
+
+/// Where an attachment a cell names is on disk: "attachments/<table>/<file>", or "attachments/<file>"
+/// as the first Files columns saved them. Only plain names inside the attachments folder are
+/// accepted, so a cell can never point the app at some other file on the computer.
+fn attachment_path(vault: &str, file: &str) -> Result<PathBuf, String> {
+    let parts: Vec<&str> = file.split(['/', '\\']).collect();
+    let inside = match parts.as_slice() {
+        [ATTACHMENTS_DIR, rest @ ..] if (1..=2).contains(&rest.len()) && rest.iter().all(|part| plain_part(part)) => rest,
+        _ => return Err("That attachment is not in the attachments folder.".into()),
+    };
+    let name = inside[inside.len() - 1];
+    let path = inside.iter().fold(attachments_dir(Path::new(vault))?, |path, part| path.join(part));
+    if !path.is_file() {
+        return Err(format!(
+            "\"{name}\" was not found in the attachments folder next to the Vault file. It may have been moved, renamed or deleted."
+        ));
+    }
+    Ok(path)
+}
+
+/// Asks which files to attach, copies them into the table's own folder inside the attachments
+/// folder next to the Vault, and returns the paths the cell keeps, e.g.
+/// "attachments/Documents/Passport.pdf". Files already in that folder are used where they are.
+/// Returns None if the person closes the dialog.
+#[tauri::command]
+pub async fn vault_attach(app: tauri::AppHandle, path: String, table: String) -> Result<Option<Vec<String>>, String> {
+    let picked = app.dialog().file().set_title("Attach files").blocking_pick_files();
+    let Some(picked) = picked else { return Ok(None) };
+    let folder = table_folder(&table);
+    let dir = attachments_dir(Path::new(&path))?.join(&folder);
+    std::fs::create_dir_all(&dir).map_err(|_| "Could not create the attachments folder.".to_string())?;
+    let mut attached = Vec::new();
+    for file in picked {
+        let source = file.into_path().map_err(message)?;
+        let already_there = source.parent().zip(dir.canonicalize().ok()).is_some_and(|(parent, dir)| {
+            parent.canonicalize().is_ok_and(|parent| parent == dir)
+        });
+        let target = if already_there {
+            source
+        } else {
+            let target = free_name(&dir, &source);
+            std::fs::copy(&source, &target).map_err(|_| {
+                format!("Could not copy \"{}\" into the attachments folder.", source.display())
+            })?;
+            target
+        };
+        if let Some(name) = target.file_name() {
+            attached.push(format!("{ATTACHMENTS_DIR}/{folder}/{}", name.to_string_lossy()));
+        }
+    }
+    Ok(Some(attached))
+}
+
+/// Opens an attachment in the app the computer uses for its type.
+#[tauri::command]
+pub async fn vault_open_attachment(app: tauri::AppHandle, path: String, file: String) -> Result<(), String> {
+    let target = attachment_path(&path, &file)?;
+    app.opener()
+        .open_path(path_text(target), None::<&str>)
+        .map_err(|_| "Could not open that file.".to_string())
+}
+
+/// Images larger than this are not previewed; they still open in their own app.
+const PREVIEW_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The image type of an attachment, from its extension, or None when it is not an image.
+fn image_type(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "svg" => "image/svg+xml",
+        _ => return None,
+    })
+}
+
+/// An image attachment as a data URL, for showing its preview.
+#[tauri::command]
+pub async fn vault_attachment_preview(path: String, file: String) -> Result<String, String> {
+    use base64::Engine;
+    let target = attachment_path(&path, &file)?;
+    let mime = image_type(&target).ok_or_else(|| "That file is not an image.".to_string())?;
+    let size = std::fs::metadata(&target).map_err(|_| "Could not read that file.".to_string())?.len();
+    if size > PREVIEW_MAX_BYTES {
+        return Err("That image is too large to preview.".into());
+    }
+    let bytes = std::fs::read(&target).map_err(|_| "Could not read that file.".to_string())?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+/// Shows an attachment selected in its folder.
+#[tauri::command]
+pub async fn vault_reveal_attachment(app: tauri::AppHandle, path: String, file: String) -> Result<(), String> {
+    let target = attachment_path(&path, &file)?;
+    app.opener()
+        .reveal_item_in_dir(target)
+        .map_err(|_| "Could not show that file in its folder.".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_folder_is_a_safe_folder_name() {
+        assert_eq!(table_folder("Documents"), "Documents");
+        assert_eq!(table_folder("  Bank / Cards: 2026?  "), "Bank Cards 2026");
+        assert_eq!(table_folder("Notes..."), "Notes");
+        assert_eq!(table_folder(""), "Untitled");
+        assert_eq!(table_folder(".."), "Untitled");
+        assert_eq!(table_folder("con"), "con_");
+        assert_eq!(table_folder("COM1.txt"), "COM1.txt_");
+        assert_eq!(table_folder("Company"), "Company");
+    }
+
+    #[test]
+    fn attachments_stay_inside_their_folder() {
+        let dir = std::env::temp_dir().join(format!("novaroom-vault-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(ATTACHMENTS_DIR).join("Documents")).unwrap();
+        std::fs::write(dir.join(ATTACHMENTS_DIR).join("Documents").join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join(ATTACHMENTS_DIR).join("b.txt"), "b").unwrap();
+        let vault = path_text(dir.join("My Vault.vault"));
+
+        assert!(attachment_path(&vault, "attachments/Documents/a.txt").is_ok());
+        // Paths saved before attachments went into table folders still open.
+        assert!(attachment_path(&vault, "attachments/b.txt").is_ok());
+        assert!(attachment_path(&vault, "attachments/Documents/missing.txt").is_err());
+        assert!(attachment_path(&vault, "attachments/../My Vault.vault").is_err());
+        assert!(attachment_path(&vault, "attachments/Documents/../../x").is_err());
+        assert!(attachment_path(&vault, "attachments/C:/Windows/win.ini").is_err());
+        assert!(attachment_path(&vault, "other/a.txt").is_err());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
 }

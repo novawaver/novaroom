@@ -23,6 +23,7 @@ import {
   messagingLockMessage,
   reportMessage,
   unblockUser,
+  watchConversation,
   type MessagingLock,
   type ReportReason,
 } from "../lib/safety"
@@ -1169,15 +1170,20 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       return
     }
     let active = true
-    void messagingLock(session, selectedId)
-      .then((next) => {
-        if (active) setLock(next)
-      })
-      .catch(() => {
-        if (active) setLock("open")
-      })
+    const load = () =>
+      void messagingLock(session, selectedId)
+        .then((next) => {
+          if (active) setLock(next)
+        })
+        .catch(() => {
+          if (active) setLock("open")
+        })
+    load()
+    // An admin can mute or unmute the chat while it is open.
+    const stop = watchConversation(selectedId, load)
     return () => {
       active = false
+      stop()
     }
   }, [session, selectedId, blockedIds])
 
