@@ -26,7 +26,7 @@ export const FIXES: Fix[] = [
     id: "closes-after-ten-seconds",
     title: "Novaroom closes about 10 seconds after it opens",
     symptom:
-      "The window opens normally, then disappears on its own roughly 10 seconds later, every time. No error is shown. Novaroom is gone from the tray too.",
+      "The window opens normally, then disappears on its own roughly 10 seconds later, every time. Novaroom is gone from the tray too. Newer versions show a warning with these steps as soon as the window opens, and again if the app still closes.",
     cause:
       "A VPN that filters network traffic, in particular Astrill, leaves a filter in Windows' network stack (Winsock) that stays active even while the VPN is off or closed. When that filter is in a broken state, the part of Windows that draws the Novaroom window stops as soon as the app makes its first connection to the server. Resetting the network stack removes the broken entries.",
     steps: [

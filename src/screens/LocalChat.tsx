@@ -24,6 +24,7 @@ import {
   sendLocalMessage,
   sendLocalTyping,
   setLocalAutoDelete,
+  setLocalPinned,
   setLocalIdle,
   startLocalChat,
   stopLocalChat,
@@ -299,6 +300,19 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     reloadChats()
   }
 
+  /** Pins or unpins a message of the open chat. Shown at once, and put back if it fails. */
+  async function setPinned(id: string, pinned: boolean) {
+    const change = (value: boolean) =>
+      setMessages((current) => current.map((item) => (item.id === id ? { ...item, pinned: value } : item)))
+    change(pinned)
+    try {
+      await setLocalPinned(id, pinned)
+    } catch (caught) {
+      change(!pinned)
+      setError(caught instanceof Error ? caught.message : pinned ? "Could not pin that message." : "Could not unpin that message.")
+    }
+  }
+
   /** Deletes every message of the open chat from this computer. */
   async function clear() {
     const chat = selected
@@ -370,6 +384,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     select,
     send,
     deleteMessages,
+    setPinned,
     clear,
     autoDeleteHours,
     changeAutoDelete,
@@ -517,6 +532,15 @@ function ReplyIcon() {
   )
 }
 
+function PinIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 4h6l-1 5 3.5 3.5v1.5h-11v-1.5L10 9z" />
+      <path d="M12 14v6" />
+    </svg>
+  )
+}
+
 function FileIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -614,7 +638,7 @@ function AutoDeleteMenu({
               {choice.label}
             </button>
           ))}
-          <p className="bar-menu-note">Only on this computer, counted from when each message arrived.</p>
+          <p className="bar-menu-note">Only on this computer, counted from when each message arrived. Pinned messages are kept.</p>
         </div>
       )}
     </div>
@@ -772,6 +796,13 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   // Choosing messages to delete, and the dialog that confirms clearing or deleting.
   const selection = useMessageSelection(selected)
   const [confirm, setConfirm] = useState<{ title: string; text: string; actions: ConfirmAction[] } | null>(null)
+  // Pinned messages, newest first, and which one the bar at the top shows. Clicking the bar jumps to
+  // that message and moves on to the next older one.
+  const pinned = local.messages.filter((message) => message.pinned).reverse()
+  const [pinIndex, setPinIndex] = useState(0)
+  const pinAt = Math.min(pinIndex, pinned.length - 1)
+  const shownPin = pinned[pinAt]
+  useEffect(() => setPinIndex(0), [selected])
 
   useEffect(() => {
     setVisible(true)
@@ -972,6 +1003,37 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           <ThreadMenu onSelect={selection.start} onClear={onClearChat} disabled={!local.running} />
         </div>
       </header>
+      {shownPin && (
+        <div className="pinned-bar">
+          <button
+            type="button"
+            className="pinned-bar-main"
+            title="Show this message"
+            onClick={() => {
+              showMessage(shownPin.id)
+              setPinIndex((pinAt + 1) % pinned.length)
+            }}
+          >
+            <PinIcon />
+            <span className="pinned-bar-text">
+              <strong>{pinned.length === 1 ? "Pinned message" : `Pinned message ${pinAt + 1} of ${pinned.length}`}</strong>
+              <span>
+                {nameOf(shownPin.senderId, shownPin.senderName)}: {localMessageLabel(shownPin)}
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            className="composer-extra-close"
+            aria-label="Unpin this message"
+            title="Unpin"
+            disabled={!local.running}
+            onClick={() => void local.setPinned(shownPin.id, false)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       {(local.error || local.setupError) && (
         <p className="form-error local-error" role="alert">
           {local.error || `Local chat is not set up on the server yet: ${local.setupError}`}
@@ -1019,7 +1081,9 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                 >
                   {selection.selecting && <SelectCheck checked={chosen} />}
                   {!mine && avatar}
-                  <article className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine ? " no-meta" : ""}`}>
+                  <article
+                    className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine && !message.pinned ? " no-meta" : ""}${message.pinned ? " pinned" : ""}`}
+                  >
                     {reply && (
                       <button type="button" className="bubble-quote" onClick={() => showMessage(reply.id)}>
                         <strong>{nameOf(reply.senderId, reply.senderName)}</strong>
@@ -1029,9 +1093,25 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                     <LocalFileView message={message} onOpenImage={(url, imageName) => setViewing({ id: message.id, url, name: imageName })} />
                     {message.body && <p>{message.body}</p>}
                     <span className="bubble-meta">
+                      {message.pinned && (
+                        <span className="bubble-pin" role="img" aria-label="Pinned" title="Pinned. Auto-delete keeps it.">
+                          <PinIcon />
+                        </span>
+                      )}
                       {!sameMinute && <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>}
                       {mine && <LocalStatus message={message} isRoom={isRoom} />}
                     </span>
+                    <button
+                      type="button"
+                      className={`bubble-reply bubble-pin-button ${mine ? "mine" : "theirs"}${message.pinned ? " on" : ""}`}
+                      aria-label={message.pinned ? "Unpin" : "Pin"}
+                      aria-pressed={message.pinned}
+                      title={message.pinned ? "Unpin" : "Pin. Auto-delete keeps pinned messages."}
+                      disabled={!local.running}
+                      onClick={() => void local.setPinned(message.id, !message.pinned)}
+                    >
+                      <PinIcon />
+                    </button>
                     <button
                       type="button"
                       className={mine ? "bubble-reply mine" : "bubble-reply theirs"}

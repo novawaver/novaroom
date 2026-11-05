@@ -1,6 +1,6 @@
 [package]
 name = "novaroom-app"
-version = "0.5.0"
+version = "0.5.1"
 description = "Chat for AI trainers"
 authors = ["Novawave"]
 edition = "2021"
@@ -38,13 +38,20 @@ base64 = "0.22"
 cpal = "0.16"
 
 # Reads how long the computer has had no keyboard or mouse input, for the Timer. Threading and
-# Foundation are for the watchdog's restart (see watchdog.rs).
+# Foundation are for the watchdog's restart (see watchdog.rs). Registry, Diagnostics_Debug,
+# Kernel, LibraryLoader and WindowsAndMessaging are for the Astrill VPN check and crash handler (see
+# winsock.rs).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_Foundation",
+  "Win32_System_Registry",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 # Windows toasts with a click handler, so clicking one opens the window (see `notify` in lib.rs).
 tauri-winrt-notification = "0.8"

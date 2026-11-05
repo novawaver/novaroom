@@ -10,6 +10,7 @@ mod localchat;
 mod shortcut;
 mod vault;
 mod watchdog;
+mod winsock;
 
 /// The argument Windows passes when it starts Novaroom at sign-in, so we can tell that launch apart.
 const AUTOSTART_ARG: &str = "--autostart";
@@ -311,6 +312,7 @@ fn log_panics() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log_panics();
+    winsock::install_crash_handler();
     // After the watchdog restarts a stuck Novaroom, wait for the old one to end before the single
     // instance check below, which would otherwise close this one.
     watchdog::wait_for_previous();
@@ -379,6 +381,7 @@ pub fn run() {
             localchat::local_chat_clear,
             localchat::local_chat_auto_delete,
             localchat::local_chat_set_auto_delete,
+            localchat::local_chat_set_pinned,
             capture::capture_folder,
             capture::capture_list,
             capture::capture_begin,
@@ -418,6 +421,9 @@ pub fn run() {
                 show_main(app.handle());
             }
             watchdog::start(app.handle());
+            // Astrill VPN's network component crashes Novaroom at its first update check. Say so now,
+            // with the fix, instead of vanishing (see winsock.rs).
+            winsock::warn_if_astrill_lsp();
 
             let show = MenuItem::with_id(app, "show", "Show Novaroom", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;

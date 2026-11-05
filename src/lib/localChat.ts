@@ -29,6 +29,8 @@ export type LocalMessage = {
   // The message this one answers, when it is on this computer.
   replyTo: LocalReply | null
   file: LocalFile | null
+  // Pinned on this computer: shown at the top of the chat and never auto-deleted. Others don't see it.
+  pinned: boolean
 }
 
 /** Largest file Local chat sends, as in the other chats. */
@@ -120,6 +122,12 @@ export const markLocalRead = (chat: string) => call<void>("local_chat_mark_read"
 
 /** Deletes messages from this computer only. Others keep their copies. */
 export const deleteLocalMessages = (ids: string[]) => call<void>("local_chat_delete_messages", { ids })
+
+/**
+ * Pins or unpins a message on this computer. Pinned messages are kept by auto-delete; unpinning starts
+ * the message's auto-delete time again from now.
+ */
+export const setLocalPinned = (id: string, pinned: boolean) => call<void>("local_chat_set_pinned", { id, pinned })
 
 /** Deletes every message of a chat from this computer only. Others keep their copies. */
 export const clearLocalChat = (chat: string) => call<void>("local_chat_clear", { chat })

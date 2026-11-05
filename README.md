@@ -309,7 +309,7 @@ A direct download outside the Store waits until code signing is set up.
 
 **Start chat says no account uses that email.** With Supabase connected, the other person must complete sign-in once. Preview mode does not require that.
 
-**Novaroom closes about 10 seconds after it opens, every time, with no error.** A VPN that filters traffic, in particular Astrill, has left a broken filter in Windows' network stack (Winsock). It stays there even while the VPN is off. Reset the stack: quit Novaroom and the VPN, open Windows Terminal as administrator, run the three commands below, and restart Windows. Then open Novaroom before the VPN. The same steps are in the app under **Settings → Help**. If it comes back after the VPN updates, run the reset again, or turn off the VPN's application filter. If the commands are not enough, use **Settings → Network & internet → Advanced network settings → Network reset**.
+**Novaroom closes about 10 seconds after it opens, every time.** A VPN that filters traffic, in particular Astrill, has left a broken filter in Windows' network stack (Winsock). It stays there even while the VPN is off. Reset the stack: quit Novaroom and the VPN, open Windows Terminal as administrator, run the three commands below, and restart Windows. Then open Novaroom before the VPN. The same steps are in the app under **Settings → Help**, and Novaroom shows them in a warning when it finds Astrill's filter at launch or crashes inside it (see `src-tauri/src/winsock.rs`). If it comes back after the VPN updates, run the reset again, or turn off the VPN's application filter. If the commands are not enough, use **Settings → Network & internet → Advanced network settings → Network reset**.
 
 ```powershell
 netsh winsock reset

@@ -70,6 +70,15 @@ const AUTO_DELETE_DEFAULT_HOURS: i64 = 24;
 const AUTO_DELETE_MAX_HOURS: i64 = 365 * 24;
 /// How often to look for messages that have reached their auto-delete age.
 const SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
+/// Messages past their chat's auto-delete age. ?1 is the default hours, ?2 now, ?3 this person's id
+/// and ?4 the room's chat id. Pinned messages, and this person's own direct messages that have not
+/// been delivered yet, are never picked.
+const SWEEP_SELECT: &str = "SELECT m.id FROM messages m
+     LEFT JOIN chat_settings s ON s.chat = m.chat
+     WHERE COALESCE(s.auto_delete_hours, ?1) > 0
+       AND COALESCE(m.stored_at, m.sent_at) < ?2 - COALESCE(s.auto_delete_hours, ?1) * 3600000
+       AND m.pinned = 0
+       AND NOT (m.sender_id = ?3 AND m.chat <> ?4 AND m.delivered = 0)";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS messages (
@@ -120,6 +129,8 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
     ("read", "INTEGER NOT NULL DEFAULT 0"),
     // When it was saved on this computer, which auto-delete counts from. Empty on older rows: use sent_at.
     ("stored_at", "INTEGER"),
+    // Pinned by this person on this computer: shown at the top of the chat and never auto-deleted.
+    ("pinned", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 fn migrate(db: &Connection) -> Result<(), String> {
@@ -201,6 +212,8 @@ pub struct LocalMessage {
     /// The answered message, if it is on this computer. Filled in when reading from the file.
     reply_to: Option<ReplyPreview>,
     file: Option<LocalFile>,
+    /// Pinned on this computer, so auto-delete keeps it. Others do not see pins.
+    pinned: bool,
     #[serde(skip)]
     reply_to_id: Option<String>,
     #[serde(skip)]
@@ -209,7 +222,7 @@ pub struct LocalMessage {
 
 const MESSAGE_SELECT: &str = "SELECT m.id, m.chat, m.sender_id, m.sender_name, m.body, m.sent_at, m.delivered,
        m.read, m.reply_to, m.file_name, m.file_mime, m.file_size, m.file_state, m.file_path,
-       r.sender_id, r.sender_name, r.body, r.file_name
+       r.sender_id, r.sender_name, r.body, r.file_name, m.pinned
      FROM messages m LEFT JOIN messages r ON r.id = m.reply_to";
 
 fn message_row(row: &rusqlite::Row) -> rusqlite::Result<LocalMessage> {
@@ -244,6 +257,7 @@ fn message_row(row: &rusqlite::Row) -> rusqlite::Result<LocalMessage> {
             }),
             None => None,
         },
+        pinned: row.get(18)?,
         reply_to_id,
         file_path: row.get(13)?,
     })
@@ -539,17 +553,12 @@ impl Session {
     /// Deletes messages past their chat's auto-delete age, with their files, and tells the window
     /// which. The age counts from when a message reached this computer, so one that arrives late (its
     /// sender was away) still stays the full time. This person's own direct messages that have not
-    /// reached the other person yet are kept, so they are still delivered when that person is back.
+    /// reached the other person yet are kept, so they are still delivered when that person is back,
+    /// and so are pinned messages.
     fn sweep(&self) {
         let ids: Vec<String> = {
             let db = self.db.lock().unwrap();
-            let Ok(mut statement) = db.prepare(
-                "SELECT m.id FROM messages m
-                 LEFT JOIN chat_settings s ON s.chat = m.chat
-                 WHERE COALESCE(s.auto_delete_hours, ?1) > 0
-                   AND COALESCE(m.stored_at, m.sent_at) < ?2 - COALESCE(s.auto_delete_hours, ?1) * 3600000
-                   AND NOT (m.sender_id = ?3 AND m.chat <> ?4 AND m.delivered = 0)",
-            ) else {
+            let Ok(mut statement) = db.prepare(SWEEP_SELECT) else {
                 return;
             };
             let ids = statement
@@ -966,6 +975,7 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 reply_to_id: reply_to.filter(|reply| valid_user_id(reply)),
                 file_path: None,
                 chat: chat.clone(),
+                pinned: false,
             };
             if session.store(&item) {
                 if let Some(stored) = session.message(&id) {
@@ -1506,6 +1516,7 @@ pub fn local_chat_send(
         reply_to_id: reply_to.filter(|reply| valid_user_id(reply)),
         file_path,
         chat,
+        pinned: false,
     };
     if !session.store(&item) {
         return Err("That message was already sent.".into());
@@ -1603,6 +1614,27 @@ pub fn local_chat_set_auto_delete(state: tauri::State<'_, LocalChat>, chat: Stri
     Ok(())
 }
 
+/// Pins or unpins a message on this computer. Pinned messages are never auto-deleted. Unpinning
+/// starts the message's auto-delete time again from now, so it does not vanish the moment it is
+/// unpinned just because it is older than the chat's time.
+#[tauri::command]
+pub fn local_chat_set_pinned(state: tauri::State<'_, LocalChat>, id: String, pinned: bool) -> Result<(), String> {
+    let session = running(&state)?;
+    let changed = session
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET pinned = ?2, stored_at = CASE WHEN ?2 THEN stored_at ELSE ?3 END WHERE id = ?1",
+            params![id, pinned, now_ms()],
+        )
+        .map_err(message)?;
+    if changed == 0 {
+        return Err("That message is no longer on this computer.".into());
+    }
+    Ok(())
+}
+
 /// Tells the room, or the other person in a direct chat, that this person started or stopped typing.
 #[tauri::command]
 pub fn local_chat_typing(state: tauri::State<'_, LocalChat>, chat: String, typing: bool) -> Result<(), String> {
@@ -1654,6 +1686,38 @@ pub fn local_chat_mark_read(state: tauri::State<'_, LocalChat>, chat: String) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Auto-delete picks old messages but keeps pinned ones, and a message's pin comes back when
+    /// it is read.
+    #[test]
+    fn sweep_keeps_pinned_messages() {
+        let db = Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let day = 24 * 3600 * 1000;
+        let now = 10 * day;
+        for (id, pinned) in [("old", 0), ("old-pinned", 1), ("new", 0)] {
+            let stored = if id == "new" { now } else { now - 2 * day };
+            db.execute(
+                "INSERT INTO messages (id, chat, sender_id, sender_name, body, sent_at, delivered, stored_at, pinned)
+                 VALUES (?1, 'room', 'them', 'Them', 'hi', ?2, 1, ?2, ?3)",
+                params![id, stored, pinned],
+            )
+            .unwrap();
+        }
+        let picked: Vec<String> = db
+            .prepare(SWEEP_SELECT)
+            .unwrap()
+            .query_map(params![AUTO_DELETE_DEFAULT_HOURS, now, "me", ROOM], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(picked, vec!["old".to_string()]);
+
+        let pinned = db
+            .query_row(&format!("{MESSAGE_SELECT} WHERE m.id = 'old-pinned'"), [], message_row)
+            .unwrap();
+        assert!(pinned.pinned);
+    }
 
     fn keypair() -> snow::Keypair {
         snow::Builder::new(NOISE_PARAMS.parse().unwrap()).generate_keypair().unwrap()
@@ -1764,6 +1828,7 @@ mod tests {
             file: Some(LocalFile { name: "a.png".into(), mime: "image/png".into(), size: 3, state: "ready".into() }),
             reply_to_id: None,
             file_path: None,
+            pinned: false,
         };
         // An app without files gets a note in the body instead of the file.
         assert!(matches!(message_frame(&item, &plain), Frame::Message { file: None, body, .. } if body.contains("a.png")));
