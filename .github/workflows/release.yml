@@ -138,6 +138,29 @@ jobs:
       - name: Install the Azure signing tool
         run: cargo install artifact-signing-cli --locked
 
+      # Signs a throwaway file first, so a signing problem shows the tool's real message here, within
+      # a minute. Tauri hides that output and only says the tool failed, after the whole build.
+      - name: Check signing works
+        shell: pwsh
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          $test = Join-Path $env:RUNNER_TEMP "signing-test.exe"
+          Copy-Item (Get-Command artifact-signing-cli).Source $test
+          artifact-signing-cli -e $env:AZURE_SIGNING_ENDPOINT -a $env:AZURE_SIGNING_ACCOUNT -c $env:AZURE_SIGNING_PROFILE -d "Novaroom" $test
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::Azure signing failed; the tool's message is above. 403 means the app registration lacks the Certificate Profile Signer role or the names are wrong; 401 or AADSTS means the tenant ID, client ID or client secret is wrong; a region mismatch means AZURE_SIGNING_ENDPOINT is not the account's own URI."
+            exit 1
+          }
+          $s = Get-AuthenticodeSignature $test
+          Write-Host "Test file: $($s.Status) : $($s.SignerCertificate.Subject)"
+          if ($s.Status -ne 'Valid') { Write-Error "The test file was not validly signed ($($s.Status))."; exit 1 }
+
       # Tauri calls this command for the app, the uninstaller and the installer.
       # It is written here rather than committed so local builds stay unsigned and need no Azure login.
       - name: Write the signing config
