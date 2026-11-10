@@ -1,14 +1,32 @@
-# Builds the Windows installer and publishes it as a GitHub Release whenever a version tag is pushed,
-# for example: git tag v0.2.0 && git push origin v0.2.0
-# The release includes latest.json and signatures, which installed apps check to update themselves.
-# Installed apps read releases without signing in, so this repository must stay public.
-# The update address is set in src-tauri/tauri.conf.json under plugins.updater.
+# Builds the Windows installers whenever a version tag is pushed, for example:
+#   git tag v0.5.2 && git push origin v0.5.2
 #
-# Repository secrets (Settings → Secrets and variables → Actions):
+# It produces two installers from the same build, both code-signed with Azure Artifact Signing:
+#   1. The regular installer, published as a GitHub Release with latest.json and updater signatures.
+#      Installed apps read releases without signing in, so this repository must stay public.
+#      The update address is set in src-tauri/tauri.conf.json under plugins.updater.
+#   2. The Microsoft Store installer, which bundles WebView2 offline (src-tauri/tauri.microsoftstore.conf.json).
+#      It is uploaded to Cloudflare R2 at a versioned address that never changes. The address to paste
+#      into Partner Center is shown on the run's summary page.
+#
+# Repository secrets (Settings → Secrets and variables → Actions → Secrets):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the private key file from `tauri signer generate`
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
 #   VITE_SUPABASE_URL                   the same values as in your local .env, which is not committed;
 #   VITE_SUPABASE_ANON_KEY              without them the built app runs in offline preview mode
+#   AZURE_TENANT_ID                     the Entra app registration that has the
+#   AZURE_CLIENT_ID                     "Artifact Signing Certificate Profile Signer" role
+#   AZURE_CLIENT_SECRET                 on the certificate profile
+#   R2_ACCOUNT_ID                       Cloudflare account ID
+#   R2_ACCESS_KEY_ID                    an R2 API token with write access to the downloads bucket
+#   R2_SECRET_ACCESS_KEY
+#
+# Repository variables (same page → Variables). These are names, not secrets:
+#   AZURE_SIGNING_ENDPOINT   for example https://eus.codesigning.azure.net (must match the account's region)
+#   AZURE_SIGNING_ACCOUNT    the Artifact Signing account name
+#   AZURE_SIGNING_PROFILE    the Public Trust certificate profile name
+#   R2_BUCKET                the bucket name, for example novawave-downloads
+#   R2_PUBLIC_URL            the bucket's custom domain, for example https://downloads.novawave.llc
 
 name: Release
 
@@ -23,23 +41,48 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      # Cloudflare R2 speaks the S3 API. These keep newer AWS CLI versions compatible with it.
+      AWS_DEFAULT_REGION: auto
+      AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+      AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
     steps:
-      # Fails early with a readable message (shown on the run's summary page) if a secret is missing
-      # or the signing key is in the wrong form. Values are never printed.
-      - name: Check release secrets
+      # Fails early with a readable message (shown on the run's summary page) if a secret or variable
+      # is missing or the signing key is in the wrong form. Values are never printed.
+      - name: Check release secrets and variables
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
         run: |
           missing=""
-          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY; do
+          for name in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY \
+                      AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
             if [ -z "${!name}" ]; then missing="$missing $name"; fi
           done
           if [ -n "$missing" ]; then
             echo "::error::These repository secrets are missing or empty:$missing"
+            exit 1
+          fi
+          missing=""
+          for name in AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT AZURE_SIGNING_PROFILE R2_BUCKET R2_PUBLIC_URL; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::These repository variables are missing or empty:$missing"
             exit 1
           fi
           # The key file written by `tauri signer generate` is base64 text starting with this prefix.
@@ -50,8 +93,34 @@ jobs:
               exit 1
               ;;
           esac
+          case "$AZURE_SIGNING_ENDPOINT" in
+            https://*.codesigning.azure.net) ;;
+            *)
+              echo "::error::AZURE_SIGNING_ENDPOINT must look like https://eus.codesigning.azure.net"
+              exit 1
+              ;;
+          esac
+          case "$R2_PUBLIC_URL" in
+            https://*) ;;
+            *)
+              echo "::error::R2_PUBLIC_URL must start with https://"
+              exit 1
+              ;;
+          esac
 
       - uses: actions/checkout@v4
+
+      # The installer file names come from package.json, so the tag has to match it.
+      - name: Check the tag matches package.json
+        id: version
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version. Bump the version, commit, and tag v$version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -66,17 +135,155 @@ jobs:
 
       - run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Install the Azure signing tool
+        run: cargo install artifact-signing-cli --locked
+
+      # Tauri calls this command for the app, the uninstaller and the installer.
+      # It is written here rather than committed so local builds stay unsigned and need no Azure login.
+      - name: Write the signing config
+        id: signing
+        shell: bash
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          file=$(cygpath -m "$RUNNER_TEMP/tauri.signing.conf.json")
+          node -e '
+            const e = process.env;
+            const config = { bundle: { windows: { signCommand: {
+              cmd: "artifact-signing-cli",
+              args: ["-e", e.AZURE_SIGNING_ENDPOINT, "-a", e.AZURE_SIGNING_ACCOUNT,
+                     "-c", e.AZURE_SIGNING_PROFILE, "-d", "Novaroom", "%1"],
+            } } } };
+            require("fs").writeFileSync(process.argv[1], JSON.stringify(config, null, 2));
+          ' "$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish the regular installer
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         with:
+          args: --config ${{ steps.signing.outputs.file }}
           tagName: ${{ github.ref_name }}
           releaseName: Novaroom ${{ github.ref_name }}
           releaseBody: See the commits since the last release for what changed.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+
+      - name: Check the regular installer is signed
+        shell: pwsh
+        run: |
+          # Tauri renames the app to the product name; fall back to the Cargo name if it did not.
+          $app = @("src-tauri/target/release/Novaroom.exe", "src-tauri/target/release/novaroom-app.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $app) { Write-Error "Could not find the built app in src-tauri/target/release."; exit 1 }
+          $files = @(
+            $app,
+            "src-tauri/target/release/bundle/nsis/Novaroom_${{ steps.version.outputs.version }}_x64-setup.exe"
+          )
+          foreach ($f in $files) {
+            $s = Get-AuthenticodeSignature $f
+            Write-Host "$f : $($s.Status) : $($s.SignerCertificate.Subject)"
+            if ($s.Status -ne 'Valid') { Write-Error "$f is not validly signed ($($s.Status))."; exit 1 }
+          }
+
+      # Reuses the app built above and only repackages it, so both installers contain the same app.
+      # This overwrites the regular installer in the bundle folder, which was already uploaded.
+      - name: Build the Microsoft Store installer
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          npx tauri bundle --bundles nsis \
+            --config "${{ steps.signing.outputs.file }}" \
+            --config src-tauri/tauri.microsoftstore.conf.json
+          mkdir -p store
+          cp "src-tauri/target/release/bundle/nsis/Novaroom_${{ steps.version.outputs.version }}_x64-setup.exe" store/
+
+      - name: Check the Store installer is signed and offline
+        shell: pwsh
+        run: |
+          $f = "store/Novaroom_${{ steps.version.outputs.version }}_x64-setup.exe"
+          $s = Get-AuthenticodeSignature $f
+          Write-Host "$f : $($s.Status) : $($s.SignerCertificate.Subject)"
+          if ($s.Status -ne 'Valid') { Write-Error "$f is not validly signed ($($s.Status))."; exit 1 }
+          # The WebView2 offline installer alone is well over 100 MB; a small file means it was not bundled.
+          $mb = [math]::Round((Get-Item $f).Length / 1MB, 1)
+          Write-Host "Size: $mb MB"
+          if ($mb -lt 50) { Write-Error "The Store installer is only $mb MB, so WebView2 was probably not bundled."; exit 1 }
+
+      # Partner Center requires that the file behind a submitted address never changes,
+      # so this refuses to overwrite a version that is already in the bucket.
+      # Do not open the address in a browser before this runs: Cloudflare caches the 404 for hours.
+      - name: Upload the Store installer to R2
+        id: upload
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ vars.R2_PUBLIC_URL }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="Novaroom_${VERSION}_x64-setup.exe"
+          key="novaroom/${VERSION}/${name}"
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          if out=$(aws s3api head-object --bucket "$R2_BUCKET" --key "$key" --endpoint-url "$endpoint" 2>&1); then
+            echo "::error::$key is already in R2. Store files must never change, so publish a new version number instead."
+            exit 1
+          elif ! grep -qE '404|Not Found' <<<"$out"; then
+            echo "::error::Could not check R2 for $key. Check the R2 secrets and R2_BUCKET. $out"
+            exit 1
+          fi
+
+          aws s3 cp "store/$name" "s3://${R2_BUCKET}/${key}" --endpoint-url "$endpoint" \
+            --content-type application/octet-stream \
+            --content-disposition "attachment; filename=\"$name\""
+
+          echo "url=${R2_PUBLIC_URL%/}/${key}" >> "$GITHUB_OUTPUT"
+
+      # Partner Center needs a direct link: the file itself, with no redirect.
+      - name: Check the public address serves the file directly
+        shell: bash
+        env:
+          URL: ${{ steps.upload.outputs.url }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          expected=$(stat -c %s "store/Novaroom_${VERSION}_x64-setup.exe")
+          headers=$(curl -sS -I --max-time 60 "$URL")
+          status=$(head -n1 <<<"$headers" | awk '{print $2}')
+          length=$(grep -i '^content-length:' <<<"$headers" | tr -d '\r' | awk '{print $2}')
+          if [ "$status" != "200" ]; then
+            echo "::error::$URL returned HTTP $status instead of 200. Check the bucket's custom domain."
+            exit 1
+          fi
+          if [ "$length" != "$expected" ]; then
+            echo "::error::$URL serves $length bytes but the installer is $expected bytes."
+            exit 1
+          fi
+          {
+            echo "## Microsoft Store package"
+            echo
+            echo "| Partner Center field | Value |"
+            echo "|---|---|"
+            echo "| Package URL | $URL |"
+            echo "| Architecture | x64 |"
+            echo "| App type | EXE |"
+            echo "| Installer parameters | \`/S\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

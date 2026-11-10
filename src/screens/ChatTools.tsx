@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react"
 
 // Tools shared by online chats and Local chat: the chat's options menu, choosing messages to
-// delete, and the dialogs that confirm clearing or deleting.
+// delete, and the dialogs that confirm clearing or deleting, or say something can't be done.
 
 /** Which messages are chosen while choosing messages to delete. Ends when the chat changes. */
 export function useMessageSelection(chatKey: string | null) {
@@ -81,14 +81,33 @@ export function SelectCheck({ checked }: { checked: boolean }) {
   )
 }
 
-/** The chat's options in its header: choose messages to delete, or clear the whole chat. */
+/** Marks a chat whose notifications are off. */
+export function QuietIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 5.2A5.5 5.5 0 0 1 17.5 10v3.5M18.5 18H5l1.5-1.5V10c0-.6.1-1.2.3-1.8" />
+      <path d="M10 20.5a2 2 0 0 0 4 0M4 4l16 16" />
+    </svg>
+  )
+}
+
+/**
+ * The chat's options in its header: its own extras (such as turning notifications off), choosing
+ * messages to delete, or clearing the whole chat. While messages are being chosen, Cancel and Delete
+ * take its place.
+ */
 export function ThreadMenu({
-  onSelect,
+  selection,
+  onDelete,
   onClear,
+  extra = [],
   disabled,
 }: {
-  onSelect: () => void
+  selection: MessageSelection
+  // Deletes the chosen messages.
+  onDelete: () => void
   onClear: () => void
+  extra?: Array<{ label: string; onSelect: () => void }>
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -110,8 +129,30 @@ export function ThreadMenu({
     }
   }, [open])
 
+  if (selection.selecting) {
+    const count = selection.chosen.size
+    return (
+      <div className="selection-actions" role="group" aria-label="Selected messages">
+        <button type="button" className="button secondary" onClick={selection.stop}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="button danger"
+          disabled={count === 0}
+          title={count === 0 ? "Select messages to delete" : undefined}
+          aria-live="polite"
+          onClick={onDelete}
+        >
+          {count === 0 ? "Delete" : `Delete (${count})`}
+        </button>
+      </div>
+    )
+  }
+
   const items = [
-    { label: "Select messages", danger: false, onSelect },
+    ...extra.map((item) => ({ ...item, danger: false })),
+    { label: "Select messages", danger: false, onSelect: selection.start },
     { label: "Clear chat", danger: true, onSelect: onClear },
   ]
 
@@ -151,23 +192,6 @@ export function ThreadMenu({
           ))}
         </div>
       )}
-    </div>
-  )
-}
-
-/** Takes the place of the message box while choosing messages. */
-export function SelectionBar({ count, onCancel, onDelete }: { count: number; onCancel: () => void; onDelete: () => void }) {
-  return (
-    <div className="selection-bar">
-      <p className="selection-count" aria-live="polite">
-        {count === 0 ? "Select messages to delete" : count === 1 ? "1 message selected" : `${count} messages selected`}
-      </p>
-      <button type="button" className="button secondary" onClick={onCancel}>
-        Cancel
-      </button>
-      <button type="button" className="button danger" disabled={count === 0} onClick={onDelete}>
-        Delete
-      </button>
     </div>
   )
 }
@@ -239,6 +263,35 @@ export function ConfirmDialog({
               {action.label}
             </button>
           ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Tells the person something they need to know, such as why a button did nothing. */
+export function AlertDialog({ title, text, onClose }: { title: string; text: string; onClose: () => void }) {
+  useEffect(() => {
+    function onKey(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return
+      event.stopPropagation()
+      onClose()
+    }
+    document.addEventListener("keydown", onKey, true)
+    return () => document.removeEventListener("keydown", onKey, true)
+  }, [onClose])
+
+  return (
+    <div className="desk-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="desk-modal chat-confirm" role="alertdialog" aria-labelledby="chat-alert-title" aria-describedby="chat-alert-text">
+        <h2 id="chat-alert-title">{title}</h2>
+        <p className="hint" id="chat-alert-text">
+          {text}
+        </p>
+        <div className="form-actions">
+          <button type="button" className="button" autoFocus onClick={onClose}>
+            OK
+          </button>
         </div>
       </div>
     </div>

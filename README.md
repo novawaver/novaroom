@@ -258,23 +258,24 @@ Do not reuse a version number that already reached users. If a published release
 
 ## Microsoft Store
 
-Version 0.1.0 is prepared as a Windows installer. It is not published yet. The listing needs your Partner Center account, a public privacy-policy address, and a name reservation.
+Novaroom is not in the Store yet. Each tagged release builds a second, Store-only installer that bundles WebView2 offline and is code-signed with Azure Artifact Signing. The release workflow uploads it to Cloudflare R2 at a versioned address such as `https://downloads.novawave.llc/novaroom/0.5.2/Novaroom_0.5.2_x64-setup.exe`, and the run's summary page shows the exact address. Partner Center does not accept the GitHub release link because it redirects. The secrets and variables the workflow needs are listed at the top of `.github/workflows/release.yml`.
+
+In Partner Center, add the package as **EXE**, architecture **x64**, with `/S` as the installer parameter. Each update needs its new address entered in Partner Center. Never replace a file that is already in the bucket.
+
+The privacy policy is published at https://novawave.llc/novaroom/privacy.
 
 The privacy policy and terms are in the app under **Profile → About**. Novaroom is set to **18 and older**. Messages are not end-to-end encrypted, and the policy says so. Have someone read `supabase/migrations/` before a public listing. That read has not been done from this project.
 
-Before you submit:
+Before you submit, run a USPTO trademark search for “Novaroom” and reserve the name in [Partner Center](https://partner.microsoft.com/dashboard) as an **EXE or MSI app**. This project cannot do that search for you.
 
-1. Run a USPTO trademark search for “Novaroom” and reserve the name in [Partner Center](https://partner.microsoft.com/dashboard). This project cannot do that search for you.
-2. Publish the Profile privacy policy at a public URL. Partner Center requires that address.
-3. Build the installer from this folder:
+To build the Store installer locally (unsigned, so only for testing):
 
 ```powershell
-$env:CARGO_TARGET_DIR = "D:\A-Projects\novaroom-app\src-tauri\target"
-$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-npm run tauri build
+npm run tauri build -- --no-bundle
+npm run tauri bundle -- --bundles nsis --config src-tauri/tauri.microsoftstore.conf.json
 ```
 
-The setup file is `src-tauri\target\release\bundle\nsis\Novaroom_0.1.0_x64-setup.exe`. In Partner Center, create a Win32 app and upload that installer. Use this listing text:
+Use this listing text:
 
 - **Short description:** Chat for AI trainers.
 - **Description:** Novaroom is a Windows chat app for annotators, raters, and prompt writers. Join a topic room for coding, writing, math, or rating, or start a direct chat or a small group. Block, report, and delete are built in.
@@ -282,8 +283,6 @@ The setup file is `src-tauri\target\release\bundle\nsis\Novaroom_0.1.0_x64-setup
 - **Category:** Social.
 
 When the Store page is live, a LinkedIn post can say: Novaroom is open for AI trainers on Windows. Annotators, raters, and prompt writers can join topic rooms without swapping email addresses. The Microsoft Store link is [your listing URL].
-
-A direct download outside the Store waits until code signing is set up.
 
 ## Folder map
 

@@ -733,6 +733,8 @@ async function messageFromRow(row: MessageRow) {
 export function subscribeToMessages(handlers: {
   onInsert: (message: ChatMessage) => void
   onUpdate: (message: ChatMessage) => void
+  // A message deleted forever by an admin: its row is gone, so there is no "Message deleted" to show.
+  onRemove: (messageId: string) => void
   onRefresh: () => void
 }) {
   if (!supabase) {
@@ -774,11 +776,37 @@ export function subscribeToMessages(handlers: {
         void messageFromRow(payload.new as MessageRow).then(handlers.onUpdate)
       },
     )
+    // Realtime can't check read rules on a row that no longer exists, so a delete reaches everyone
+    // with only the message id. Someone not in that chat just doesn't have it open.
+    .on(
+      "postgres_changes",
+      { event: "DELETE", schema: "public", table: "messages" },
+      (payload) => {
+        const id = (payload.old as { id?: string } | null)?.id
+        if (id) handlers.onRemove(id)
+      },
+    )
     .subscribe()
 
   return () => {
     void client.removeChannel(channel)
   }
+}
+
+/** The display names of the people in a chat, for mentioning them. */
+export async function listMemberNames(conversationId: string): Promise<string[]> {
+  if (!supabase) return []
+  const { data: members, error } = await supabase
+    .from("conversation_members")
+    .select("user_id")
+    .eq("conversation_id", conversationId)
+    .limit(300)
+  if (error) throw error
+  const ids = (members ?? []).map((row) => row.user_id as string)
+  if (ids.length === 0) return []
+  const { data: profiles, error: profileError } = await supabase.from("profiles").select("display_name").in("id", ids)
+  if (profileError) throw profileError
+  return (profiles ?? []).map((row) => ((row.display_name as string | null) ?? "").trim()).filter(Boolean)
 }
 
 export type ChatPermissions = { direct: boolean; group: boolean }

@@ -255,3 +255,12 @@ export async function windowIsActive() {
   ])
   return focused && visible
 }
+
+/** Opens a link in the default browser (the desktop app), or in a new tab when run in a browser. */
+export function openExternal(url: string) {
+  if (inTauri()) {
+    void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(url))
+    return
+  }
+  window.open(url, "_blank", "noopener,noreferrer")
+}

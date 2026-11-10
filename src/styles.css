@@ -1471,27 +1471,15 @@ textarea:focus {
   opacity: 1;
 }
 
-.message-log.selecting .bubble-reply {
+.message-log.selecting .bubble-actions {
   display: none;
 }
 
-.selection-bar {
+/* Cancel and Delete, in the chat's header in place of its options while messages are being chosen. */
+.selection-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 40px;
-}
-
-.selection-count {
-  flex: 1;
-  margin: 0;
-  color: var(--muted);
-  font-size: 14px;
-}
-
-.selection-bar .button {
-  padding: 6px 14px;
-  font-size: 14px;
 }
 
 .message-menu {
@@ -6388,50 +6376,69 @@ code {
   position: relative;
 }
 
-.bubble-reply {
+/* A message's actions (reply, pin, copy, remove): a row along the bottom edge of its bubble, shown
+   on hover. More buttons can be added to the row. */
+.bubble-actions {
   position: absolute;
-  top: 50%;
+  top: calc(100% - 8px);
   z-index: 5;
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  padding: 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--line);
-  border-radius: 50%;
+  border-radius: 999px;
   background: var(--card);
-  color: var(--muted);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
   opacity: 0;
-  transform: translateY(-50%);
+  pointer-events: none;
   transition: opacity 0.12s;
 }
 
-.bubble-reply.mine {
-  right: calc(100% + 6px);
+.bubble-actions.mine {
+  right: 8px;
 }
 
-.bubble-reply.theirs {
-  left: calc(100% + 6px);
+.bubble-actions.theirs {
+  left: 8px;
 }
 
-.bubble:hover .bubble-reply,
-.bubble-reply:focus-visible {
+.bubble:hover .bubble-actions,
+.bubble-actions:focus-within {
   opacity: 1;
+  pointer-events: auto;
 }
 
-.bubble-reply:hover {
+.bubble-action {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+}
+
+.bubble-action:hover {
+  background: var(--side-soft);
   color: var(--ink);
 }
 
-.bubble-reply:disabled {
-  display: none;
+.bubble-action.on {
+  color: var(--brand);
 }
 
-.bubble-reply svg,
+.bubble-action.danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.bubble-action svg,
 .attach-button svg,
 .local-file-icon svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -6439,19 +6446,82 @@ code {
   stroke-linejoin: round;
 }
 
-/* Pinning: a second round button beside Reply, a mark by the time, and the bar under the header. */
-.bubble-pin-button.mine {
-  right: calc(100% + 40px);
+.attach-button svg,
+.local-file-icon svg {
+  width: 16px;
+  height: 16px;
 }
 
-.bubble-pin-button.theirs {
-  left: calc(100% + 40px);
+/* Mentions: "@Name" in a message, and the list of people shown while typing one. */
+.mention {
+  font-weight: 600;
 }
 
-.bubble-pin-button.on {
-  color: var(--brand);
+.mention.me {
+  padding: 0 3px;
+  border-radius: 4px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
 }
 
+.composer-row {
+  position: relative;
+}
+
+.mention-list {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 200px;
+  max-width: min(320px, 100%);
+  display: grid;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+
+.mention-list button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-list button[aria-selected="true"] {
+  background: var(--side-soft);
+}
+
+/* Beside a chat in the list whose notifications are off. */
+.quiet-mark {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--side-muted);
+}
+
+.quiet-mark svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.quiet-mark + .unread-count,
+.quiet-mark + .member-count + .unread-count {
+  margin-left: 0;
+}
+
+/* Pinning: a mark by the time, and the bar under the header. */
 .bubble-pin {
   display: inline-flex;
   color: var(--brand);
@@ -7654,4 +7724,604 @@ code {
 
 .capture-item-actions {
   flex-shrink: 0;
+}
+
+/* Room pages: a room's own page in the main area, its chat in a panel on the right. */
+
+.room-row.active {
+  border-radius: 12px;
+  background: var(--side-soft);
+}
+
+.room-row-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.room-view {
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+}
+
+.room-view-inner {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(320px, 36%, 420px);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.room-pane-switch {
+  display: none;
+}
+
+.room-page {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.room-page-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 28px;
+  border-bottom: 1px solid var(--line);
+}
+
+.room-page-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  font-size: 17px;
+}
+
+.room-page-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.room-page-title h1 {
+  margin: 0;
+  font-size: 24px;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
+.room-page-title p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.room-page-head .button {
+  flex: none;
+}
+
+.room-page-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 28px 40px;
+}
+
+.room-page-scroll > .thread-loading {
+  padding: 48px 0;
+}
+
+.room-page-content {
+  max-width: 760px;
+}
+
+/* A custom, code-built room page (src/screens/rooms) lays out its own blocks in this column. */
+.room-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 760px;
+}
+
+.room-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.room-stat {
+  flex: 1 1 140px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.room-stat-num {
+  font-size: 24px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.room-stat-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.room-page-empty,
+.room-page-join-note,
+.room-page-none {
+  margin: 0;
+  color: var(--muted);
+}
+
+.room-page-empty {
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+}
+
+.room-page-join-note {
+  margin-top: 24px;
+  max-width: 760px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.room-page-updated {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The page text. It reads in Inter, like messages. */
+.markdown {
+  font-family: "Inter Variable", "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 1.4em 0 0.5em;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.markdown h2 {
+  font-size: 22px;
+}
+
+.markdown h3 {
+  font-size: 18px;
+}
+
+.markdown h4 {
+  font-size: 15px;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown blockquote,
+.markdown pre {
+  margin: 0 0 0.9em;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.4em;
+}
+
+.markdown li + li {
+  margin-top: 0.25em;
+}
+
+.markdown a {
+  color: var(--brand-ink);
+}
+
+.markdown code {
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: var(--side-soft);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.markdown pre {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--side-soft);
+  overflow: auto;
+  overflow-wrap: normal;
+}
+
+.markdown pre code {
+  padding: 0;
+  background: none;
+}
+
+.markdown blockquote {
+  padding: 8px 14px;
+  border-left: 3px solid var(--brand-bright);
+  border-radius: 0 8px 8px 0;
+  background: var(--card);
+  color: var(--muted);
+}
+
+.markdown hr {
+  margin: 1.4em 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.room-page-extras {
+  max-width: 760px;
+  margin-top: 28px;
+  display: grid;
+  gap: 24px;
+}
+
+.room-page-section h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.room-page-count {
+  margin-left: 4px;
+  font-weight: 600;
+}
+
+.room-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.room-links a {
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.room-links a:hover {
+  border-color: var(--brand-bright);
+}
+
+.room-links strong,
+.room-links span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.room-links span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.room-members {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 12px;
+}
+
+.room-members li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.room-member-photo {
+  position: relative;
+  flex: none;
+  display: grid;
+}
+
+.room-member-avatar {
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+}
+
+.room-member-presence {
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--paper);
+}
+
+.room-member-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 14px;
+}
+
+.room-member-you {
+  color: var(--muted);
+}
+
+/* The chat panel beside the page. */
+.room-chat {
+  border-left: 1px solid var(--line);
+  background: var(--card);
+}
+
+.room-chat .thread-bar {
+  padding: 8px 12px 8px 16px;
+}
+
+.room-chat .thread-actions {
+  min-width: 0;
+}
+
+.room-chat .thread-actions .search {
+  width: 100%;
+  min-width: 70px;
+  max-width: 170px;
+}
+
+.room-chat .message-log {
+  padding: 16px;
+}
+
+.room-chat .composer {
+  padding: 8px 12px 10px;
+}
+
+.room-chat-locked .thread-empty h2 {
+  font-size: 22px;
+}
+
+/* Too narrow for both: one at a time, chosen with the switch. Hidden rather than removed, so the
+   chat keeps its scroll position. */
+@container (max-width: 760px) {
+  .room-view-inner {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .room-view-inner > .room-page,
+  .room-view-inner > .room-chat {
+    grid-area: 2 / 1;
+  }
+
+  .room-view-inner.pane-page > .room-chat,
+  .room-view-inner.pane-chat > .room-page {
+    visibility: hidden;
+  }
+
+  .room-chat {
+    border-left: 0;
+  }
+
+  .room-pane-switch {
+    display: flex;
+    gap: 4px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .room-pane-switch button {
+    flex: 1;
+    padding: 7px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .room-pane-switch button.active {
+    border-color: var(--brand);
+    background: var(--brand);
+    color: white;
+  }
+
+  .room-page-head,
+  .room-page-scroll {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+}
+
+/* A room's form, on its page below the written text. */
+
+.room-form-card {
+  max-width: 760px;
+  margin-top: 28px;
+  padding: 18px 20px 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+}
+
+.room-form-card h2 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+}
+
+.room-form-intro {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.room-form {
+  margin-top: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.room-form-field {
+  display: grid;
+  gap: 6px;
+}
+
+.room-form-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.room-form-required {
+  color: var(--brand);
+}
+
+.room-form-help {
+  margin-top: -2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.room-form-field-error {
+  margin-top: 2px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.room-form-field [aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.room-form input,
+.room-form textarea,
+.room-form select {
+  width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 9px 11px;
+}
+
+.room-form textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+
+.room-form input:focus,
+.room-form textarea:focus,
+.room-form select:focus {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.room-form .button {
+  justify-self: start;
+}
+
+.room-form-sent {
+  margin: 0;
+  color: var(--brand-ink);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.room-form-mine {
+  margin-top: 22px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.room-form-mine h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.room-form-mine ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+
+.room-form-mine li {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+}
+
+.room-form-mine time {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.room-form-mine dl {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.room-form-mine dl > div {
+  display: flex;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.room-form-mine dt {
+  flex: 0 0 40%;
+  max-width: 200px;
+  color: var(--muted);
+}
+
+.room-form-mine dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }

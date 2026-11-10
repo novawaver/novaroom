@@ -1,7 +1,9 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react"
 import { accentFor } from "../lib/accent"
+import { chatIsQuiet, localAlertKey, setChatQuiet, useQuietChats } from "../lib/chatAlerts"
 import { notifyIncoming, windowIsActive } from "../lib/desktop"
 import { loadDraft, saveDraft } from "../lib/drafts"
+import { mentionsName } from "../lib/mentions"
 import { useIdle } from "../lib/presence"
 import { typingText } from "../lib/typing"
 import {
@@ -35,7 +37,8 @@ import {
 } from "../lib/localChat"
 import type { Session } from "../types"
 import { DownloadIcon, ImageViewer } from "./ImageViewer"
-import { ConfirmDialog, SelectCheck, SelectionBar, ThreadMenu, selectableRow, useMessageSelection, type ConfirmAction } from "./ChatTools"
+import { ConfirmDialog, QuietIcon, SelectCheck, ThreadMenu, selectableRow, useMessageSelection, type ConfirmAction } from "./ChatTools"
+import { MentionText, useMentions } from "./Mentions"
 
 // While online, how often to download the registered keys again, so people who set up Local chat
 // since can be recognised on the network.
@@ -74,6 +77,9 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
   const [avatars, setAvatars] = useState<Record<string, string>>({})
   const avatarsRef = useRef(avatars)
   avatarsRef.current = avatars
+  // This person's name, for telling when a message mentions them.
+  const nameRef = useRef(name)
+  nameRef.current = name
   const reloadAvatars = useCallback(() => {
     void localAvatars()
       .then(setAvatars)
@@ -191,8 +197,12 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
         void windowIsActive().then((active) => {
           if (active && visibleRef.current && message.chat === selectedRef.current) return
           setUnread((current) => ({ ...current, [message.chat]: (current[message.chat] ?? 0) + 1 }))
+          // With the chat's notifications off, only a message that mentions this person shows one.
+          const mentioned = mentionsName(message.body, nameRef.current)
+          if (!mentioned && userId && chatIsQuiet(userId, localAlertKey(message.chat))) return
           const where = message.chat === LOCAL_ROOM ? " (local network)" : " (local)"
-          void notifyIncoming(`${message.senderName || "Someone"}${where}`, localMessageLabel(message), `local:${message.chat}`, {
+          const title = `${message.senderName || "Someone"}${mentioned ? " mentioned you" : ""}${where}`
+          void notifyIncoming(title, localMessageLabel(message), `local:${message.chat}`, {
             name: message.senderName || "Someone",
             avatarUrl: avatarsRef.current[message.senderId] ?? null,
           })
@@ -392,6 +402,8 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     typists,
     chatName,
     avatarOf,
+    userId,
+    name,
   }
 }
 
@@ -456,6 +468,7 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
     ...local.chats.filter((chat) => chat.chat !== LOCAL_ROOM && !online.has(chat.chat)).map((chat) => chat.chat),
   ]
   const room = summaries.get(LOCAL_ROOM)
+  const quiet = useQuietChats(local.userId)
 
   // here: null for the room, else whether they are on the network and whether they are idle.
   const row = (chat: string, hint: string, here: { idle: boolean } | false | null) => (
@@ -483,6 +496,11 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
         <strong>{local.chatName(chat)}</strong>
         <span>{hint}</span>
       </span>
+      {quiet.has(localAlertKey(chat)) && (
+        <span className="quiet-mark" role="img" aria-label="Notifications off" title="Notifications off">
+          <QuietIcon />
+        </span>
+      )}
       {chat === LOCAL_ROOM && (
         // Everyone in the room now: the people on the network, and you.
         <span className="member-count" title={`${local.peers.length + 1} on this network, including you`}>
@@ -537,6 +555,31 @@ function PinIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M9 4h6l-1 5 3.5 3.5v1.5h-11v-1.5L10 9z" />
       <path d="M12 14v6" />
+    </svg>
+  )
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
+      <path d="M15.5 8.5v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2" />
+    </svg>
+  )
+}
+
+function CopiedIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </svg>
+  )
+}
+
+function RemoveIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.5 7h15M10 4h4M6.5 7l.8 11.2a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8L17.5 7M10 11v5M14 11v5" />
     </svg>
   )
 }
@@ -796,6 +839,14 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   // Choosing messages to delete, and the dialog that confirms clearing or deleting.
   const selection = useMessageSelection(selected)
   const [confirm, setConfirm] = useState<{ title: string; text: string; actions: ConfirmAction[] } | null>(null)
+  // The message whose text was just copied, so its button can say so for a moment.
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!copiedId) return
+    const timer = window.setTimeout(() => setCopiedId(null), 1500)
+    return () => window.clearTimeout(timer)
+  }, [copiedId])
+  const quiet = useQuietChats(userId).has(localAlertKey(selected))
   // Pinned messages, newest first, and which one the bar at the top shows. Clicking the bar jumps to
   // that message and moves on to the next older one.
   const pinned = local.messages.filter((message) => message.pinned).reverse()
@@ -822,6 +873,13 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     setFile(null)
     bodyRef.current?.focus()
   }, [selected, userId])
+
+  // Who can be mentioned: everyone on the network in the room, or the other person in a direct chat.
+  const mentionNames =
+    selected === LOCAL_ROOM ? local.peers.map((item) => item.name) : [local.chatName(selected)].filter((item) => item !== "Someone")
+  const mentions = useMentions(mentionNames, body, updateBody, bodyRef)
+  // Names to mark in messages: the people above, and this person.
+  const markedNames = [...mentionNames, local.name]
 
   useEffect(() => {
     const log = logRef.current
@@ -912,6 +970,21 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     })
   }
 
+  function onRemove(message: LocalMessage) {
+    setConfirm({
+      title: "Delete message?",
+      text: "This deletes this message from this computer. Others keep their copies.",
+      actions: [{ label: "Delete", danger: true, onSelect: () => local.deleteMessages([message.id]) }],
+    })
+  }
+
+  function onCopy(message: LocalMessage) {
+    navigator.clipboard.writeText(message.body).then(
+      () => setCopiedId(message.id),
+      () => setSendError("Could not copy that message."),
+    )
+  }
+
   function onClearChat() {
     setConfirm({
       title: "Clear this chat?",
@@ -1000,7 +1073,18 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             onChange={(hours) => void local.changeAutoDelete(hours)}
             disabled={!local.running}
           />
-          <ThreadMenu onSelect={selection.start} onClear={onClearChat} disabled={!local.running} />
+          <ThreadMenu
+            selection={selection}
+            onDelete={onDeleteChosen}
+            onClear={onClearChat}
+            extra={[
+              {
+                label: quiet ? "Turn on notifications" : "Turn off notifications",
+                onSelect: () => setChatQuiet(userId, localAlertKey(selected), !quiet),
+              },
+            ]}
+            disabled={!local.running}
+          />
         </div>
       </header>
       {shownPin && (
@@ -1091,7 +1175,11 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                       </button>
                     )}
                     <LocalFileView message={message} onOpenImage={(url, imageName) => setViewing({ id: message.id, url, name: imageName })} />
-                    {message.body && <p>{message.body}</p>}
+                    {message.body && (
+                      <p>
+                        <MentionText text={message.body} names={markedNames} me={local.name} />
+                      </p>
+                    )}
                     <span className="bubble-meta">
                       {message.pinned && (
                         <span className="bubble-pin" role="img" aria-label="Pinned" title="Pinned. Auto-delete keeps it.">
@@ -1101,30 +1189,53 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                       {!sameMinute && <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>}
                       {mine && <LocalStatus message={message} isRoom={isRoom} />}
                     </span>
-                    <button
-                      type="button"
-                      className={`bubble-reply bubble-pin-button ${mine ? "mine" : "theirs"}${message.pinned ? " on" : ""}`}
-                      aria-label={message.pinned ? "Unpin" : "Pin"}
-                      aria-pressed={message.pinned}
-                      title={message.pinned ? "Unpin" : "Pin. Auto-delete keeps pinned messages."}
-                      disabled={!local.running}
-                      onClick={() => void local.setPinned(message.id, !message.pinned)}
-                    >
-                      <PinIcon />
-                    </button>
-                    <button
-                      type="button"
-                      className={mine ? "bubble-reply mine" : "bubble-reply theirs"}
-                      aria-label="Reply"
-                      title="Reply"
-                      disabled={!local.running}
-                      onClick={() => {
-                        setReplyTo(message)
-                        bodyRef.current?.focus()
-                      }}
-                    >
-                      <ReplyIcon />
-                    </button>
+                    {/* Shown along the bottom of the bubble on hover. New actions go in this row. */}
+                    {local.running && (
+                      <div className={`bubble-actions ${mine ? "mine" : "theirs"}`} role="group" aria-label="Message actions">
+                        <button
+                          type="button"
+                          className="bubble-action"
+                          aria-label="Reply"
+                          title="Reply"
+                          onClick={() => {
+                            setReplyTo(message)
+                            bodyRef.current?.focus()
+                          }}
+                        >
+                          <ReplyIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className={message.pinned ? "bubble-action on" : "bubble-action"}
+                          aria-label={message.pinned ? "Unpin" : "Pin"}
+                          aria-pressed={message.pinned}
+                          title={message.pinned ? "Unpin" : "Pin. Auto-delete keeps pinned messages."}
+                          onClick={() => void local.setPinned(message.id, !message.pinned)}
+                        >
+                          <PinIcon />
+                        </button>
+                        {message.body && (
+                          <button
+                            type="button"
+                            className="bubble-action"
+                            aria-label="Copy text"
+                            title={copiedId === message.id ? "Copied" : "Copy text"}
+                            onClick={() => onCopy(message)}
+                          >
+                            {copiedId === message.id ? <CopiedIcon /> : <CopyIcon />}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="bubble-action danger"
+                          aria-label="Remove"
+                          title="Remove from this computer"
+                          onClick={() => onRemove(message)}
+                        >
+                          <RemoveIcon />
+                        </button>
+                      </div>
+                    )}
                   </article>
                   {mine && avatar}
                 </div>
@@ -1146,11 +1257,6 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           </>
         )}
       </p>
-      {selection.selecting ? (
-        <div className="composer">
-          <SelectionBar count={selection.chosen.size} onCancel={selection.stop} onDelete={onDeleteChosen} />
-        </div>
-      ) : (
         <form className="composer" onSubmit={(event) => void onSend(event)}>
           {sendError && (
             <p className="form-error" role="alert">
@@ -1187,6 +1293,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             </div>
           )}
           <div className="composer-row">
+            {mentions.list}
             <input
               ref={fileInputRef}
               type="file"
@@ -1216,8 +1323,12 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
               disabled={!local.running}
               onChange={(event) => {
                 updateBody(event.target.value)
+                mentions.track(event.target, true)
                 local.onType(event.target.value.trim() !== "")
               }}
+              onClick={(event) => mentions.track(event.currentTarget, false)}
+              onKeyUp={(event) => mentions.track(event.currentTarget, false)}
+              onBlur={mentions.close}
               onPaste={(event) => {
                 const pasted = event.clipboardData.files[0]
                 if (!pasted) return
@@ -1225,6 +1336,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                 attach(pasted)
               }}
               onKeyDown={(event) => {
+                if (mentions.onKeyDown(event)) return
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault()
                   event.currentTarget.form?.requestSubmit()
@@ -1242,7 +1354,6 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             </button>
           </div>
         </form>
-      )}
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
           Drop a file to send it

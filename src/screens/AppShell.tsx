@@ -11,7 +11,7 @@ import {
 } from "react"
 import { useAuth } from "../auth"
 import { accentFor } from "../lib/accent"
-import { notifyIncoming, onNotificationClick, setUnreadBadge, windowIsActive } from "../lib/desktop"
+import { notifyIncoming, onNotificationClick, openExternal, setUnreadBadge, windowIsActive } from "../lib/desktop"
 import { useReconnectEpoch } from "../lib/network"
 import { readUnread, unreadTotal, writeUnread } from "../lib/unread"
 import { loadDraft, saveDraft } from "../lib/drafts"
@@ -31,6 +31,7 @@ import {
   clearConversation,
   hideMessages,
   listChats,
+  listMemberNames,
   loadMessages,
   messageLabel,
   sendMessage,
@@ -62,14 +63,19 @@ import { typingText, useTyping } from "../lib/typing"
 import { PROFILE_TABS, Profile, type ProfileTab } from "./Profile"
 import { SETTINGS_TABS, Settings, type SettingsTab } from "./Settings"
 import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
+import { RoomPage } from "./RoomPage"
 import { groupTables } from "../lib/vault"
 import { Vault, VaultFileCard, VaultLeaveDialog, useVault, type VaultState } from "./Vault"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
 import { CAPTURE_TABS, Capture, formatElapsed, type CaptureState, type CaptureTab } from "./Capture"
+import { chatIsQuiet, setChatQuiet, useQuietChats } from "../lib/chatAlerts"
+import { mentionsName } from "../lib/mentions"
+import { MentionText, useMentions } from "./Mentions"
 import {
+  AlertDialog,
   ConfirmDialog,
+  QuietIcon,
   SelectCheck,
-  SelectionBar,
   ThreadMenu,
   selectableRow,
   useMessageSelection,
@@ -970,6 +976,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   // Leadership members and admins can always start chats and groups; everyone else needs permission.
   const canStartDirect = isLeader || isAdmin || chatPermissions?.direct === true
   const canStartGroup = isLeader || isAdmin || chatPermissions?.group === true
+  // Not known yet, so the buttons wait rather than wrongly say there is no permission.
+  const startUnknown = !isLeader && !isAdmin && chatPermissions === null
   // False until the first load finishes, so the sidebar shows placeholders instead of "No chats yet".
   const [chatsLoaded, setChatsLoaded] = useState(false)
   const [roomsLoaded, setRoomsLoaded] = useState(false)
@@ -1001,12 +1009,19 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   // The message last reported, so a thank-you note shows under it in the message list.
   const [reportedId, setReportedId] = useState<string | null>(null)
   const [rooms, setRooms] = useState<RoomInfo[]>([])
+  // A room someone is looking at before joining: its page shows, with a Join button in place of the chat.
+  const [roomPreviewId, setRoomPreviewId] = useState<string | null>(null)
+  // When the main area is too narrow for both, a room shows its page or its chat, with a switch.
+  const [roomPane, setRoomPane] = useState<"page" | "chat">("page")
   // Goes up each time the connection returns after being lost.
   const epoch = useReconnectEpoch()
   // Handles a click on a desktop notification; replaced each render so it sees the latest state.
   const notificationClickRef = useRef<(target: string) => void>(() => {})
   const selectedRef = useRef<string | null>(null)
   const blockedRef = useRef<string[]>([])
+  // This person's name, for telling when a message mentions them.
+  const myNameRef = useRef("")
+  myNameRef.current = profile?.displayName ?? ""
   const logRef = useRef<HTMLDivElement>(null)
   // Whether the message log is at its bottom, so pictures that finish loading keep it there.
   const pinnedRef = useRef(true)
@@ -1205,7 +1220,10 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
           .sort((a, b) => (b.lastAt ?? "").localeCompare(a.lastAt ?? ""))
       })
     }
-    return subscribeToMessages({
+    // Deleting a whole chat removes every message in it at once, so the chat list reloads once
+    // after the last removal instead of once per message.
+    let removedTimer: number | undefined
+    const stop = subscribeToMessages({
       onInsert(message) {
         if (message.senderId !== session.userId && blockedRef.current.includes(message.senderId)) return
         remember(message)
@@ -1223,7 +1241,11 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
               writeUnread(session.userId, next)
               return next
             })
-            void notifyIncoming(message.senderName || "Novaroom", messageLabel(message), `chat:${message.conversationId}:${message.id}`, {
+            // With the chat's notifications off, only a message that mentions this person shows one.
+            const mentioned = mentionsName(message.body, myNameRef.current)
+            if (!mentioned && chatIsQuiet(session.userId, message.conversationId)) return
+            const title = mentioned ? `${message.senderName || "Someone"} mentioned you` : message.senderName || "Novaroom"
+            void notifyIncoming(title, messageLabel(message), `chat:${message.conversationId}:${message.id}`, {
               name: message.senderName || "Someone",
               avatarUrl: message.senderAvatarUrl ?? null,
             })
@@ -1239,6 +1261,17 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
         remember(message)
         setMessages((current) => current.map((item) => (item.id === message.id ? { ...item, ...message } : item)))
       },
+      onRemove(messageId) {
+        setMessages((current) => {
+          if (!current.some((item) => item.id === messageId)) return current
+          return current.filter((item) => item.id !== messageId)
+        })
+        // The chat list may have been showing it as the last message.
+        window.clearTimeout(removedTimer)
+        removedTimer = window.setTimeout(() => {
+          void listChats(session).then(setChats).catch(() => undefined)
+        }, 400)
+      },
       onRefresh() {
         void listChats(session).then(setChats).catch(() => undefined)
         const openId = selectedRef.current
@@ -1246,6 +1279,10 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
         void loadMessages(session, openId).then(setMessages).catch(() => undefined)
       },
     })
+    return () => {
+      window.clearTimeout(removedTimer)
+      stop()
+    }
   }, [session, epoch])
 
   // When the connection comes back, load what was missed while it was down. Requests that were
@@ -1318,6 +1355,32 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
 
   // Choosing messages to delete, and the dialog that confirms clearing or deleting.
   const selection = useMessageSelection(selectedId)
+  // Chats whose notifications are off; a mention still shows one.
+  const quietChats = useQuietChats(session?.userId ?? null)
+  // Everyone in the open chat, who can be mentioned with "@".
+  const [memberNames, setMemberNames] = useState<string[]>([])
+  useEffect(() => {
+    setMemberNames([])
+    if (!selectedId) return
+    let active = true
+    void listMemberNames(selectedId)
+      .then((names) => {
+        if (active) setMemberNames(names)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [selectedId])
+  const myName = profile?.displayName ?? ""
+  const mentions = useMentions(
+    memberNames.filter((name) => name !== myName),
+    body,
+    updateBody,
+    bodyRef,
+  )
+  // Shown when a button can't do what it says, such as starting a chat without permission.
+  const [alertBox, setAlertBox] = useState<{ title: string; text: string } | null>(null)
   const [confirm, setConfirm] = useState<{ title: string; text: string; actions: ConfirmAction[] } | null>(null)
 
   // Messages keep the name and picture their sender had when they loaded; show changes right away.
@@ -1375,6 +1438,21 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   if (!session || !profile) return null
 
   const selected = chats.find((chat) => chat.id === selectedId) ?? null
+  const selectedRoom: RoomInfo | null =
+    selected?.kind === "room"
+      ? (rooms.find((room) => room.id === selected.id) ?? {
+          id: selected.id,
+          title: selected.title,
+          description: selected.detail,
+          slug: null,
+          joined: true,
+        })
+      : null
+  const previewRoom =
+    !selected && section === "rooms" && roomPreviewId
+      ? (rooms.find((room) => room.id === roomPreviewId && !room.joined) ?? null)
+      : null
+  const roomOnPage = view === "chats" ? (selectedRoom ?? previewRoom) : null
   const readable = messages.filter(
     (message) => message.senderId === session.userId || !blockedIds.includes(message.senderId),
   )
@@ -1538,18 +1616,20 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   }
 
   async function onLeave(roomId: string) {
-    setSendError("")
+    setStartError("")
     try {
       await leaveRoom(session!, roomId)
       if (selectedId === roomId) {
         setSelectedId(null)
         setMessages([])
+        setRoomPreviewId(roomId)
+        setRoomPane("page")
       }
       const [nextChats, nextRooms] = await Promise.all([listChats(session!), listRooms(session!)])
       setChats(nextChats)
       setRooms(nextRooms)
     } catch (caught) {
-      setSendError(caught instanceof Error ? caught.message : "Could not leave that room.")
+      setStartError(caught instanceof Error ? caught.message : "Could not leave that room.")
     }
   }
 
@@ -1686,6 +1766,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   // Shows a conversation. Messages load when the selection changes, so re-selecting the chat that
   // is already open must not clear it and wait for a load that will never come.
   function selectConversation(chatId: string) {
+    setRoomPreviewId(null)
     if (chatId === selectedId) return
     setLoadingMessages(true)
     setMessages([])
@@ -1701,6 +1782,17 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       writeUnread(session!.userId, next)
       return next
     })
+  }
+
+  // Shows a room's page before joining it.
+  function openRoomPreview(roomId: string) {
+    setRoomPreviewId(roomId)
+    setSelectedId(null)
+    setMessages([])
+    setView("chats")
+    setSearch("")
+    setStartError("")
+    setRoomPane("page")
   }
 
   function openChat(chatId: string) {
@@ -1760,6 +1852,312 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
         setView(mode === "local" ? "local" : "chats")
       }}
     />
+  )
+
+  // The open conversation: the whole main area for a chat, or the panel beside a room's page.
+  const renderThread = (inRoom: boolean) => (
+    <section className={inRoom ? "thread room-chat" : "thread"} aria-label={inRoom ? "Room chat" : undefined}>
+      <header className="thread-bar">
+        {selected && !inRoom && (
+          <span className="thread-photo">
+            <span className="avatar thread-avatar">
+              {selected.avatarUrl ? <img src={selected.avatarUrl} alt="" /> : <span>{initials(selected.title)}</span>}
+            </span>
+            {selected.kind === "direct" && selected.otherUserId && (
+              <span className={`presence-dot thread-presence ${presenceOf(selected.otherUserId)}`} />
+            )}
+          </span>
+        )}
+        <div className="thread-who">
+          <h1>{inRoom ? "Chat" : selected ? selected.title : "Messages"}</h1>
+          {inRoom && selected ? (
+            <p className="thread-email">
+              {selected.memberCount} {selected.memberCount === 1 ? "member" : "members"}
+            </p>
+          ) : (
+            threadStatus && <p className="thread-email">{threadStatus}</p>
+          )}
+        </div>
+        {selected && (
+          <div className="thread-actions">
+            {selected.kind === "direct" && selected.otherUserId && (
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => {
+                  void onBlock(selected.otherUserId!, !blockedIds.includes(selected.otherUserId!))
+                }}
+              >
+                {blockedIds.includes(selected.otherUserId) ? "Unblock" : "Block"}
+              </button>
+            )}
+            {selected.kind === "room" && !inRoom && (
+              <button type="button" className="button secondary" onClick={() => void onLeave(selected.id)}>
+                Leave
+              </button>
+            )}
+            <input
+              className="search"
+              value={search}
+              placeholder="Search this chat"
+              aria-label="Search this chat"
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <ThreadMenu
+              selection={selection}
+              onDelete={onDeleteChosen}
+              onClear={onClearChat}
+              extra={[
+                {
+                  label: quietChats.has(selected.id) ? "Turn on notifications" : "Turn off notifications",
+                  onSelect: () => setChatQuiet(session.userId, selected.id, !quietChats.has(selected.id)),
+                },
+              ]}
+            />
+          </div>
+        )}
+      </header>
+      {selected ? (
+        <>
+          <div
+            className={selection.selecting ? "message-log selecting" : "message-log"}
+            ref={logRef}
+            onScroll={(event) => {
+              const node = event.currentTarget
+              pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < PINNED_SLACK
+            }}
+            // A picture that loads after the scroll above makes the log taller; stay at the bottom.
+            onLoadCapture={() => {
+              const node = logRef.current
+              if (node && pinnedRef.current) node.scrollTop = node.scrollHeight
+            }}
+          >
+            {loadingMessages ? (
+              <div className="thread-loading" role="status" aria-label="Loading messages">
+                <span className="loading-spinner" aria-hidden="true" />
+              </div>
+            ) : visible.length === 0 ? (
+              <p className="thread-note thread-empty-note">
+                {query ? "No messages match that search." : "No messages yet. Say hello."}
+              </p>
+            ) : (
+              visible.map((message, index) => {
+                const mine = message.senderId === session.userId
+                // The time shows once for a run of messages from one person within the same minute.
+                const previous = visible[index - 1]
+                const sameMinute =
+                  previous?.senderId === message.senderId &&
+                  minuteOf(previous.createdAt) === minuteOf(message.createdAt)
+                const name = mine ? profile.displayName || session.email : message.senderName
+                const avatarUrl = mine ? profile.avatarUrl : message.senderAvatarUrl
+                // A 1:1 chat has only two people, so a picture beside each bubble adds nothing.
+                const avatar = selected.kind !== "direct" && (
+                  <span className={`avatar message-avatar accent-${accentFor(message.senderId)}`} title={name}>
+                    {avatarUrl ? <img src={avatarUrl} alt="" /> : <span>{initials(name)}</span>}
+                  </span>
+                )
+                // Messages still being sent can't be chosen yet.
+                const choosable = !sendingIds.has(message.id)
+                const chosen = selection.selecting && selection.chosen.has(message.id)
+                return (
+                  <Fragment key={message.id}>
+                    <div
+                      className={`message-row ${mine ? "mine" : "theirs"}${selection.selecting && choosable ? " selectable" : ""}${chosen ? " chosen" : ""}`}
+                      data-message-id={message.id}
+                      {...selectableRow(selection, message.id, choosable)}
+                    >
+                      {selection.selecting && choosable && <SelectCheck checked={chosen} />}
+                      {!mine && avatar}
+                      <article className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine ? " no-meta" : ""}`}>
+                        {message.attachmentUrl && isImage(message.attachmentMime) && (
+                          <img
+                            className="bubble-image"
+                            src={message.attachmentUrl}
+                            alt={message.attachmentName ?? "Image"}
+                          />
+                        )}
+                        {message.attachmentUrl && !isImage(message.attachmentMime) && (
+                          <a
+                            className="file-link"
+                            href={message.attachmentUrl}
+                            download={message.attachmentName ?? undefined}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {message.attachmentName ?? "File"}
+                            {message.attachmentSize != null ? ` (${formatBytes(message.attachmentSize)})` : ""}
+                          </a>
+                        )}
+                        {message.body && (
+                          <p>
+                            <MentionText text={message.body} names={memberNames} me={myName} />
+                          </p>
+                        )}
+                        {message.deleted && <p className="deleted-note">Message deleted</p>}
+                        <span className="bubble-meta">
+                          {!sameMinute && <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>}
+                          {message.senderId === session.userId &&
+                            (sendingIds.has(message.id) ? (
+                              <span className="bubble-status sending" role="img" aria-label="Sending" />
+                            ) : isMessageRead(readStates, session.userId, selected.kind, message.createdAt) ? (
+                              <svg className="bubble-status double read" viewBox="0 0 20 16" role="img" aria-label="Read">
+                                <title>Read</title>
+                                <path d="M1.5 8.5l3 3 7-7" />
+                                <path d="M8.5 11.5l7-7" />
+                              </svg>
+                            ) : (
+                              <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label="Sent">
+                                <title>Sent</title>
+                                <path d="M3 8.5l3 3 7-7" />
+                              </svg>
+                            ))}
+                        </span>
+                        {!selection.selecting && !message.deleted && !sendingIds.has(message.id) && (
+                          <MessageMenu
+                            side={message.senderId === session.userId ? "mine" : "theirs"}
+                            actions={
+                              message.senderId === session.userId
+                                ? [{ label: "Delete", danger: true, onSelect: () => void onDelete(message) }]
+                                : [
+                                    {
+                                      label: "Report",
+                                      danger: true,
+                                      onSelect: () => {
+                                        setReportedId(null)
+                                        setReportId(message.id)
+                                        setReportReason("harassment")
+                                        setReportNote("")
+                                      },
+                                    },
+                                    ...(selected.kind === "group" && !blockedIds.includes(message.senderId)
+                                      ? [{ label: "Block", onSelect: () => void onBlock(message.senderId, true) }]
+                                      : []),
+                                  ]
+                            }
+                          />
+                        )}
+                      </article>
+                      {mine && avatar}
+                    </div>
+                    {message.id === reportedId && (
+                      <p className="message-system-note" role="status">
+                        Report sent. Thank you.
+                      </p>
+                    )}
+                  </Fragment>
+                )
+              })
+            )}
+          </div>
+          {/* Always there, so the composer does not jump when someone starts or stops typing. */}
+          <p className="typing-status" aria-live="polite">
+            {typingNow && (
+              <>
+                <span className="typing-dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                {typingNow}…
+              </>
+            )}
+          </p>
+            <form className="composer" onSubmit={onSend}>
+              {closed && (
+                <p className="notice" role="status">
+                  {messagingLockMessage(lock)}
+                </p>
+              )}
+              {reporting && (
+                <div className="report-box">
+                  <label>
+                    Report this message
+                    <select
+                      value={reportReason}
+                      onChange={(event) => setReportReason(event.target.value as ReportReason)}
+                    >
+                      <option value="harassment">Harassment</option>
+                      <option value="spam">Spam</option>
+                      <option value="leak">Confidential client information</option>
+                      <option value="other">Something else</option>
+                    </select>
+                  </label>
+                  <label>
+                    Note, optional
+                    <textarea
+                      value={reportNote}
+                      maxLength={1000}
+                      rows={2}
+                      onChange={(event) => setReportNote(event.target.value)}
+                    />
+                  </label>
+                  <div className="form-actions">
+                    <button
+                      type="button"
+                      className="button secondary"
+                      onClick={() => {
+                        setReportId(null)
+                        setReportNote("")
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button type="button" className="button" onClick={() => void onReport()}>
+                      Send report
+                    </button>
+                  </div>
+                </div>
+              )}
+              {sendError && (
+                <p className="form-error" role="alert">
+                  {sendError}
+                </p>
+              )}
+              <div className="composer-row">
+                {mentions.list}
+                <textarea
+                  ref={bodyRef}
+                  value={body}
+                  maxLength={4000}
+                  rows={1}
+                  placeholder="Write a message"
+                  aria-label="Message"
+                  disabled={closed}
+                  onChange={(event) => {
+                    updateBody(event.target.value)
+                    mentions.track(event.target, true)
+                    typing.onType(event.target.value.trim() !== "")
+                    if (selectedId) markChatRead(selectedId)
+                  }}
+                  onClick={(event) => mentions.track(event.currentTarget, false)}
+                  onKeyUp={(event) => mentions.track(event.currentTarget, false)}
+                  onBlur={mentions.close}
+                  onKeyDown={(event) => {
+                    if (mentions.onKeyDown(event)) return
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault()
+                      event.currentTarget.form?.requestSubmit()
+                    }
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="button send-button"
+                  aria-label="Send"
+                  disabled={closed || !body.trim()}
+                >
+                  <SendIcon />
+                </button>
+              </div>
+            </form>
+        </>
+      ) : (
+        <div className="thread-empty">
+          <h2>No conversation selected</h2>
+          <p>Start a direct chat or a group, or pick one from the list.</p>
+        </div>
+      )}
+    </section>
   )
 
   function selectNav(item: NavItem) {
@@ -1976,10 +2374,17 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 type="button"
                 className="icon-button"
                 aria-label="New chat"
-                title={canStartDirect ? "New chat" : "You need an admin's permission to start new chats"}
+                title="New chat"
                 aria-pressed={composer === "direct"}
-                disabled={busy || !canStartDirect}
+                disabled={busy || startUnknown}
                 onClick={() => {
+                  if (!canStartDirect) {
+                    setAlertBox({
+                      title: "You can't start chats yet",
+                      text: "You need an admin's permission to start a new chat. Ask an admin to allow it for your account. You can still reply in chats others start with you.",
+                    })
+                    return
+                  }
                   setStartError("")
                   setComposer((current) => (current === "direct" ? null : "direct"))
                 }}
@@ -1990,10 +2395,17 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 type="button"
                 className="icon-button"
                 aria-label="New group"
-                title={canStartGroup ? "New group" : "You need an admin's permission to start groups"}
+                title="New group"
                 aria-pressed={composer === "group"}
-                disabled={busy || !canStartGroup}
+                disabled={busy || startUnknown}
                 onClick={() => {
+                  if (!canStartGroup) {
+                    setAlertBox({
+                      title: "You can't start groups yet",
+                      text: "You need an admin's permission to start a group chat. Ask an admin to allow it for your account. You can still take part in groups you are added to.",
+                    })
+                    return
+                  }
                   setStartError("")
                   setComposer((current) => (current === "group" ? null : "group"))
                 }}
@@ -2108,6 +2520,11 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                   <strong>{chat.title}</strong>
                   <span>{chat.lastBody || "No messages yet"}</span>
                 </span>
+                {quietChats.has(chat.id) && (
+                  <span className="quiet-mark" role="img" aria-label="Notifications off" title="Notifications off">
+                    <QuietIcon />
+                  </span>
+                )}
                 {unread[chat.id] > 0 && (
                   <span className="unread-count">{unread[chat.id] > 9 ? "9+" : unread[chat.id]}</span>
                 )}
@@ -2135,6 +2552,11 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                       <strong>{room.title}</strong>
                       <span>{chat.lastBody || room.description}</span>
                     </span>
+                    {quietChats.has(room.id) && (
+                      <span className="quiet-mark" role="img" aria-label="Notifications off" title="Notifications off">
+                        <QuietIcon />
+                      </span>
+                    )}
                     {unread[room.id] > 0 && (
                       <span className="unread-count">{unread[room.id] > 9 ? "9+" : unread[room.id]}</span>
                     )}
@@ -2142,11 +2564,13 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 )
               }
               return (
-                <div className="room-row" key={room.id}>
-                  <span className="profile-chip-text">
-                    <strong>{room.title}</strong>
-                    <span>{room.description}</span>
-                  </span>
+                <div className={room.id === previewRoom?.id ? "room-row active" : "room-row"} key={room.id}>
+                  <button type="button" className="room-row-open" onClick={() => openRoomPreview(room.id)}>
+                    <span className="profile-chip-text">
+                      <strong>{room.title}</strong>
+                      <span>{room.description}</span>
+                    </span>
+                  </button>
                   <button type="button" className="button" disabled={busy} onClick={() => void onJoin(room.id)}>
                     Join
                   </button>
@@ -2229,289 +2653,50 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
             openChat(chatId)
           }}
         />
-      ) : (
-        <section className="thread">
-          <header className="thread-bar">
-            {selected && (
-              <span className="thread-photo">
-                <span className="avatar thread-avatar">
-                  {selected.avatarUrl ? <img src={selected.avatarUrl} alt="" /> : <span>{initials(selected.title)}</span>}
-                </span>
-                {selected.kind === "direct" && selected.otherUserId && (
-                  <span className={`presence-dot thread-presence ${presenceOf(selected.otherUserId)}`} />
-                )}
-              </span>
-            )}
-            <div className="thread-who">
-              <h1>{selected ? selected.title : "Messages"}</h1>
-              {threadStatus && <p className="thread-email">{threadStatus}</p>}
+      ) : roomOnPage ? (
+        <div className="room-view">
+          <div className={`room-view-inner pane-${roomPane}`}>
+            <div className="room-pane-switch" role="tablist" aria-label={`${roomOnPage.title} room`}>
+              {(["page", "chat"] as const).map((pane) => (
+                <button
+                  key={pane}
+                  type="button"
+                  role="tab"
+                  aria-selected={roomPane === pane}
+                  className={roomPane === pane ? "active" : ""}
+                  onClick={() => setRoomPane(pane)}
+                >
+                  {pane === "page" ? "Page" : "Chat"}
+                </button>
+              ))}
             </div>
-            {selected && (
-              <div className="thread-actions">
-                {selected.kind === "direct" && selected.otherUserId && (
-                  <button
-                    type="button"
-                    className="button secondary"
-                    onClick={() => {
-                      void onBlock(selected.otherUserId!, !blockedIds.includes(selected.otherUserId!))
-                    }}
-                  >
-                    {blockedIds.includes(selected.otherUserId) ? "Unblock" : "Block"}
+            <RoomPage
+              session={session}
+              room={roomOnPage}
+              busy={busy}
+              error={startError}
+              onJoin={() => void onJoin(roomOnPage.id)}
+              onLeave={() => void onLeave(roomOnPage.id)}
+              onOpenLink={openExternal}
+              presenceOf={presenceOf}
+            />
+            {roomOnPage.joined && selected ? (
+              renderThread(true)
+            ) : (
+              <section className="thread room-chat room-chat-locked" aria-label="Room chat">
+                <div className="thread-empty">
+                  <h2>Room chat</h2>
+                  <p>Join {roomOnPage.title} to talk with its members, ask questions and share what you know.</p>
+                  <button type="button" className="button" disabled={busy} onClick={() => void onJoin(roomOnPage.id)}>
+                    {busy ? "Joining…" : "Join room"}
                   </button>
-                )}
-                {selected.kind === "room" && (
-                  <button type="button" className="button secondary" onClick={() => void onLeave(selected.id)}>
-                    Leave
-                  </button>
-                )}
-                <input
-                  className="search"
-                  value={search}
-                  placeholder="Search this chat"
-                  aria-label="Search this chat"
-                  onChange={(event) => setSearch(event.target.value)}
-                />
-                <ThreadMenu onSelect={selection.start} onClear={onClearChat} />
-              </div>
-            )}
-          </header>
-          {selected ? (
-            <>
-              <div
-                className={selection.selecting ? "message-log selecting" : "message-log"}
-                ref={logRef}
-                onScroll={(event) => {
-                  const node = event.currentTarget
-                  pinnedRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < PINNED_SLACK
-                }}
-                // A picture that loads after the scroll above makes the log taller; stay at the bottom.
-                onLoadCapture={() => {
-                  const node = logRef.current
-                  if (node && pinnedRef.current) node.scrollTop = node.scrollHeight
-                }}
-              >
-                {loadingMessages ? (
-                  <div className="thread-loading" role="status" aria-label="Loading messages">
-                    <span className="loading-spinner" aria-hidden="true" />
-                  </div>
-                ) : visible.length === 0 ? (
-                  <p className="thread-note thread-empty-note">
-                    {query ? "No messages match that search." : "No messages yet. Say hello."}
-                  </p>
-                ) : (
-                  visible.map((message, index) => {
-                    const mine = message.senderId === session.userId
-                    // The time shows once for a run of messages from one person within the same minute.
-                    const previous = visible[index - 1]
-                    const sameMinute =
-                      previous?.senderId === message.senderId &&
-                      minuteOf(previous.createdAt) === minuteOf(message.createdAt)
-                    const name = mine ? profile.displayName || session.email : message.senderName
-                    const avatarUrl = mine ? profile.avatarUrl : message.senderAvatarUrl
-                    // A 1:1 chat has only two people, so a picture beside each bubble adds nothing.
-                    const avatar = selected.kind !== "direct" && (
-                      <span className={`avatar message-avatar accent-${accentFor(message.senderId)}`} title={name}>
-                        {avatarUrl ? <img src={avatarUrl} alt="" /> : <span>{initials(name)}</span>}
-                      </span>
-                    )
-                    // Messages still being sent can't be chosen yet.
-                    const choosable = !sendingIds.has(message.id)
-                    const chosen = selection.selecting && selection.chosen.has(message.id)
-                    return (
-                      <Fragment key={message.id}>
-                        <div
-                          className={`message-row ${mine ? "mine" : "theirs"}${selection.selecting && choosable ? " selectable" : ""}${chosen ? " chosen" : ""}`}
-                          data-message-id={message.id}
-                          {...selectableRow(selection, message.id, choosable)}
-                        >
-                          {selection.selecting && choosable && <SelectCheck checked={chosen} />}
-                          {!mine && avatar}
-                          <article className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine ? " no-meta" : ""}`}>
-                            {message.attachmentUrl && isImage(message.attachmentMime) && (
-                              <img
-                                className="bubble-image"
-                                src={message.attachmentUrl}
-                                alt={message.attachmentName ?? "Image"}
-                              />
-                            )}
-                            {message.attachmentUrl && !isImage(message.attachmentMime) && (
-                              <a
-                                className="file-link"
-                                href={message.attachmentUrl}
-                                download={message.attachmentName ?? undefined}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                {message.attachmentName ?? "File"}
-                                {message.attachmentSize != null ? ` (${formatBytes(message.attachmentSize)})` : ""}
-                              </a>
-                            )}
-                            {message.body && <p>{message.body}</p>}
-                            {message.deleted && <p className="deleted-note">Message deleted</p>}
-                            <span className="bubble-meta">
-                              {!sameMinute && <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>}
-                              {message.senderId === session.userId &&
-                                (sendingIds.has(message.id) ? (
-                                  <span className="bubble-status sending" role="img" aria-label="Sending" />
-                                ) : isMessageRead(readStates, session.userId, selected.kind, message.createdAt) ? (
-                                  <svg className="bubble-status double read" viewBox="0 0 20 16" role="img" aria-label="Read">
-                                    <title>Read</title>
-                                    <path d="M1.5 8.5l3 3 7-7" />
-                                    <path d="M8.5 11.5l7-7" />
-                                  </svg>
-                                ) : (
-                                  <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label="Sent">
-                                    <title>Sent</title>
-                                    <path d="M3 8.5l3 3 7-7" />
-                                  </svg>
-                                ))}
-                            </span>
-                            {!selection.selecting && !message.deleted && !sendingIds.has(message.id) && (
-                              <MessageMenu
-                                side={message.senderId === session.userId ? "mine" : "theirs"}
-                                actions={
-                                  message.senderId === session.userId
-                                    ? [{ label: "Delete", danger: true, onSelect: () => void onDelete(message) }]
-                                    : [
-                                        {
-                                          label: "Report",
-                                          danger: true,
-                                          onSelect: () => {
-                                            setReportedId(null)
-                                            setReportId(message.id)
-                                            setReportReason("harassment")
-                                            setReportNote("")
-                                          },
-                                        },
-                                        ...(selected.kind === "group" && !blockedIds.includes(message.senderId)
-                                          ? [{ label: "Block", onSelect: () => void onBlock(message.senderId, true) }]
-                                          : []),
-                                      ]
-                                }
-                              />
-                            )}
-                          </article>
-                          {mine && avatar}
-                        </div>
-                        {message.id === reportedId && (
-                          <p className="message-system-note" role="status">
-                            Report sent. Thank you.
-                          </p>
-                        )}
-                      </Fragment>
-                    )
-                  })
-                )}
-              </div>
-              {/* Always there, so the composer does not jump when someone starts or stops typing. */}
-              <p className="typing-status" aria-live="polite">
-                {typingNow && (
-                  <>
-                    <span className="typing-dots" aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                    </span>
-                    {typingNow}…
-                  </>
-                )}
-              </p>
-              {selection.selecting ? (
-                <div className="composer">
-                  <SelectionBar count={selection.chosen.size} onCancel={selection.stop} onDelete={onDeleteChosen} />
                 </div>
-              ) : (
-                <form className="composer" onSubmit={onSend}>
-                  {closed && (
-                    <p className="notice" role="status">
-                      {messagingLockMessage(lock)}
-                    </p>
-                  )}
-                  {reporting && (
-                    <div className="report-box">
-                      <label>
-                        Report this message
-                        <select
-                          value={reportReason}
-                          onChange={(event) => setReportReason(event.target.value as ReportReason)}
-                        >
-                          <option value="harassment">Harassment</option>
-                          <option value="spam">Spam</option>
-                          <option value="leak">Confidential client information</option>
-                          <option value="other">Something else</option>
-                        </select>
-                      </label>
-                      <label>
-                        Note, optional
-                        <textarea
-                          value={reportNote}
-                          maxLength={1000}
-                          rows={2}
-                          onChange={(event) => setReportNote(event.target.value)}
-                        />
-                      </label>
-                      <div className="form-actions">
-                        <button
-                          type="button"
-                          className="button secondary"
-                          onClick={() => {
-                            setReportId(null)
-                            setReportNote("")
-                          }}
-                        >
-                          Cancel
-                        </button>
-                        <button type="button" className="button" onClick={() => void onReport()}>
-                          Send report
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {sendError && (
-                    <p className="form-error" role="alert">
-                      {sendError}
-                    </p>
-                  )}
-                  <div className="composer-row">
-                    <textarea
-                      ref={bodyRef}
-                      value={body}
-                      maxLength={4000}
-                      rows={1}
-                      placeholder="Write a message"
-                      aria-label="Message"
-                      disabled={closed}
-                      onChange={(event) => {
-                        updateBody(event.target.value)
-                        typing.onType(event.target.value.trim() !== "")
-                        if (selectedId) markChatRead(selectedId)
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" && !event.shiftKey) {
-                          event.preventDefault()
-                          event.currentTarget.form?.requestSubmit()
-                        }
-                      }}
-                    />
-                    <button
-                      type="submit"
-                      className="button send-button"
-                      aria-label="Send"
-                      disabled={closed || !body.trim()}
-                    >
-                      <SendIcon />
-                    </button>
-                  </div>
-                </form>
-              )}
-            </>
-          ) : (
-            <div className="thread-empty">
-              <h2>No conversation selected</h2>
-              <p>Start a direct chat or a group, or pick one from the list.</p>
-            </div>
-          )}
-        </section>
+              </section>
+            )}
+          </div>
+        </div>
+      ) : (
+        renderThread(false)
       )}
       <Toasts
         toasts={alerts.toasts}
@@ -2520,6 +2705,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       />
       <VaultLeaveDialog vault={vault} />
       {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
+      {alertBox && <AlertDialog {...alertBox} onClose={() => setAlertBox(null)} />}
     </div>
   )
 }
