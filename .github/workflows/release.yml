@@ -206,14 +206,17 @@ jobs:
       - name: Check the regular installer is signed
         shell: pwsh
         run: |
-          # Tauri renames the app to the product name; fall back to the Cargo name if it did not.
-          $app = @("src-tauri/target/release/Novaroom.exe", "src-tauri/target/release/novaroom-app.exe") |
-            Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $app) { Write-Error "Could not find the built app in src-tauri/target/release."; exit 1 }
-          $files = @(
-            $app,
-            "src-tauri/target/release/bundle/nsis/Novaroom_${{ steps.version.outputs.version }}_x64-setup.exe"
-          )
+          # The app is checked as it sits inside the installer, which is the copy people get. The one
+          # left in target/release is not a reliable stand-in: Tauri can leave it unsigned there.
+          $installer = "src-tauri/target/release/bundle/nsis/Novaroom_${{ steps.version.outputs.version }}_x64-setup.exe"
+          $unpacked = Join-Path $env:RUNNER_TEMP "installer-contents"
+          7z x $installer "-o$unpacked" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Error "Could not unpack $installer to check the app inside it."; exit 1 }
+          # Tauri may name the app after the product or after the Cargo package.
+          $app = Get-ChildItem $unpacked -Recurse -File |
+            Where-Object { $_.Name -in @("Novaroom.exe", "novaroom-app.exe") } | Select-Object -First 1
+          if (-not $app) { Write-Error "Could not find the app inside $installer."; exit 1 }
+          $files = @($app.FullName, $installer)
           foreach ($f in $files) {
             $s = Get-AuthenticodeSignature $f
             Write-Host "$f : $($s.Status) : $($s.SignerCertificate.Subject)"
