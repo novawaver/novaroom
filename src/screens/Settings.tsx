@@ -2,6 +2,13 @@ import { useEffect, useState } from "react"
 import { useAuth } from "../auth"
 import { Help } from "./Help"
 import { APP_VERSION, PRIVACY, TERMS } from "../legal"
+import {
+  MIN_WINDOW_OPACITY,
+  onWindowLookChanged,
+  readWindowLook,
+  setWindowLook,
+  type WindowLook,
+} from "../lib/desktop"
 import { listBlocked, unblockUser, type BlockedPerson } from "../lib/safety"
 import {
   DEFAULT_OPEN_SHORTCUT,
@@ -15,11 +22,12 @@ import { readStartup, writeStartup, type StartupSettings } from "../lib/startup"
 import { applyTheme, readTheme, writeTheme, type ThemeChoice } from "../lib/theme"
 import { canUpdate, checkNow, installUpdate, setAutoUpdate, useUpdates } from "../lib/updater"
 
-export type SettingsTab = "appearance" | "startup" | "shortcut" | "updates" | "help" | "about" | "safety"
+export type SettingsTab = "appearance" | "startup" | "window" | "shortcut" | "updates" | "help" | "about" | "safety"
 
 export const SETTINGS_TABS: Array<{ id: SettingsTab; label: string }> = [
   { id: "appearance", label: "Appearance" },
   { id: "startup", label: "Startup" },
+  { id: "window", label: "Window" },
   { id: "shortcut", label: "Shortcut" },
   { id: "updates", label: "Updates" },
   { id: "help", label: "Help" },
@@ -45,6 +53,7 @@ export function Settings({ tab }: { tab: SettingsTab }) {
         </div>
       )}
       {tab === "startup" && <Startup />}
+      {tab === "window" && <WindowSettings />}
       {tab === "shortcut" && <Shortcut />}
       {tab === "updates" && <Updates />}
       {tab === "help" && <Help />}
@@ -130,6 +139,135 @@ function Startup() {
           </div>
         </>
       )}
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function WindowSettings() {
+  const [look, setLook] = useState<WindowLook | null>(null)
+  const [unavailable, setUnavailable] = useState(false)
+  // The open shortcut as its keys, when it is set and working, for saying how to end click-through.
+  const [openKeys, setOpenKeys] = useState<string[] | null>(null)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    let active = true
+    void readWindowLook()
+      .then((loaded) => {
+        if (!active) return
+        if (loaded) setLook(loaded)
+        else setUnavailable(true)
+      })
+      .catch(() => {
+        if (active) setError("Could not load the window settings.")
+      })
+    void readOpenShortcut()
+      .then((saved) => {
+        if (active && saved?.active && saved.shortcut) setOpenKeys(shortcutKeys(saved.shortcut))
+      })
+      .catch(() => {})
+    // The tray menu changes these too, and bringing the window forward ends click-through.
+    const stop = onWindowLookChanged((changed) => {
+      if (active) setLook(changed)
+    })
+    return () => {
+      active = false
+      stop()
+    }
+  }, [])
+
+  function change(next: WindowLook) {
+    const previous = look
+    setLook(next)
+    setError("")
+    void setWindowLook(next)
+      .then((applied) => {
+        // Turning on click-through also keeps the window on top. See-through is left as shown, so
+        // an earlier answer can't move the slider back while it is being dragged.
+        setLook((current) => current && { ...current, pinned: applied.pinned, clickThrough: applied.clickThrough })
+      })
+      .catch(() => {
+        setLook(previous)
+        setError("Could not change the window.")
+      })
+  }
+
+  if (unavailable) {
+    return (
+      <div className="settings-panel">
+        <p className="hint">These settings are only in the Novaroom desktop app.</p>
+      </div>
+    )
+  }
+
+  const seeThrough = look ? 100 - look.opacity : 0
+  const wayBack = openKeys
+    ? `press ${openKeys.join(" + ")}, or click the Novaroom icon in the tray`
+    : "click the Novaroom icon in the tray"
+
+  return (
+    <div className="settings-panel">
+      <div className="startup-row">
+        <div>
+          <strong>Keep on top</strong>
+          <p className="hint">The Novaroom window stays above other apps’ windows.</p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={look?.pinned ?? false}
+          aria-label="Keep on top"
+          className="switch"
+          disabled={!look}
+          onClick={() => look && change({ ...look, pinned: !look.pinned })}
+        >
+          <span />
+        </button>
+      </div>
+      <div className="startup-row">
+        <div>
+          <strong>See-through</strong>
+          <p className="hint">Shows what is behind the Novaroom window, through the whole window.</p>
+        </div>
+        <div className="window-see-through">
+          <input
+            type="range"
+            aria-label="See-through"
+            min={0}
+            max={100 - MIN_WINDOW_OPACITY}
+            step={5}
+            value={seeThrough}
+            disabled={!look}
+            onChange={(event) => look && change({ ...look, opacity: 100 - Number(event.target.value) })}
+          />
+          <span>{seeThrough === 0 ? "Off" : `${seeThrough}%`}</span>
+        </div>
+      </div>
+      <div className="startup-row">
+        <div>
+          <strong>Click-through</strong>
+          <p className="hint">
+            Clicks go to whatever is behind Novaroom, and Novaroom stays on top. To use Novaroom again, {wayBack}.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={look?.clickThrough ?? false}
+          aria-label="Click-through"
+          className="switch"
+          disabled={!look}
+          onClick={() => look && change({ ...look, clickThrough: !look.clickThrough })}
+        >
+          <span />
+        </button>
+      </div>
+      <p className="hint">These are also in the menu you get by right-clicking the Novaroom icon in the tray.</p>
       {error && (
         <p className="form-error" role="alert">
           {error}

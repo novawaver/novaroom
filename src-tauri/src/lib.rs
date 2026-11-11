@@ -1,5 +1,5 @@
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
@@ -10,6 +10,7 @@ mod localchat;
 mod shortcut;
 mod vault;
 mod watchdog;
+mod windowlook;
 mod winsock;
 
 /// The argument Windows passes when it starts Novaroom at sign-in, so we can tell that launch apart.
@@ -24,6 +25,8 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+    // Bringing the window forward on purpose is the way back from click-through (see windowlook.rs).
+    windowlook::end_click_through(app);
 }
 
 /// Whether the window has changes the person has not saved yet (an edited Vault). While it does,
@@ -339,6 +342,7 @@ pub fn run() {
         .manage(localchat::LocalChat::default())
         .manage(capture::Capture::default())
         .manage(watchdog::Watchdog::new())
+        .manage(windowlook::WindowLook::default())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name(AUTOSTART_NAME)
@@ -392,12 +396,24 @@ pub fn run() {
             capture::capture_delete,
             capture::capture_speaker_start,
             capture::capture_speaker_stop,
-            watchdog::watchdog_beat
+            watchdog::watchdog_beat,
+            windowlook::window_look,
+            windowlook::set_window_look
         ])
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                // Maximizing, restoring and showing the window drop the see-through and
+                // click-through styles; put them back.
+                WindowEvent::Resized(_) | WindowEvent::Focused(_) => {
+                    if let Some(main) = window.app_handle().get_webview_window(window.label()) {
+                        windowlook::reapply(&main);
+                    }
+                }
+                _ => {}
             }
         })
         .setup(|app| {
@@ -413,6 +429,8 @@ pub fn run() {
             // minimized start never shows it, and Novaroom waits in the tray as it does after the
             // window is closed.
             shortcut::register_saved(app.handle());
+            // Keep on top and see-through, as they were left last time.
+            windowlook::start(app.handle());
 
             let launched_at_login = std::env::args().any(|arg| arg == AUTOSTART_ARG);
             // A restart after getting stuck keeps the window as it was: hidden if it was in the tray.
@@ -427,7 +445,22 @@ pub fn run() {
 
             let show = MenuItem::with_id(app, "show", "Show Novaroom", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            // Keep on top, see-through and click-through are here as well as in Settings > Window,
+            // because a window that ignores clicks can't be used to turn that off.
+            let (look_items, see_through) = windowlook::tray_items(app.handle())?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &show,
+                    &PredefinedMenuItem::separator(app)?,
+                    &look_items.pin,
+                    &see_through,
+                    &look_items.click_through,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit,
+                ],
+            )?;
+            app.manage(look_items);
             let mut tray = TrayIconBuilder::with_id("novaroom")
                 .tooltip("Novaroom")
                 .menu(&menu)
@@ -435,7 +468,9 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main(app),
                     "quit" => request_quit(app),
-                    _ => {}
+                    other => {
+                        windowlook::tray_menu_event(app, other);
+                    }
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {

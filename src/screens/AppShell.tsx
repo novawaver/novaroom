@@ -419,6 +419,15 @@ function StartupIcon() {
   )
 }
 
+function WindowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4.5" width="18" height="15" rx="2" />
+      <path d="M3 9h18" />
+    </svg>
+  )
+}
+
 function UpdatesIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -546,6 +555,7 @@ const PEOPLE_ICONS: Record<PeopleFilter, ComponentType> = {
 const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
   appearance: AppearanceIcon,
   startup: StartupIcon,
+  window: WindowIcon,
   shortcut: ShortcutIcon,
   updates: UpdatesIcon,
   help: HelpIcon,
@@ -556,6 +566,7 @@ const SETTINGS_ICONS: Record<SettingsTab, ComponentType> = {
 const SETTINGS_HINTS: Record<SettingsTab, string> = {
   appearance: "Light, dark, or system",
   startup: "Open when Windows starts",
+  window: "On top, see-through, click-through",
   shortcut: "Open Novaroom from anywhere",
   updates: "Check and install new versions",
   help: "Fix common problems",

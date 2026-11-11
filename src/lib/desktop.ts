@@ -15,6 +15,55 @@ export async function controlWindow(action: WindowAction) {
   else await windowHandle.close()
 }
 
+// How the window sits on the screen. The desktop app keeps and remembers this itself (see
+// src-tauri/src/windowlook.rs), because the tray menu changes it too.
+export type WindowLook = {
+  /** Kept above other apps' windows. */
+  pinned: boolean
+  /** How solid the window is, in percent: 100 is solid, less shows what is behind it. */
+  opacity: number
+  /** Clicks go to whatever is behind the window. Never remembered, so the app starts clickable. */
+  clickThrough: boolean
+}
+
+export const MIN_WINDOW_OPACITY = 30
+
+/** The window's look as it is now, or null outside the desktop app. */
+export async function readWindowLook(): Promise<WindowLook | null> {
+  if (!inTauri()) return null
+  const { invoke } = await import("@tauri-apps/api/core")
+  return invoke<WindowLook>("window_look")
+}
+
+/**
+ * Changes the window's look. Resolves with what was applied, which can differ from what was asked
+ * for: turning on click-through also keeps the window on top.
+ */
+export async function setWindowLook(look: WindowLook): Promise<WindowLook> {
+  if (!inTauri()) return look
+  const { invoke } = await import("@tauri-apps/api/core")
+  return invoke<WindowLook>("set_window_look", { look: { ...look, opacity: Math.round(look.opacity) } })
+}
+
+/**
+ * Calls back when the look changes from outside the window: from the tray menu, or when
+ * click-through ends because the window was brought forward. Returns an unsubscribe.
+ */
+export function onWindowLookChanged(onChange: (look: WindowLook) => void) {
+  if (!inTauri()) return () => {}
+  let unlisten: (() => void) | null = null
+  let stopped = false
+  void import("@tauri-apps/api/event").then(async ({ listen }) => {
+    const stop = await listen<WindowLook>("window-look-changed", (event) => onChange(event.payload))
+    if (stopped) stop()
+    else unlisten = stop
+  })
+  return () => {
+    stopped = true
+    unlisten?.()
+  }
+}
+
 // Reports the current maximized state, then every change. Returns an unsubscribe.
 export function watchMaximized(onChange: (maximized: boolean) => void) {
   if (!inTauri()) return () => {}

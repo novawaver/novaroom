@@ -1685,6 +1685,32 @@ select {
   margin: 4px 0 16px;
 }
 
+/* Settings > Window: the see-through slider with its value beside it. */
+.window-see-through {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.window-see-through input[type="range"] {
+  width: 140px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: var(--brand);
+}
+
+.window-see-through span {
+  min-width: 34px;
+  color: var(--muted);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 /* Settings > Shortcut: the keys shown as key caps. */
 .shortcut-keys {
   display: inline-flex;
