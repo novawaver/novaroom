@@ -240,7 +240,7 @@ function WindowSettings() {
             aria-label="See-through"
             min={0}
             max={100 - MIN_WINDOW_OPACITY}
-            step={5}
+            step={1}
             value={seeThrough}
             disabled={!look}
             onChange={(event) => look && change({ ...look, opacity: 100 - Number(event.target.value) })}
