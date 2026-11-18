@@ -1,3 +1,4 @@
+import { plainChatText } from "./chatText"
 import { inTauri } from "./desktop"
 import { supabase } from "./supabase"
 
@@ -38,7 +39,7 @@ export const LOCAL_FILE_LIMIT = 25 * 1024 * 1024
 
 /** What to show for a message in one line: its text, or its file's name. */
 export function localMessageLabel(message: Pick<LocalMessage, "body" | "file">) {
-  return message.body || (message.file ? `File: ${message.file.name}` : "")
+  return plainChatText(message.body) || (message.file ? `File: ${message.file.name}` : "")
 }
 
 // idle: no keyboard or mouse input on their computer for a while. Apps from before this was shared

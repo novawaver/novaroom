@@ -38,7 +38,11 @@ import {
 import type { Session } from "../types"
 import { DownloadIcon, ImageViewer } from "./ImageViewer"
 import { ConfirmDialog, QuietIcon, SelectCheck, ThreadMenu, selectableRow, useMessageSelection, type ConfirmAction } from "./ChatTools"
-import { MentionText, useMentions } from "./Mentions"
+import { useMentions } from "./Mentions"
+import { ChatText, useTextStyling } from "./ChatText"
+import { plainChatText } from "../lib/chatText"
+import { EmojiPicker } from "./EmojiPicker"
+import { isEmojiOnly } from "../lib/emoji"
 
 // While online, how often to download the registered keys again, so people who set up Local chat
 // since can be recognised on the network.
@@ -522,12 +526,12 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
       <div className="chat-list local-chat-list">
         {row(
           LOCAL_ROOM,
-          room?.lastBody ||
+          plainChatText(room?.lastBody ?? "") ||
             (local.peers.length === 0 ? "No one else here yet" : local.peers.length === 1 ? "1 person here" : `${local.peers.length} people here`),
           null,
         )}
         {direct.length > 0 && <p className="list-label local-list-label">People</p>}
-        {direct.map((chat) => row(chat, summaries.get(chat)?.lastBody || "On this network", online.get(chat) ?? false))}
+        {direct.map((chat) => row(chat, plainChatText(summaries.get(chat)?.lastBody ?? "") || "On this network", online.get(chat) ?? false))}
       </div>
     </>
   )
@@ -878,6 +882,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   const mentionNames =
     selected === LOCAL_ROOM ? local.peers.map((item) => item.name) : [local.chatName(selected)].filter((item) => item !== "Someone")
   const mentions = useMentions(mentionNames, body, updateBody, bodyRef)
+  const styling = useTextStyling(bodyRef)
   // Names to mark in messages: the people above, and this person.
   const markedNames = [...mentionNames, local.name]
 
@@ -1171,13 +1176,13 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                     {reply && (
                       <button type="button" className="bubble-quote" onClick={() => showMessage(reply.id)}>
                         <strong>{nameOf(reply.senderId, reply.senderName)}</strong>
-                        <span>{reply.body || (reply.fileName ? `File: ${reply.fileName}` : "")}</span>
+                        <span>{plainChatText(reply.body) || (reply.fileName ? `File: ${reply.fileName}` : "")}</span>
                       </button>
                     )}
                     <LocalFileView message={message} onOpenImage={(url, imageName) => setViewing({ id: message.id, url, name: imageName })} />
                     {message.body && (
-                      <p>
-                        <MentionText text={message.body} names={markedNames} me={local.name} />
+                      <p className={isEmojiOnly(message.body) ? "emoji-only" : undefined}>
+                        <ChatText text={message.body} names={markedNames} me={local.name} />
                       </p>
                     )}
                     <span className="bubble-meta">
@@ -1293,7 +1298,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             </div>
           )}
           <div className="composer-row">
-            {mentions.list}
+            {mentions.list || styling.bar}
             <input
               ref={fileInputRef}
               type="file"
@@ -1313,6 +1318,17 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             >
               <AttachIcon />
             </button>
+            <EmojiPicker
+              key={selected}
+              body={body}
+              setBody={(text) => {
+                updateBody(text)
+                local.onType(true)
+              }}
+              boxRef={bodyRef}
+              maxLength={MAX_BODY}
+              disabled={!local.running}
+            />
             <textarea
               ref={bodyRef}
               value={body}
@@ -1336,7 +1352,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                 attach(pasted)
               }}
               onKeyDown={(event) => {
-                if (mentions.onKeyDown(event)) return
+                if (mentions.onKeyDown(event) || styling.onKeyDown(event)) return
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault()
                   event.currentTarget.form?.requestSubmit()

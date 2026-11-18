@@ -25,7 +25,8 @@ const spinner = (
 /**
  * A topic room's own page, in the main area. A room whose slug has a custom page (src/screens/rooms)
  * shows that; every other room shows the Markdown page an admin wrote for it, then its form, links
- * and members. The room's chat sits beside it (AppShell draws that).
+ * and members. The room's chat sits beside it (AppShell draws that). Where there is no room for
+ * both, the chat is a panel that the button in the header opens over the page from the right.
  */
 export function RoomPage({
   session,
@@ -36,6 +37,8 @@ export function RoomPage({
   onLeave,
   onOpenLink,
   presenceOf,
+  chatOpen,
+  onToggleChat,
 }: {
   session: Session
   room: RoomInfo
@@ -45,6 +48,9 @@ export function RoomPage({
   onLeave: () => void
   onOpenLink: (url: string) => void
   presenceOf?: (userId: string) => string
+  /** Whether the chat panel is open, where it is a panel over the page. */
+  chatOpen: boolean
+  onToggleChat: () => void
 }) {
   const [data, setData] = useState<RoomPageData | null>(null)
   const [loadError, setLoadError] = useState("")
@@ -96,9 +102,31 @@ export function RoomPage({
           <h1>{room.title}</h1>
           <p>{room.description}</p>
         </div>
+        {/* Only shown where the chat is not already beside the page. */}
+        <button
+          type="button"
+          className="icon-button room-chat-toggle"
+          aria-label={chatOpen ? "Hide chat" : "Show chat"}
+          title={chatOpen ? "Hide chat" : "Show chat"}
+          aria-pressed={chatOpen}
+          onClick={onToggleChat}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 17h-7l-4.5 3.5V17H5a1.5 1.5 0 0 1-1.5-1.5V7A1.5 1.5 0 0 1 5 5.5z" />
+          </svg>
+        </button>
         {room.joined ? (
-          <button type="button" className="button secondary" disabled={busy} onClick={onLeave}>
-            Leave
+          <button
+            type="button"
+            className="icon-button room-leave"
+            aria-label="Leave room"
+            title="Leave room"
+            disabled={busy}
+            onClick={onLeave}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M14 4.5H7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h7M10.5 12H20M16.5 8.5L20 12l-3.5 3.5" />
+            </svg>
           </button>
         ) : (
           <button type="button" className="button" disabled={busy} onClick={onJoin}>

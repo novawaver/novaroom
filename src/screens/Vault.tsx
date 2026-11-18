@@ -13,6 +13,8 @@ import { createPortal } from "react-dom"
 import {
   VAULT_COLUMN_KINDS,
   VAULT_SUB_KINDS,
+  searchVault,
+  type VaultHit,
   attachVaultFiles,
   attachmentName,
   cellText,
@@ -269,6 +271,46 @@ function readMarkRepeated(tableId: string) {
   } catch {
     return true
   }
+}
+
+// Whether a table shows the items of its Sub-table cells in the cells themselves.
+const subInlineKey = (tableId: string) => `novaroom.vault-sub-inline.${tableId}`
+
+function readSubInline(tableId: string) {
+  try {
+    return localStorage.getItem(subInlineKey(tableId)) === "true"
+  } catch {
+    return false
+  }
+}
+
+// Column widths set by dragging a header's edge, by column id. Kept on this computer, like the other
+// choices about how a table is shown, so resizing never counts as a change to the Vault file.
+const widthsKey = (tableId: string) => `novaroom.vault-widths.${tableId}`
+const MIN_COLUMN_WIDTH = 60
+
+function readWidths(tableId: string): Record<string, number> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(widthsKey(tableId)) ?? "{}")
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {}
+    return Object.fromEntries(
+      Object.entries(saved).filter(
+        (entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] >= MIN_COLUMN_WIDTH,
+      ),
+    )
+  } catch {
+    return {}
+  }
+}
+
+/** A table row with a smaller table hanging under it: Sub-table items shown in their cells. */
+function SubRowsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4" width="17" height="6" rx="1.5" />
+      <path d="M7 10v7.5h13.5M11.5 13.5h9" />
+    </svg>
+  )
 }
 
 function SearchIcon() {
@@ -528,6 +570,9 @@ const AttachmentsContext = createContext<{ file: string | null; table: string; r
   table: "",
   report: () => {},
 })
+
+/** Whether Sub-table cells show their items in the cell, under the count that opens them. */
+const SubTablesInlineContext = createContext(false)
 
 function FileIcon() {
   return (
@@ -1330,14 +1375,41 @@ function SubTableCell({
   onChange?: (value: VaultCell) => void
 }) {
   const [open, setOpen] = useState(false)
+  const inline = useContext(SubTablesInlineContext)
   const rows = subRows(value)
+  const subColumns = column.columns ?? []
   if (!editing && rows.length === 0) return <span className="vault-cell-view" />
   return (
-    <span className="vault-cell-view">
+    <div className="vault-cell-view">
       <button type="button" className="vault-link" title={`Open ${column.name || "sub-table"}`} onClick={() => setOpen(true)}>
         <TableIcon />
         {rows.length === 0 ? "Add items" : itemCount(rows.length)}
       </button>
+      {/* Read-only here, also in Edit: items are changed in the panel the count opens. */}
+      {inline && rows.length > 0 && subColumns.length > 0 && (
+        <table className="vault-sub-inline">
+          <thead>
+            <tr>
+              {subColumns.map((sub) => (
+                <th key={sub.id} scope="col">
+                  {sub.name}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                {subColumns.map((sub) => (
+                  <td key={sub.id}>
+                    <CellView column={sub} value={row.cells[sub.id] ?? null} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       {open && (
         <SubTableDialog
           column={column}
@@ -1346,7 +1418,7 @@ function SubTableCell({
           onClose={() => setOpen(false)}
         />
       )}
-    </span>
+    </div>
   )
 }
 
@@ -1965,6 +2037,45 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   const [fit, setFit] = useState(readFit)
   const [markRepeated, setMarkRepeated] = useState(() => readMarkRepeated(table.id))
   const [cards, setCards] = useState(() => readCards(table.id))
+  const [subInline, setSubInline] = useState(() => readSubInline(table.id))
+  const hasSubTables = table.columns.some((column) => column.kind === "subtable")
+
+  function toggleSubInline() {
+    const next = !subInline
+    setSubInline(next)
+    try {
+      if (next) localStorage.setItem(subInlineKey(table.id), "true")
+      else localStorage.removeItem(subInlineKey(table.id))
+    } catch {
+      // Not remembered; the choice still applies until the page is closed.
+    }
+  }
+
+  // Widths of the columns resized by hand; the others size themselves.
+  const [widths, setWidths] = useState(() => readWidths(table.id))
+  // The column whose edge is being dragged, and where the drag started.
+  const resizing = useRef<{ id: string; startX: number; startWidth: number } | null>(null)
+  const hasWidths = table.columns.some((column) => widths[column.id])
+
+  /** Sets a column's width, or clears it with null. `remember` once the change is finished. */
+  function setWidth(columnId: string, width: number | null, remember: boolean) {
+    const next = { ...widths }
+    if (width === null) delete next[columnId]
+    else next[columnId] = Math.max(MIN_COLUMN_WIDTH, Math.round(width))
+    setWidths(next)
+    if (!remember) return
+    try {
+      if (Object.keys(next).length > 0) localStorage.setItem(widthsKey(table.id), JSON.stringify(next))
+      else localStorage.removeItem(widthsKey(table.id))
+    } catch {
+      // Not remembered; the widths still apply until the page is closed.
+    }
+  }
+
+  const widthStyle = (columnId: string) => {
+    const width = widths[columnId]
+    return width ? { width, minWidth: width, maxWidth: width } : undefined
+  }
   // In Cards, the row open in the side panel.
   const [selected, setSelected] = useState<string | null>(null)
   const closePanel = useCallback(() => setSelected(null), [])
@@ -2120,6 +2231,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   /** Classes that mark the dragged column and draw the drop line, on its header and every cell. */
   const columnClass = (column: VaultColumn, index: number) =>
     [
+      widths[column.id] && "vault-col-sized",
       columnDrag?.id === column.id && "vault-col-dragged",
       columnDropAt === index && "vault-col-drop-before",
       columnDropAt === table.columns.length && index === table.columns.length - 1 && "vault-col-drop-after",
@@ -2356,6 +2468,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   }
 
   return (
+    <SubTablesInlineContext.Provider value={subInline}>
     <div className="vault-body">
       <div className="vault-toolbar">
         {editing && (
@@ -2399,9 +2512,10 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
         </label>
         <button
           type="button"
-          className="button secondary vault-small vault-filter-toggle"
+          className="button secondary vault-small vault-icon-button vault-filter-toggle"
           aria-pressed={showFilters}
           aria-expanded={showFilters}
+          aria-label="Filter rows"
           title={filters.length > 0 ? `${filters.length} filter${filters.length === 1 ? "" : "s"} on` : "Filter rows"}
           onClick={() => {
             // Opening an empty filter bar starts a first rule right away.
@@ -2411,18 +2525,19 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
             setShowFilters(!showFilters)
           }}
         >
-          <FilterIcon /> Filter
+          <FilterIcon />
           {filters.length > 0 && <span className="vault-filter-count">{filters.length}</span>}
         </button>
         <button
           type="button"
-          className="button secondary vault-small vault-filter-toggle"
+          className="button secondary vault-small vault-icon-button vault-filter-toggle"
           aria-pressed={duplicateColumnIds !== null}
+          aria-label="Find duplicate rows"
           title="Find rows with the same values"
           disabled={table.rows.length < 2 && duplicateColumnIds === null}
           onClick={() => setDuplicateColumnIds(duplicateColumnIds ? null : table.columns.map((column) => column.id))}
         >
-          <DuplicatesIcon /> Duplicates
+          <DuplicatesIcon />
           {duplicateGroups > 0 && <span className="vault-filter-count">{duplicateGroups}</span>}
         </button>
         <button
@@ -2439,6 +2554,22 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
         >
           <RepeatedIcon />
         </button>
+        {hasSubTables && (
+          <button
+            type="button"
+            className="button secondary vault-small vault-icon-button vault-fit-toggle"
+            aria-pressed={subInline}
+            aria-label="Show sub-table items in the table"
+            title={
+              subInline
+                ? "Sub-table items show in their cells. Click to show only how many there are."
+                : "Sub-table cells show how many items they hold. Click to show the items themselves in the cells. This is remembered for this table."
+            }
+            onClick={toggleSubInline}
+          >
+            <SubRowsIcon />
+          </button>
+        )}
         <button
           type="button"
           className="button secondary vault-small vault-icon-button vault-fit-toggle"
@@ -2586,7 +2717,13 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
       ) : (
         <div className="vault-grid-wrap" ref={wrapRef}>
           <table
-            className={["vault-grid", !editing && "vault-viewing", fit && "vault-fit", columnDrag && "vault-col-dragging"]
+            className={[
+              "vault-grid",
+              !editing && "vault-viewing",
+              fit && "vault-fit",
+              hasWidths && "vault-has-widths",
+              columnDrag && "vault-col-dragging",
+            ]
               .filter(Boolean)
               .join(" ")}
           >
@@ -2602,6 +2739,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                     scope="col"
                     data-column
                     className={columnClass(column, columnIndex)}
+                    style={widthStyle(column.id)}
                   >
                     <div className="vault-col-head">
                       {editing && table.columns.length > 1 && (
@@ -2713,6 +2851,46 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         ))}
                       </select>
                     )}
+                    <span
+                      className="vault-col-resize"
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label={`Resize column ${column.name}. Use the left and right arrow keys.`}
+                      title="Drag to resize. Double-click to size it automatically again."
+                      tabIndex={0}
+                      onPointerDown={(event) => {
+                        if (event.button !== 0) return
+                        event.preventDefault()
+                        event.currentTarget.setPointerCapture(event.pointerId)
+                        resizing.current = {
+                          id: column.id,
+                          startX: event.clientX,
+                          startWidth: event.currentTarget.closest("th")?.getBoundingClientRect().width ?? 160,
+                        }
+                      }}
+                      onPointerMove={(event) => {
+                        const active = resizing.current
+                        if (active) setWidth(active.id, active.startWidth + event.clientX - active.startX, false)
+                      }}
+                      onPointerUp={(event) => {
+                        const active = resizing.current
+                        resizing.current = null
+                        // A click without a drag leaves the column sizing itself.
+                        if (active && event.clientX !== active.startX) {
+                          setWidth(active.id, active.startWidth + event.clientX - active.startX, true)
+                        }
+                      }}
+                      onPointerCancel={() => {
+                        resizing.current = null
+                      }}
+                      onDoubleClick={() => setWidth(column.id, null, true)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
+                        event.preventDefault()
+                        const width = event.currentTarget.closest("th")?.getBoundingClientRect().width ?? 160
+                        setWidth(column.id, width + (event.key === "ArrowLeft" ? -16 : 16), true)
+                      }}
+                    />
                   </th>
                 ))}
                 {editing && (
@@ -2798,6 +2976,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                             .filter(Boolean)
                             .join(" ") || undefined
                         }
+                        style={widthStyle(column.id)}
                       >
                         {editing ? (
                           <CellEditor
@@ -2853,11 +3032,102 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
         </div>
       )}
     </div>
+    </SubTablesInlineContext.Provider>
+  )
+}
+
+/** A match's text around the first place it matches, with that place marked. */
+function HitText({ text, search }: { text: string; search: string }) {
+  const at = text.toLowerCase().indexOf(search.toLowerCase())
+  if (at === -1) return <>{text.slice(0, 120)}</>
+  const start = Math.max(0, at - 40)
+  const end = Math.min(text.length, at + search.length + 80)
+  return (
+    <>
+      {start > 0 && "…"}
+      {text.slice(start, at)}
+      <mark>{text.slice(at, at + search.length)}</mark>
+      {text.slice(at + search.length, end)}
+      {end < text.length && "…"}
+    </>
+  )
+}
+
+/** Searches every table of the open Vault. Choosing a match opens its table and shows its row. */
+function VaultSearchDialog({ vault, onClose }: { vault: VaultState; onClose: () => void }) {
+  const [query, setQuery] = useState("")
+  const search = query.trim()
+  const data = vault.data
+  const { hits, more } = useMemo(() => searchVault(data?.tables ?? [], search), [data, search])
+  // Matches come table by table, so each table's are already together.
+  const groups: Array<{ tableId: string; tableName: string; hits: VaultHit[] }> = []
+  for (const hit of hits) {
+    const last = groups[groups.length - 1]
+    if (last?.tableId === hit.tableId) last.hits.push(hit)
+    else groups.push({ tableId: hit.tableId, tableName: hit.tableName, hits: [hit] })
+  }
+
+  function open(hit: VaultHit) {
+    if (hit.rowId) vault.openRow(hit.tableId, hit.rowId)
+    else vault.selectTable(hit.tableId)
+    onClose()
+  }
+
+  return (
+    <VaultModal title="Search Vault" wide onClose={onClose}>
+      <label className="vault-search vault-search-all">
+        <SearchIcon />
+        <input
+          type="search"
+          aria-label="Search every table"
+          placeholder="Search every table"
+          value={query}
+          autoFocus
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
+      {!search ? (
+        <p className="hint">
+          Searches every table in this Vault, including the items inside sub-tables. Passwords are never searched.
+        </p>
+      ) : hits.length === 0 ? (
+        <p className="hint">Nothing in this Vault matches.</p>
+      ) : (
+        <div className="vault-hits" role="status">
+          {groups.map((group) => (
+            <section key={group.tableId}>
+              <h3>
+                {group.tableName} <span className="vault-filter-count">{group.hits.length}</span>
+              </h3>
+              {group.hits.map((hit, index) => (
+                <button type="button" className="vault-hit" key={index} onClick={() => open(hit)}>
+                  <span className="vault-hit-where">
+                    {hit.rowId ? (
+                      <>
+                        <strong>{hit.row}</strong> {hit.where}
+                      </>
+                    ) : (
+                      hit.where
+                    )}
+                  </span>
+                  <span className="vault-hit-text">
+                    <HitText text={hit.text} search={search} />
+                  </span>
+                </button>
+              ))}
+            </section>
+          ))}
+          {more && <p className="hint">Showing the first {hits.length} matches. Type more to narrow them down.</p>}
+        </div>
+      )}
+    </VaultModal>
   )
 }
 
 export function Vault({ vault }: { vault: VaultState }) {
   const { save, dirty } = vault
+  const [searching, setSearching] = useState(false)
+  const hasFile = Boolean(vault.file && vault.data)
 
   // Ctrl+S saves, as in most desktop apps.
   useEffect(() => {
@@ -2866,10 +3136,15 @@ export function Vault({ vault }: { vault: VaultState }) {
         event.preventDefault()
         if (dirty) void save()
       }
+      // Ctrl+Shift+F searches the whole Vault.
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f" && hasFile) {
+        event.preventDefault()
+        setSearching(true)
+      }
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
-  }, [dirty, save])
+  }, [dirty, save, hasFile])
 
   if (!vault.available) {
     return (
@@ -2895,6 +3170,15 @@ export function Vault({ vault }: { vault: VaultState }) {
           </div>
           {opened && (
             <div className="profile-bar-actions">
+              <button
+                type="button"
+                className="bar-icon"
+                aria-label="Search the whole Vault (Ctrl+Shift+F)"
+                title="Search every table (Ctrl+Shift+F)"
+                onClick={() => setSearching(true)}
+              >
+                <SearchIcon />
+              </button>
               <button
                 type="button"
                 className="bar-icon vault-save"
@@ -2974,6 +3258,7 @@ export function Vault({ vault }: { vault: VaultState }) {
             </div>
           </div>
         )}
+        {searching && hasFile && <VaultSearchDialog vault={vault} onClose={() => setSearching(false)} />}
       </section>
     </AttachmentsContext.Provider>
   )

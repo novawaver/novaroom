@@ -283,14 +283,102 @@ const LABEL_KINDS: VaultColumnKind[] = ["text", "email", "number", "date"]
  */
 export function rowLabel(table: VaultTable, rowId: string) {
   const index = table.rows.findIndex((row) => row.id === rowId)
-  if (index === -1) return null
-  const row = table.rows[index]
+  return index === -1 ? null : labelOfRow(table, table.rows[index], index)
+}
+
+function labelOfRow(table: VaultTable, row: VaultRow, index: number) {
   for (const column of table.columns) {
     if (!LABEL_KINDS.includes(column.kind)) continue
     const value = row.cells[column.id]
     if (value !== null && value !== undefined && value !== "" && !Array.isArray(value)) return String(value)
   }
   return `Row ${index + 1}`
+}
+
+/** One place a search of the whole Vault matched: a table's name, a cell, or a value inside a Sub-table cell. */
+export type VaultHit = {
+  tableId: string
+  tableName: string
+  // Null when the table's own name matched.
+  rowId: string | null
+  /** What the row is called, as a Link to it would show. */
+  row: string
+  /** Where in the row: the column, and for a Sub-table the item and its column. */
+  where: string
+  /** The whole matching value. */
+  text: string
+}
+
+/**
+ * Searches every table of a Vault, including the items inside Sub-table cells. Passwords are never
+ * matched, and Yes / no columns are left out, since "no" would match every unticked box.
+ * Stops at `limit` matches; `more` says there were others.
+ */
+export function searchVault(tables: VaultTable[], query: string, limit = 200) {
+  const search = query.trim().toLowerCase()
+  const hits: VaultHit[] = []
+  let more = false
+  if (!search) return { hits, more }
+  // What Links show, by table, worked out once per table that a matching column points to.
+  const labels = new Map<string, Map<string, string>>()
+  const labelsOf = (tableId: string | undefined) => {
+    const target = tables.find((item) => item.id === tableId)
+    if (!target) return null
+    let known = labels.get(target.id)
+    if (!known) {
+      known = new Map(target.rows.map((row, index) => [row.id, labelOfRow(target, row, index)]))
+      labels.set(target.id, known)
+    }
+    return known
+  }
+  const add = (hit: VaultHit) => {
+    if (hits.length >= limit) {
+      more = true
+      return false
+    }
+    hits.push(hit)
+    return true
+  }
+  const matches = (text: string) => text.toLowerCase().includes(search)
+
+  scan: for (const table of tables) {
+    const tableName = table.name || "Untitled"
+    const base = { tableId: table.id, tableName }
+    if (matches(tableName) && !add({ ...base, rowId: null, row: "", where: "Table name", text: tableName })) break
+    for (let index = 0; index < table.rows.length; index++) {
+      const row = table.rows[index]
+      let label: string | null = null
+      const hit = (where: string, text: string): VaultHit => ({
+        ...base,
+        rowId: row.id,
+        row: (label ??= labelOfRow(table, row, index)),
+        where,
+        text,
+      })
+      for (const column of table.columns) {
+        if (column.kind === "checkbox") continue
+        const value = row.cells[column.id] ?? null
+        const name = column.name || "Untitled"
+        if (column.kind === "subtable") {
+          const items = subRows(value)
+          for (let item = 0; item < items.length; item++) {
+            for (const sub of column.columns ?? []) {
+              if (sub.kind === "checkbox") continue
+              const text = cellText(items[item].cells[sub.id] ?? null, sub.kind)
+              if (matches(text) && !add(hit(`${name} \u203a item ${item + 1} \u203a ${sub.name || "Untitled"}`, text))) {
+                break scan
+              }
+            }
+          }
+          continue
+        }
+        const linked = linksRows(column.kind) ? labelsOf(column.target) : null
+        const text = cellText(value, column.kind, linked ? (rowId) => linked.get(rowId) ?? "" : undefined)
+        if (matches(text) && !add(hit(name, text))) break scan
+      }
+    }
+  }
+  return { hits, more }
 }
 
 /**

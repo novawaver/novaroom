@@ -11,6 +11,7 @@ import {
   extendSegment,
   formatDuration,
   listSegments,
+  readIdleAfterSeconds,
   readTimerEnabled,
   startSegment,
   systemIdleSeconds,
@@ -26,6 +27,8 @@ const TICK_MS = 15 * 1000
 const SAVE_EVERY_MS = 60 * 1000
 // A longer pause between checks means the computer slept; that time counts as offline.
 const SLEEP_GAP_MS = 2 * 60 * 1000
+// How often to ask again for the idle limit, so a change by an admin applies without a restart.
+const IDLE_LIMIT_EVERY_MS = 10 * 60 * 1000
 
 type Current = {
   id: string | null
@@ -82,6 +85,16 @@ export function useTimer(userId: string | null, isLeader: boolean) {
     let lastTick = 0
     let lastInput = Date.now()
     let stopped = false
+    // The idle limit an admin set. The usual minute until it is read, or if it can't be.
+    let idleAfter = IDLE_AFTER_SECONDS
+    const readLimit = () =>
+      void readIdleAfterSeconds()
+        .then((seconds) => {
+          if (seconds) idleAfter = seconds
+        })
+        .catch(() => {})
+    readLimit()
+    const limitTimer = window.setInterval(readLimit, IDLE_LIMIT_EVERY_MS)
     // Database writes run one after another so a period is created before it is extended.
     let queue: Promise<void> = Promise.resolve()
     const enqueue = (job: () => Promise<void>) => {
@@ -145,7 +158,7 @@ export function useTimer(userId: string | null, isLeader: boolean) {
       lastTick = now
       const idle = (await systemIdleSeconds()) ?? Math.floor((now - lastInput) / 1000)
       if (stopped) return
-      const status: TimerStatus = idle >= IDLE_AFTER_SECONDS ? "idle" : "awake"
+      const status: TimerStatus = idle >= idleAfter ? "idle" : "awake"
       // Idle really began when input stopped, so the switch is backdated to then.
       const idleSince = now - idle * 1000
       if (!current) {
@@ -170,6 +183,7 @@ export function useTimer(userId: string | null, isLeader: boolean) {
     return () => {
       stopped = true
       window.clearInterval(timer)
+      window.clearInterval(limitTimer)
       window.removeEventListener("beforeunload", onLeave)
       for (const name of inputEvents) window.removeEventListener(name, onInput)
       close(Date.now())

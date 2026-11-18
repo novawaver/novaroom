@@ -7,7 +7,9 @@ export type TimerStatus = "awake" | "idle"
 // A recorded stretch of awake or idle time. Offline time is whatever is not covered by these.
 export type TimerSegment = { id: string; status: TimerStatus; startedAt: string; endedAt: string }
 
-// No keyboard or mouse input for longer than this counts as idle.
+// No keyboard or mouse input for longer than this counts as idle. The Time Tracker uses the limit
+// an admin set instead (below), and this when that can't be read; the dots that show who is online
+// always use this.
 export const IDLE_AFTER_SECONDS = 60
 
 function fail(error: { message: string } | null) {
@@ -47,6 +49,18 @@ export async function writeTimerEnabled(userId: string, enabled: boolean) {
     .from("timer_settings")
     .upsert({ user_id: userId, enabled, updated_at: new Date().toISOString() }, { onConflict: "user_id" })
   fail(error)
+}
+
+/**
+ * How long without input the Time Tracker counts as idle, as set in Novaroom Admin. Null when there
+ * is no server to ask (offline preview).
+ */
+export async function readIdleAfterSeconds(): Promise<number | null> {
+  if (!supabase) return null
+  const { data, error } = await supabase.rpc("timer_idle_after_seconds")
+  fail(error)
+  const seconds = Number(data)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null
 }
 
 // Seconds since the last keyboard or mouse input anywhere on the computer, or null when only the

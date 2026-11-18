@@ -7785,8 +7785,23 @@ code {
   grid-template-rows: minmax(0, 1fr);
 }
 
-.room-pane-switch {
+/* The buttons that open and close the chat, and what dims the page behind it: only where the chat
+   is a panel over the page (see the container rule below). */
+.room-chat-toggle,
+.room-chat-close,
+.room-chat-backdrop {
   display: none;
+}
+
+.room-chat-toggle,
+.room-chat-close {
+  flex: 0 0 auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-view-inner > .room-chat {
+    transition: none !important;
+  }
 }
 
 .room-page {
@@ -7832,6 +7847,15 @@ code {
 
 .room-page-head .button {
   flex: none;
+}
+
+.room-leave {
+  flex: none;
+}
+
+.room-leave:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .room-page-scroll {
@@ -8143,51 +8167,52 @@ code {
   font-size: 22px;
 }
 
-/* Too narrow for both: one at a time, chosen with the switch. Hidden rather than removed, so the
-   chat keeps its scroll position. */
+/* Too narrow for both: the page fills the space, and the button in its header opens the chat as a
+   panel over it from the right. Hidden rather than removed, so the chat keeps its scroll position. */
 @container (max-width: 760px) {
   .room-view-inner {
+    position: relative;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    overflow: hidden;
   }
 
-  .room-view-inner > .room-page,
+  .room-chat-toggle,
+  .room-chat-close {
+    display: grid;
+  }
+
   .room-view-inner > .room-chat {
-    grid-area: 2 / 1;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 6;
+    /* Leaves a strip of the page showing, to click on to close the panel. */
+    width: min(400px, calc(100% - 48px));
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.14);
+    transition:
+      transform 0.2s ease,
+      visibility 0.2s;
   }
 
-  .room-view-inner.pane-page > .room-chat,
-  .room-view-inner.pane-chat > .room-page {
+  .room-view-inner.pane-page > .room-chat {
     visibility: hidden;
+    transform: translateX(100%);
+    box-shadow: none;
   }
 
-  .room-chat {
-    border-left: 0;
+  .room-view-inner.pane-chat > .room-chat-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: rgba(0, 0, 0, 0.18);
   }
 
-  .room-pane-switch {
-    display: flex;
-    gap: 4px;
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .room-pane-switch button {
-    flex: 1;
-    padding: 7px 12px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--ink);
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .room-pane-switch button.active {
-    border-color: var(--brand);
-    background: var(--brand);
-    color: white;
+  .room-chat-locked .room-chat-close {
+    position: absolute;
+    top: 8px;
+    left: 12px;
   }
 
   .room-page-head,
@@ -8350,4 +8375,366 @@ code {
   margin: 0;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* Vault: dragging the right edge of a column's header resizes the column. */
+.vault-col-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.vault-col-resize:hover,
+.vault-col-resize:active,
+.vault-col-resize:focus-visible {
+  background: var(--brand);
+  opacity: 0.55;
+  outline: none;
+}
+
+/* A column sized by hand keeps that width; values wrap inside it instead of widening it. */
+.vault-grid th.vault-col-sized,
+.vault-grid td.vault-col-sized {
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.vault-grid td.vault-col-sized .vault-cell-view,
+.vault-grid td.vault-col-sized .vault-link {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.vault-col-sized .vault-col-head input,
+.vault-col-sized .vault-col-name {
+  min-width: 0;
+}
+
+.vault-col-sized select {
+  max-width: 100%;
+}
+
+/* "Fit to width" with hand-sized columns can be wider than the page, so it scrolls again. */
+.vault-grid-wrap:has(.vault-fit.vault-has-widths) {
+  overflow-x: auto;
+}
+
+/* Vault: the items of a Sub-table cell shown in the cell, under the count that opens them. */
+.vault-sub-inline {
+  margin-top: 6px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.vault-grid .vault-sub-inline th,
+.vault-grid .vault-sub-inline td,
+.vault-sub-inline th,
+.vault-sub-inline td {
+  position: static;
+  width: auto;
+  min-width: 0;
+  padding: 3px 10px 3px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  vertical-align: top;
+}
+
+.vault-grid .vault-sub-inline th,
+.vault-sub-inline th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.vault-grid .vault-sub-inline tbody tr:last-child td,
+.vault-sub-inline tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.vault-grid .vault-sub-inline tbody tr,
+.vault-grid .vault-sub-inline tbody tr:hover td {
+  background: transparent;
+}
+
+.vault-sub-inline .vault-cell-view {
+  min-height: 0;
+  padding: 0;
+}
+
+/* Vault: searching every table at once. */
+.vault-search.vault-search-all {
+  flex: none;
+}
+
+.vault-search.vault-search-all input {
+  width: 100%;
+}
+
+.vault-hits {
+  display: grid;
+  gap: 14px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.vault-hits section {
+  display: grid;
+  gap: 2px;
+}
+
+.vault-hits h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.vault-hit {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  text-align: left;
+}
+
+.vault-hit:hover,
+.vault-hit:focus-visible {
+  background: var(--side-soft);
+}
+
+.vault-hit-where {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.vault-hit-where strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.vault-hit-text {
+  overflow-wrap: anywhere;
+}
+
+.vault-hit-text mark {
+  border-radius: 3px;
+  background: var(--chip-soft);
+  color: var(--chip-soft-ink);
+}
+
+/* Emoji: the button in a message box's row, and the list it opens above the row. The emoji are
+   drawn by the emoji font that comes with Windows, so nothing is downloaded or bundled. */
+.emoji-picker {
+  flex: 0 0 auto;
+  display: flex;
+}
+
+.emoji-button svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.emoji-button[aria-expanded="true"] {
+  color: var(--ink);
+  border-color: var(--brand);
+}
+
+.emoji-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 352px;
+  max-width: 100%;
+  height: min(380px, 60vh);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  overflow: hidden;
+}
+
+.emoji-head {
+  display: flex;
+  gap: 6px;
+  padding: 8px 8px 6px;
+}
+
+.emoji-head input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.emoji-panel button {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  line-height: 1;
+}
+
+.emoji-panel button:hover,
+.emoji-panel button:focus-visible {
+  background: var(--side-soft);
+}
+
+.emoji-tone-button {
+  flex: 0 0 auto;
+  width: 34px;
+  font-size: 18px;
+}
+
+.emoji-tones,
+.emoji-tabs {
+  display: flex;
+  padding: 0 8px 6px;
+}
+
+.emoji-tones {
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.emoji-tones button {
+  width: 34px;
+  height: 34px;
+  font-size: 20px;
+}
+
+.emoji-tones button[aria-checked="true"] {
+  background: var(--side-soft);
+}
+
+.emoji-tabs {
+  border-bottom: 1px solid var(--line);
+}
+
+.emoji-tabs button {
+  flex: 1;
+  height: 30px;
+  font-size: 16px;
+  /* Quieter than the emoji below until pointed at or current. */
+  filter: grayscale(1);
+  opacity: 0.7;
+}
+
+.emoji-tabs button:hover,
+.emoji-tabs button.active {
+  filter: none;
+  opacity: 1;
+}
+
+.emoji-tabs button.active {
+  background: var(--side-soft);
+}
+
+.emoji-scroll {
+  position: relative;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px 8px;
+}
+
+.emoji-group h3 {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 8px 2px 4px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+}
+
+.emoji-grid button {
+  aspect-ratio: 1;
+  font-size: 22px;
+}
+
+.emoji-note {
+  margin: 0;
+  padding: 24px 8px;
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+/* A message of only one to three emoji. */
+.bubble p.emoji-only {
+  font-size: 34px;
+  line-height: 1.2;
+}
+
+/* Text styling in messages: code, and the buttons above a message box while its text is selected. */
+.bubble .chat-code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  white-space: pre-wrap;
+}
+
+.bubble .chat-code.block {
+  display: block;
+  margin: 2px 0;
+  padding: 6px 9px;
+  border-radius: 8px;
+}
+
+.style-bar {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 19;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+}
+
+.style-bar button {
+  min-width: 32px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.style-bar button:hover {
+  background: var(--side-soft);
 }

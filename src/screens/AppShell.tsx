@@ -70,7 +70,11 @@ import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat
 import { CAPTURE_TABS, Capture, formatElapsed, type CaptureState, type CaptureTab } from "./Capture"
 import { chatIsQuiet, setChatQuiet, useQuietChats } from "../lib/chatAlerts"
 import { mentionsName } from "../lib/mentions"
-import { MentionText, useMentions } from "./Mentions"
+import { useMentions } from "./Mentions"
+import { ChatText, useTextStyling } from "./ChatText"
+import { plainChatText } from "../lib/chatText"
+import { EmojiPicker } from "./EmojiPicker"
+import { isEmojiOnly } from "../lib/emoji"
 import {
   AlertDialog,
   ConfirmDialog,
@@ -1390,6 +1394,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     updateBody,
     bodyRef,
   )
+  const styling = useTextStyling(bodyRef)
   // Shown when a button can't do what it says, such as starting a chat without permission.
   const [alertBox, setAlertBox] = useState<{ title: string; text: string } | null>(null)
   const [confirm, setConfirm] = useState<{ title: string; text: string; actions: ConfirmAction[] } | null>(null)
@@ -1869,6 +1874,20 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   const renderThread = (inRoom: boolean) => (
     <section className={inRoom ? "thread room-chat" : "thread"} aria-label={inRoom ? "Room chat" : undefined}>
       <header className="thread-bar">
+        {/* Only shown where the room's chat is a panel over its page. */}
+        {inRoom && (
+          <button
+            type="button"
+            className="icon-button room-chat-close"
+            aria-label="Hide chat"
+            title="Hide chat"
+            onClick={() => setRoomPane("page")}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9.5 6l6 6-6 6" />
+            </svg>
+          </button>
+        )}
         {selected && !inRoom && (
           <span className="thread-photo">
             <span className="avatar thread-avatar">
@@ -2000,8 +2019,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                           </a>
                         )}
                         {message.body && (
-                          <p>
-                            <MentionText text={message.body} names={memberNames} me={myName} />
+                          <p className={isEmojiOnly(message.body) ? "emoji-only" : undefined}>
+                            <ChatText text={message.body} names={memberNames} me={myName} />
                           </p>
                         )}
                         {message.deleted && <p className="deleted-note">Message deleted</p>}
@@ -2125,7 +2144,18 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 </p>
               )}
               <div className="composer-row">
-                {mentions.list}
+                {mentions.list || styling.bar}
+                <EmojiPicker
+                  key={selectedId}
+                  body={body}
+                  setBody={(text) => {
+                    updateBody(text)
+                    typing.onType(true)
+                  }}
+                  boxRef={bodyRef}
+                  maxLength={4000}
+                  disabled={closed}
+                />
                 <textarea
                   ref={bodyRef}
                   value={body}
@@ -2144,7 +2174,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                   onKeyUp={(event) => mentions.track(event.currentTarget, false)}
                   onBlur={mentions.close}
                   onKeyDown={(event) => {
-                    if (mentions.onKeyDown(event)) return
+                    if (mentions.onKeyDown(event) || styling.onKeyDown(event)) return
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault()
                       event.currentTarget.form?.requestSubmit()
@@ -2529,7 +2559,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 </span>
                 <span className="profile-chip-text">
                   <strong>{chat.title}</strong>
-                  <span>{chat.lastBody || "No messages yet"}</span>
+                  <span>{plainChatText(chat.lastBody) || "No messages yet"}</span>
                 </span>
                 {quietChats.has(chat.id) && (
                   <span className="quiet-mark" role="img" aria-label="Notifications off" title="Notifications off">
@@ -2561,7 +2591,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                     </span>
                     <span className="profile-chip-text">
                       <strong>{room.title}</strong>
-                      <span>{chat.lastBody || room.description}</span>
+                      <span>{plainChatText(chat.lastBody) || room.description}</span>
                     </span>
                     {quietChats.has(room.id) && (
                       <span className="quiet-mark" role="img" aria-label="Notifications off" title="Notifications off">
@@ -2667,20 +2697,6 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       ) : roomOnPage ? (
         <div className="room-view">
           <div className={`room-view-inner pane-${roomPane}`}>
-            <div className="room-pane-switch" role="tablist" aria-label={`${roomOnPage.title} room`}>
-              {(["page", "chat"] as const).map((pane) => (
-                <button
-                  key={pane}
-                  type="button"
-                  role="tab"
-                  aria-selected={roomPane === pane}
-                  className={roomPane === pane ? "active" : ""}
-                  onClick={() => setRoomPane(pane)}
-                >
-                  {pane === "page" ? "Page" : "Chat"}
-                </button>
-              ))}
-            </div>
             <RoomPage
               session={session}
               room={roomOnPage}
@@ -2690,11 +2706,26 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
               onLeave={() => void onLeave(roomOnPage.id)}
               onOpenLink={openExternal}
               presenceOf={presenceOf}
+              chatOpen={roomPane === "chat"}
+              onToggleChat={() => setRoomPane((pane) => (pane === "chat" ? "page" : "chat"))}
             />
+            {/* Behind the chat panel where it opens over the page; a click on the page closes it. */}
+            <div className="room-chat-backdrop" aria-hidden="true" onClick={() => setRoomPane("page")} />
             {roomOnPage.joined && selected ? (
               renderThread(true)
             ) : (
               <section className="thread room-chat room-chat-locked" aria-label="Room chat">
+                <button
+                  type="button"
+                  className="icon-button room-chat-close"
+                  aria-label="Hide chat"
+                  title="Hide chat"
+                  onClick={() => setRoomPane("page")}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9.5 6l6 6-6 6" />
+                  </svg>
+                </button>
                 <div className="thread-empty">
                   <h2>Room chat</h2>
                   <p>Join {roomOnPage.title} to talk with its members, ask questions and share what you know.</p>

@@ -1,3 +1,4 @@
+import { plainChatText } from "./chatText"
 import type { RealtimeChannel } from "@supabase/supabase-js"
 import { emptyProfile, type Profile, type Session } from "../types"
 import { supabase } from "./supabase"
@@ -75,7 +76,7 @@ const MESSAGE_COLUMNS =
 
 export function messageLabel(message: Pick<ChatMessage, "body" | "attachmentName" | "deleted">) {
   if (message.deleted) return "Message deleted"
-  const text = message.body.trim()
+  const text = plainChatText(message.body).trim()
   if (text) return text
   return message.attachmentName || "Attachment"
 }
