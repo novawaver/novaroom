@@ -3,7 +3,7 @@ import { accentFor } from "../lib/accent"
 import { chatIsQuiet, localAlertKey, setChatQuiet, useQuietChats } from "../lib/chatAlerts"
 import { notifyIncoming, windowIsActive } from "../lib/desktop"
 import { loadDraft, saveDraft } from "../lib/drafts"
-import { mentionsName } from "../lib/mentions"
+import { EVERYONE_NAMES, mentionsEveryone, mentionsName } from "../lib/mentions"
 import { useIdle } from "../lib/presence"
 import { typingText } from "../lib/typing"
 import {
@@ -12,6 +12,8 @@ import {
   LOCAL_ROOM,
   clearLocalChat,
   deleteLocalMessages,
+  deleteLocalMessagesForEveryone,
+  editLocalMessage,
   localAutoDelete,
   localAvatars,
   localChatAvailable,
@@ -201,16 +203,23 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
         void windowIsActive().then((active) => {
           if (active && visibleRef.current && message.chat === selectedRef.current) return
           setUnread((current) => ({ ...current, [message.chat]: (current[message.chat] ?? 0) + 1 }))
-          // With the chat's notifications off, only a message that mentions this person shows one.
-          const mentioned = mentionsName(message.body, nameRef.current)
-          if (!mentioned && userId && chatIsQuiet(userId, localAlertKey(message.chat))) return
+          // With the chat's notifications off, only a message that mentions this person, or
+          // everyone in Broadcast, shows one.
+          const byName = mentionsName(message.body, nameRef.current)
+          const everyone = message.chat === LOCAL_ROOM && mentionsEveryone(message.body)
+          if (!byName && !everyone && userId && chatIsQuiet(userId, localAlertKey(message.chat))) return
           const where = message.chat === LOCAL_ROOM ? " (local network)" : " (local)"
-          const title = `${message.senderName || "Someone"}${mentioned ? " mentioned you" : ""}${where}`
+          const how = byName ? " mentioned you" : everyone ? " mentioned everyone" : ""
+          const title = `${message.senderName || "Someone"}${how}${where}`
           void notifyIncoming(title, localMessageLabel(message), `local:${message.chat}`, {
             name: message.senderName || "Someone",
             avatarUrl: avatarsRef.current[message.senderId] ?? null,
           })
         })
+      },
+      edited(message) {
+        if (message.chat === selectedRef.current) setMessages((current) => withEdit(current, message))
+        reloadChats()
       },
       delivered(id) {
         setMessages((current) => current.map((item) => (item.id === id ? { ...item, delivered: true } : item)))
@@ -306,9 +315,21 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     reloadChats()
   }
 
-  /** Deletes messages of the open chat from this computer. */
-  async function deleteMessages(ids: string[]) {
-    await deleteLocalMessages(ids)
+  /** Changes the text of one of this person's messages in the open chat. */
+  async function edit(id: string, body: string) {
+    const saved = await editLocalMessage(id, body)
+    // In a direct chat with someone who is away, the change waits here like a new message does.
+    const waiting = saved.chat !== LOCAL_ROOM && !peers.some((peer) => peer.userId === saved.chat)
+    setMessages((current) =>
+      withEdit(current, saved).map((item) => (item.id === saved.id && waiting ? { ...item, delivered: false } : item)),
+    )
+    reloadChats()
+  }
+
+  /** Deletes messages of the open chat from this computer, or (own messages) from everyone's. */
+  async function deleteMessages(ids: string[], forEveryone = false) {
+    if (forEveryone) await deleteLocalMessagesForEveryone(ids)
+    else await deleteLocalMessages(ids)
     const gone = new Set(ids)
     setMessages((current) => current.filter((item) => !gone.has(item.id)))
     reloadChats()
@@ -397,6 +418,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     setVisible,
     select,
     send,
+    edit,
     deleteMessages,
     setPinned,
     clear,
@@ -463,7 +485,8 @@ function SendIcon() {
 }
 
 /** The sidebar: the room, then everyone on the network and earlier direct chats. */
-export function LocalChatRail({ local }: { local: LocalChatState }) {
+// headerAction: shown at the right of the sidebar's heading (the Online / Local toggle).
+export function LocalChatRail({ local, headerAction }: { local: LocalChatState; headerAction?: ReactNode }) {
   const online = new Map(local.peers.map((peer) => [peer.userId, peer]))
   const summaries = new Map(local.chats.map((chat) => [chat.chat, chat]))
   // People here now first, then earlier chats, newest first.
@@ -520,7 +543,8 @@ export function LocalChatRail({ local }: { local: LocalChatState }) {
   return (
     <>
       <div className="rail-head">
-        <p className="list-label">Local network</p>
+        <p className="list-label">Local chats</p>
+        {headerAction && <div className="rail-actions">{headerAction}</div>}
       </div>
       <p className="hint local-rail-note">Works without internet, with people on this office network.</p>
       <div className="chat-list local-chat-list">
@@ -545,7 +569,26 @@ function AttachIcon() {
   )
 }
 
-function ReplyIcon() {
+/** The messages with one's new text, in the message itself and in the replies that quote it. */
+function withEdit(messages: LocalMessage[], edited: LocalMessage) {
+  return messages.map((item) =>
+    item.id === edited.id
+      ? { ...item, body: edited.body, editedAt: edited.editedAt }
+      : item.replyTo?.id === edited.id
+        ? { ...item, replyTo: { ...item.replyTo, body: edited.body.slice(0, 200) } }
+        : item,
+  )
+}
+
+export function EditIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4.5 19.5h4L19 9l-4-4L4.5 15.5v4zM13 7l4 4" />
+    </svg>
+  )
+}
+
+export function ReplyIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M9.5 6.5L4 12l5.5 5.5" />
@@ -554,7 +597,7 @@ function ReplyIcon() {
   )
 }
 
-function PinIcon() {
+export function PinIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M9 4h6l-1 5 3.5 3.5v1.5h-11v-1.5L10 9z" />
@@ -563,7 +606,7 @@ function PinIcon() {
   )
 }
 
-function CopyIcon() {
+export function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <rect x="8.5" y="8.5" width="11" height="11" rx="2" />
@@ -572,7 +615,7 @@ function CopyIcon() {
   )
 }
 
-function CopiedIcon() {
+export function CopiedIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M5 12.5l4.5 4.5L19 7.5" />
@@ -580,7 +623,7 @@ function CopiedIcon() {
   )
 }
 
-function RemoveIcon() {
+export function RemoveIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4.5 7h15M10 4h4M6.5 7l.8 11.2a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8L17.5 7M10 11v5M14 11v5" />
@@ -829,6 +872,8 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   const [sendError, setSendError] = useState("")
   const [sending, setSending] = useState(false)
   const [replyTo, setReplyTo] = useState<LocalMessage | null>(null)
+  // One of this person's messages whose text is in the message box to be changed.
+  const [editing, setEditing] = useState<LocalMessage | null>(null)
   const [file, setFile] = useState<File | null>(null)
   const [filePreview, setFilePreview] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
@@ -867,20 +912,41 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   // Keeps each chat's unsent text, so leaving the chat or the page does not lose it.
   function updateBody(text: string) {
     setBody(text)
-    saveDraft(userId, selected, text)
+    // The text of a message being edited is not the chat's draft.
+    if (!editing) saveDraft(userId, selected, text)
+  }
+
+  function startEditing(message: LocalMessage) {
+    setEditing(message)
+    setReplyTo(null)
+    setFile(null)
+    setSendError("")
+    setBody(message.body)
+    local.onType(false)
+    bodyRef.current?.focus()
+  }
+
+  // Back to what was being written before.
+  function stopEditing() {
+    setEditing(null)
+    setBody(loadDraft(userId, selected))
   }
 
   useEffect(() => {
     setBody(loadDraft(userId, selected))
     setSendError("")
     setReplyTo(null)
+    setEditing(null)
     setFile(null)
     bodyRef.current?.focus()
   }, [selected, userId])
 
-  // Who can be mentioned: everyone on the network in the room, or the other person in a direct chat.
+  // Who can be mentioned: everyone on the network in the room (one by one, or all at once), or
+  // the other person in a direct chat.
   const mentionNames =
-    selected === LOCAL_ROOM ? local.peers.map((item) => item.name) : [local.chatName(selected)].filter((item) => item !== "Someone")
+    selected === LOCAL_ROOM
+      ? [...local.peers.map((item) => item.name), ...EVERYONE_NAMES]
+      : [local.chatName(selected)].filter((item) => item !== "Someone")
   const mentions = useMentions(mentionNames, body, updateBody, bodyRef)
   const styling = useTextStyling(bodyRef)
   // Names to mark in messages: the people above, and this person.
@@ -954,32 +1020,41 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     window.setTimeout(() => target.classList.remove("flash"), 1200)
   }
 
-  // Deleting here only removes messages from this computer; Local chat has no server to delete from.
   function onDeleteChosen() {
-    const ids = local.messages.filter((message) => selection.chosen.has(message.id)).map((message) => message.id)
-    if (ids.length === 0) return
-    const these = ids.length === 1 ? "this message" : `these ${ids.length} messages`
-    setConfirm({
-      title: ids.length === 1 ? "Delete message?" : `Delete ${ids.length} messages?`,
-      text: `This deletes ${these} from this computer. Others keep their copies.`,
-      actions: [
-        {
-          label: "Delete",
-          danger: true,
-          onSelect: async () => {
-            await local.deleteMessages(ids)
-            selection.stop()
-          },
-        },
-      ],
-    })
+    askDelete(local.messages.filter((message) => selection.chosen.has(message.id)))
   }
 
-  function onRemove(message: LocalMessage) {
+  // Asks how to delete these messages. Only a person's own messages can go for everyone: their
+  // app tells the others' apps to delete their copies, since Local chat has no server to delete from.
+  function askDelete(chosen: LocalMessage[]) {
+    if (chosen.length === 0) return
+    const ids = chosen.map((message) => message.id)
+    const these = chosen.length === 1 ? "this message" : `these ${chosen.length} messages`
+    const them = chosen.length === 1 ? "it" : "them"
+    const allMine = chosen.every((message) => message.senderId === userId)
+    const others = selected === LOCAL_ROOM ? "everyone's computers" : "the other person's computer"
+    const forMe: ConfirmAction = {
+      label: "Delete for me",
+      danger: !allMine,
+      onSelect: async () => {
+        await local.deleteMessages(ids)
+        selection.stop()
+      },
+    }
+    const forEveryone: ConfirmAction = {
+      label: "Delete for everyone",
+      danger: true,
+      onSelect: async () => {
+        await local.deleteMessages(ids, true)
+        selection.stop()
+      },
+    }
     setConfirm({
-      title: "Delete message?",
-      text: "This deletes this message from this computer. Others keep their copies.",
-      actions: [{ label: "Delete", danger: true, onSelect: () => local.deleteMessages([message.id]) }],
+      title: chosen.length === 1 ? "Delete message?" : `Delete ${chosen.length} messages?`,
+      text: allMine
+        ? `Delete for everyone also deletes ${these} from ${others}; someone who is away loses ${them} when they are back. Delete for me only deletes ${them} from this computer.`
+        : `This deletes ${these} from this computer. Others keep their copies.`,
+      actions: allMine ? [forMe, forEveryone] : [forMe],
     })
   }
 
@@ -1010,7 +1085,23 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
   async function onSend(event: FormEvent) {
     event.preventDefault()
     const text = body.trim()
-    if ((!text && !file) || sending) return
+    if (sending) return
+    if (editing) {
+      // A message with a file can have its text taken away; one without can't be left empty.
+      if (!text && !editing.file) return
+      setSendError("")
+      setSending(true)
+      try {
+        await local.edit(editing.id, text)
+        stopEditing()
+      } catch (caught) {
+        setSendError(caught instanceof Error ? caught.message : "Could not change that message.")
+      } finally {
+        setSending(false)
+      }
+      return
+    }
+    if (!text && !file) return
     setSendError("")
     setSending(true)
     try {
@@ -1053,7 +1144,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
         if (!event.dataTransfer.types.includes("Files")) return
         event.preventDefault()
         setDragging(false)
-        attach(event.dataTransfer.files[0])
+        if (!editing) attach(event.dataTransfer.files[0])
       }}
     >
       <header className="thread-bar">
@@ -1171,7 +1262,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                   {selection.selecting && <SelectCheck checked={chosen} />}
                   {!mine && avatar}
                   <article
-                    className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine && !message.pinned ? " no-meta" : ""}${message.pinned ? " pinned" : ""}`}
+                    className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine && !message.pinned && !message.editedAt ? " no-meta" : ""}${message.pinned ? " pinned" : ""}`}
                   >
                     {reply && (
                       <button type="button" className="bubble-quote" onClick={() => showMessage(reply.id)}>
@@ -1189,6 +1280,11 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                       {message.pinned && (
                         <span className="bubble-pin" role="img" aria-label="Pinned" title="Pinned. Auto-delete keeps it.">
                           <PinIcon />
+                        </span>
+                      )}
+                      {message.editedAt && (
+                        <span className="bubble-edited" title={`Edited ${formatDay(message.editedAt)}, ${formatTime(message.editedAt)}`}>
+                          edited
                         </span>
                       )}
                       {!sameMinute && <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>}
@@ -1209,6 +1305,17 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                         >
                           <ReplyIcon />
                         </button>
+                        {mine && (
+                          <button
+                            type="button"
+                            className={editing?.id === message.id ? "bubble-action on" : "bubble-action"}
+                            aria-label="Edit"
+                            title="Edit"
+                            onClick={() => startEditing(message)}
+                          >
+                            <EditIcon />
+                          </button>
+                        )}
                         <button
                           type="button"
                           className={message.pinned ? "bubble-action on" : "bubble-action"}
@@ -1235,7 +1342,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                           className="bubble-action danger"
                           aria-label="Remove"
                           title="Remove from this computer"
-                          onClick={() => onRemove(message)}
+                          onClick={() => askDelete([message])}
                         >
                           <RemoveIcon />
                         </button>
@@ -1267,6 +1374,17 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             <p className="form-error" role="alert">
               {sendError}
             </p>
+          )}
+          {editing && (
+            <div className="composer-extra">
+              <span className="composer-extra-text">
+                <strong>Editing message</strong>
+                <span>{localMessageLabel(editing)}</span>
+              </span>
+              <button type="button" className="composer-extra-close" aria-label="Cancel editing" title="Cancel editing" onClick={stopEditing}>
+                ×
+              </button>
+            </div>
           )}
           {replyTo && (
             <div className="composer-extra">
@@ -1313,7 +1431,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
               className="attach-button"
               aria-label="Attach a file"
               title="Attach a file"
-              disabled={!local.running}
+              disabled={!local.running || editing !== null}
               onClick={() => fileInputRef.current?.click()}
             >
               <AttachIcon />
@@ -1323,7 +1441,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
               body={body}
               setBody={(text) => {
                 updateBody(text)
-                local.onType(true)
+                if (!editing) local.onType(true)
               }}
               boxRef={bodyRef}
               maxLength={MAX_BODY}
@@ -1340,7 +1458,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
               onChange={(event) => {
                 updateBody(event.target.value)
                 mentions.track(event.target, true)
-                local.onType(event.target.value.trim() !== "")
+                if (!editing) local.onType(event.target.value.trim() !== "")
               }}
               onClick={(event) => mentions.track(event.currentTarget, false)}
               onKeyUp={(event) => mentions.track(event.currentTarget, false)}
@@ -1349,7 +1467,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                 const pasted = event.clipboardData.files[0]
                 if (!pasted) return
                 event.preventDefault()
-                attach(pasted)
+                if (!editing) attach(pasted)
               }}
               onKeyDown={(event) => {
                 if (mentions.onKeyDown(event) || styling.onKeyDown(event)) return
@@ -1357,14 +1475,16 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                   event.preventDefault()
                   event.currentTarget.form?.requestSubmit()
                 }
-                if (event.key === "Escape" && replyTo) setReplyTo(null)
+                if (event.key === "Escape" && editing) stopEditing()
+                else if (event.key === "Escape" && replyTo) setReplyTo(null)
               }}
             />
             <button
               type="submit"
               className="button send-button"
-              aria-label="Send"
-              disabled={!local.running || sending || (!body.trim() && !file)}
+              aria-label={editing ? "Save changes" : "Send"}
+              title={editing ? "Save changes" : undefined}
+              disabled={!local.running || sending || (!body.trim() && !(editing ? editing.file : file))}
             >
               <SendIcon />
             </button>

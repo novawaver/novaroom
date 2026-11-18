@@ -54,7 +54,9 @@ const FILE_CHUNK: usize = 32 * 1024;
 const FEATURE_TYPING: &str = "typing";
 const FEATURE_READ: &str = "read";
 const FEATURE_FILES: &str = "files";
-const FEATURES: &[&str] = &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES];
+/// Understands Delete frames: a sender taking a message back from everyone.
+const FEATURE_DELETE: &str = "delete";
+const FEATURES: &[&str] = &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES, FEATURE_DELETE];
 /// The longest Noise message, which is also the most one length-prefixed packet can hold.
 const NOISE_MAX: usize = 65535;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -102,6 +104,13 @@ CREATE TABLE IF NOT EXISTS reads (
 CREATE TABLE IF NOT EXISTS removed (
   id TEXT PRIMARY KEY
 );
+-- This person's own messages they deleted for everyone, still to be told to apps that were away:
+-- room ones for as long as room history is shared, direct ones until the other person's app confirms.
+CREATE TABLE IF NOT EXISTS retracted (
+  id TEXT PRIMARY KEY,
+  chat TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS directory (
   user_id TEXT NOT NULL,
   public_key TEXT NOT NULL,
@@ -131,6 +140,8 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
     ("stored_at", "INTEGER"),
     // Pinned by this person on this computer: shown at the top of the chat and never auto-deleted.
     ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+    // When its sender last changed its text, by the sender's clock. Empty if never.
+    ("edited_at", "INTEGER"),
 ];
 
 fn migrate(db: &Connection) -> Result<(), String> {
@@ -214,6 +225,8 @@ pub struct LocalMessage {
     file: Option<LocalFile>,
     /// Pinned on this computer, so auto-delete keeps it. Others do not see pins.
     pinned: bool,
+    /// When its sender last changed its text (milliseconds since 1970, by their clock), if ever.
+    edited_at: Option<i64>,
     #[serde(skip)]
     reply_to_id: Option<String>,
     #[serde(skip)]
@@ -222,7 +235,7 @@ pub struct LocalMessage {
 
 const MESSAGE_SELECT: &str = "SELECT m.id, m.chat, m.sender_id, m.sender_name, m.body, m.sent_at, m.delivered,
        m.read, m.reply_to, m.file_name, m.file_mime, m.file_size, m.file_state, m.file_path,
-       r.sender_id, r.sender_name, r.body, r.file_name, m.pinned
+       r.sender_id, r.sender_name, r.body, r.file_name, m.pinned, m.edited_at
      FROM messages m LEFT JOIN messages r ON r.id = m.reply_to";
 
 fn message_row(row: &rusqlite::Row) -> rusqlite::Result<LocalMessage> {
@@ -258,6 +271,7 @@ fn message_row(row: &rusqlite::Row) -> rusqlite::Result<LocalMessage> {
             None => None,
         },
         pinned: row.get(18)?,
+        edited_at: row.get(19)?,
         reply_to_id,
         file_path: row.get(13)?,
     })
@@ -316,6 +330,8 @@ enum Frame {
     /// The sender is whoever is on the other end of the connection, never a field, so nobody can
     /// send a message in someone else's name. `to` is the recipient's id, or none for the room.
     /// Older apps ignore `reply_to` and `file`; they never get a file, see `message_frame`.
+    /// A message whose text was changed is sent again with `edited_at`: apps that know about
+    /// editing take the new text, and older apps ignore a message they already have.
     #[serde(rename_all = "camelCase")]
     Message {
         id: String,
@@ -327,8 +343,13 @@ enum Frame {
         reply_to: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file: Option<FileInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edited_at: Option<i64>,
     },
     Ack { id: String },
+    /// The sender deleted their own message `id` for everyone, in the room (no `to`) or in the
+    /// direct chat with `to`. A direct one is confirmed with an Ack. Needs "delete".
+    Delete { id: String, to: Option<String> },
     Ping,
     /// The sender's idle status changed. Only sent to apps that said they understand it.
     Status { idle: bool },
@@ -458,6 +479,7 @@ fn message_frame(item: &LocalMessage, features: &HashSet<String>) -> Frame {
             .as_ref()
             .filter(|_| files)
             .map(|file| FileInfo { name: file.name.clone(), mime: file.mime.clone(), size: file.size }),
+        edited_at: item.edited_at,
     }
 }
 
@@ -558,6 +580,11 @@ impl Session {
     fn sweep(&self) {
         let ids: Vec<String> = {
             let db = self.db.lock().unwrap();
+            // Room deletes older than the shared room history have nobody left to tell.
+            let _ = db.execute(
+                "DELETE FROM retracted WHERE chat = ?1 AND at < ?2",
+                params![ROOM, now_ms() - ROOM_HISTORY_MS],
+            );
             let Ok(mut statement) = db.prepare(SWEEP_SELECT) else {
                 return;
             };
@@ -580,8 +607,8 @@ impl Session {
         db.execute(
             "INSERT OR IGNORE INTO messages
                (id, chat, sender_id, sender_name, body, sent_at, delivered, read, reply_to,
-                file_name, file_mime, file_size, file_state, file_path, stored_at)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                file_name, file_mime, file_size, file_state, file_path, stored_at, edited_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
              WHERE NOT EXISTS (SELECT 1 FROM removed WHERE id = ?1)",
             params![
                 item.id,
@@ -598,6 +625,7 @@ impl Session {
                 file.map(|file| file.state.clone()),
                 item.file_path,
                 now_ms(),
+                item.edited_at,
             ],
         )
         .map(|changed| changed > 0)
@@ -683,6 +711,22 @@ impl Session {
                 }
             };
             frames.extend(ids.into_iter().map(|id| Frame::FileRequest { id }));
+        }
+        if features.contains(FEATURE_DELETE) {
+            // Messages I deleted for everyone while this app was away.
+            let direct = if peer_user_id != self.user_id { peer_user_id } else { "" };
+            let rows: Vec<(String, String)> = {
+                let db = self.db.lock().unwrap();
+                let statement = db.prepare("SELECT id, chat FROM retracted WHERE (chat = ?1 AND at > ?2) OR chat = ?3");
+                match statement {
+                    Ok(mut statement) => statement
+                        .query_map(params![ROOM, since, direct], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map(|rows| rows.filter_map(Result::ok).collect())
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            };
+            frames.extend(rows.into_iter().map(|(id, chat)| Frame::Delete { id, to: (chat != ROOM).then_some(chat) }));
         }
         frames
     }
@@ -943,7 +987,7 @@ struct FileEvent {
 /// Handles one frame from `from` (already verified).
 fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>, frame: Frame) {
     match frame {
-        Frame::Message { id, to, name, body, sent_at, reply_to, file } => {
+        Frame::Message { id, to, name, body, sent_at, reply_to, file, edited_at } => {
             let chat = match to {
                 None => ROOM.to_string(),
                 // A direct message to me, from someone else.
@@ -962,6 +1006,7 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 state: "waiting".into(),
             });
             let wants_file = file.is_some();
+            let edited_at = edited_at.filter(|at| *at > 0);
             let item = LocalMessage {
                 id: id.clone(),
                 sender_id: from.to_string(),
@@ -976,6 +1021,7 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 file_path: None,
                 chat: chat.clone(),
                 pinned: false,
+                edited_at,
             };
             if session.store(&item) {
                 if let Some(stored) = session.message(&id) {
@@ -983,6 +1029,23 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 }
                 if wants_file {
                     let _ = outbox.send(Frame::FileRequest { id: id.clone() });
+                }
+            } else if let Some(edited_at) = edited_at {
+                // Already here: its sender changed the text. Only the sender's own message, in the
+                // same chat, and only a change newer than the one this computer has.
+                let changed = {
+                    let db = session.db.lock().unwrap();
+                    db.execute(
+                        "UPDATE messages SET body = ?1, edited_at = ?2
+                         WHERE id = ?3 AND sender_id = ?4 AND chat = ?5 AND COALESCE(edited_at, 0) < ?2",
+                        params![item.body, edited_at, id, from, chat],
+                    )
+                    .unwrap_or(0)
+                };
+                if changed > 0 {
+                    if let Some(stored) = session.message(&id) {
+                        let _ = session.app.emit("local-chat-edited", &stored);
+                    }
                 }
             }
             // Even a message already here is confirmed, since the sender may have missed the last ack.
@@ -993,6 +1056,8 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
         Frame::Ack { id } => {
             let changed = {
                 let db = session.db.lock().unwrap();
+                // It may confirm a message I deleted for everyone instead.
+                let _ = db.execute("DELETE FROM retracted WHERE id = ?1 AND chat = ?2", params![id, from]);
                 db.execute(
                     "UPDATE messages SET delivered = 1 WHERE id = ?1 AND chat = ?2 AND sender_id = ?3 AND delivered = 0",
                     params![id, from, session.user_id],
@@ -1001,6 +1066,29 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
             };
             if changed > 0 {
                 let _ = session.app.emit("local-chat-delivered", id);
+            }
+        }
+        Frame::Delete { id, to } => {
+            let chat = match to {
+                None => ROOM.to_string(),
+                Some(to) if to == session.user_id && from != session.user_id => from.to_string(),
+                _ => return,
+            };
+            // Only the sender's own message, in the chat they say it is in.
+            let here = {
+                let db = session.db.lock().unwrap();
+                db.query_row(
+                    "SELECT 1 FROM messages WHERE id = ?1 AND sender_id = ?2 AND chat = ?3",
+                    params![id, from, chat],
+                    |_| Ok(()),
+                )
+                .is_ok()
+            };
+            if here && session.remove(std::slice::from_ref(&id)).is_ok() {
+                let _ = session.app.emit("local-chat-expired", vec![id.clone()]);
+            }
+            if chat != ROOM {
+                let _ = outbox.send(Frame::Ack { id });
             }
         }
         Frame::Typing { to, typing } => {
@@ -1517,6 +1605,7 @@ pub fn local_chat_send(
         file_path,
         chat,
         pinned: false,
+        edited_at: None,
     };
     if !session.store(&item) {
         return Err("That message was already sent.".into());
@@ -1524,6 +1613,45 @@ pub fn local_chat_send(
     let to = (item.chat != ROOM).then(|| item.chat.clone());
     session.send_to(to.as_deref(), |peer| Some(message_frame(&item, &peer.features)));
     Ok(session.message(&id).unwrap_or(item))
+}
+
+/// Changes the text of one of this person's own messages, and sends the change to whoever is
+/// connected. A direct message counts as not delivered again until the other person's app confirms
+/// it, so a change made while they are away reaches them when they are back. Apps from before
+/// editing keep the text they have.
+#[tauri::command]
+pub fn local_chat_edit(state: tauri::State<'_, LocalChat>, id: String, body: String) -> Result<LocalMessage, String> {
+    let session = running(&state)?;
+    let body = body.trim().to_string();
+    if body.chars().count() > MAX_BODY {
+        return Err(format!("Messages can be up to {MAX_BODY} characters."));
+    }
+    let item = session.message(&id).ok_or("That message is no longer on this computer.")?;
+    if item.sender_id != session.user_id {
+        return Err("You can only edit your own messages.".into());
+    }
+    if body.is_empty() && item.file.is_none() {
+        return Err("Write a message first.".into());
+    }
+    if body == item.body {
+        return Ok(item);
+    }
+    // Later than any earlier edit, even if this computer's clock went back in between.
+    let edited_at = now_ms().max(item.edited_at.unwrap_or(0) + 1);
+    session
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE messages SET body = ?1, edited_at = ?2, delivered = CASE WHEN chat = ?3 THEN delivered ELSE 0 END
+             WHERE id = ?4",
+            params![body, edited_at, ROOM, id],
+        )
+        .map_err(message)?;
+    let item = session.message(&id).ok_or("That message is no longer on this computer.")?;
+    let to = (item.chat != ROOM).then(|| item.chat.clone());
+    session.send_to(to.as_deref(), |peer| Some(message_frame(&item, &peer.features)));
+    Ok(item)
 }
 
 /// The bytes of a message's file, for showing an image.
@@ -1564,6 +1692,37 @@ pub async fn local_chat_save_file(
 pub fn local_chat_delete_messages(state: tauri::State<'_, LocalChat>, ids: Vec<String>) -> Result<(), String> {
     let session = running(&state)?;
     session.remove(&ids)
+}
+
+/// Deletes this person's own messages from this computer and from everyone else's. Apps that are
+/// away are told when they are back: in a direct chat whenever that is, in the room within the time
+/// room history is shared. Apps from before this keep their copies.
+#[tauri::command]
+pub fn local_chat_delete_for_everyone(state: tauri::State<'_, LocalChat>, ids: Vec<String>) -> Result<(), String> {
+    let session = running(&state)?;
+    let items: Vec<LocalMessage> = ids.iter().filter_map(|id| session.message(id)).collect();
+    if items.iter().any(|item| item.sender_id != session.user_id) {
+        return Err("You can only delete your own messages for everyone.".into());
+    }
+    {
+        let db = session.db.lock().unwrap();
+        let at = now_ms();
+        for item in &items {
+            db.execute(
+                "INSERT OR REPLACE INTO retracted (id, chat, at) VALUES (?1, ?2, ?3)",
+                params![item.id, item.chat, at],
+            )
+            .map_err(message)?;
+        }
+    }
+    session.remove(&ids)?;
+    for item in &items {
+        let to = (item.chat != ROOM).then(|| item.chat.clone());
+        session.send_to(to.as_deref(), |peer| {
+            peer.features.contains(FEATURE_DELETE).then(|| Frame::Delete { id: item.id.clone(), to: to.clone() })
+        });
+    }
+    Ok(())
 }
 
 /// Deletes every message of one chat from this computer only. Others keep their copies.
@@ -1754,6 +1913,7 @@ mod tests {
             sent_at: 1,
             reply_to: None,
             file: None,
+            edited_at: None,
         };
         write_packet(&mut writer, &seal(&noise, &hello).unwrap()).await.unwrap();
         let reply = open(&noise, &read_packet(&mut reader).await.unwrap()).unwrap();
@@ -1829,6 +1989,7 @@ mod tests {
             reply_to_id: None,
             file_path: None,
             pinned: false,
+            edited_at: None,
         };
         // An app without files gets a note in the body instead of the file.
         assert!(matches!(message_frame(&item, &plain), Frame::Message { file: None, body, .. } if body.contains("a.png")));

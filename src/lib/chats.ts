@@ -36,6 +36,10 @@ export type ChatMessage = {
   body: string
   createdAt: string
   deleted: boolean
+  // When its sender last changed its text, if ever.
+  editedAt?: string | null
+  // The message this one answers, if any.
+  replyToId?: string | null
   attachmentUrl: string | null
   attachmentName: string | null
   attachmentMime: string | null
@@ -65,6 +69,8 @@ type MessageRow = {
   body: string | null
   created_at: string
   deleted_at?: string | null
+  edited_at?: string | null
+  reply_to?: string | null
   attachment_path?: string | null
   attachment_name?: string | null
   attachment_mime?: string | null
@@ -309,6 +315,8 @@ function rowToMessage(
     body: deleted ? "" : (row.body ?? ""),
     createdAt: row.created_at,
     deleted,
+    editedAt: deleted ? null : (row.edited_at ?? null),
+    replyToId: deleted ? null : (row.reply_to ?? null),
     attachmentUrl: path ? urls.get(path) ?? null : null,
     attachmentName: deleted ? null : (row.attachment_name ?? null),
     attachmentMime: deleted ? null : (row.attachment_mime ?? null),
@@ -604,11 +612,17 @@ export async function loadMessages(session: Session, conversationId: string): Pr
   }
 
   const hidden = (await loadHidden(session.userId)).get(conversationId) ?? NOTHING_HIDDEN
-  const first = await shownMessages(`${MESSAGE_COLUMNS}, deleted_at`, conversationId, hidden).limit(500)
-  const result =
-    first.error && /deleted_at/.test(first.error.message)
-      ? await shownMessages(MESSAGE_COLUMNS, conversationId, hidden).limit(500)
-      : first
+  // Newest columns first, for a database where the replies, edit message or safety SQL script has not been run.
+  let result = await shownMessages(`${MESSAGE_COLUMNS}, deleted_at, edited_at, reply_to`, conversationId, hidden).limit(500)
+  if (result.error && /reply_to/.test(result.error.message)) {
+    result = await shownMessages(`${MESSAGE_COLUMNS}, deleted_at, edited_at`, conversationId, hidden).limit(500)
+  }
+  if (result.error && /edited_at/.test(result.error.message)) {
+    result = await shownMessages(`${MESSAGE_COLUMNS}, deleted_at`, conversationId, hidden).limit(500)
+  }
+  if (result.error && /deleted_at/.test(result.error.message)) {
+    result = await shownMessages(MESSAGE_COLUMNS, conversationId, hidden).limit(500)
+  }
   if (result.error) throw result.error
   const rows = (result.data ?? []) as unknown as MessageRow[]
   const senders = await sendersFor([...new Set(rows.map((row) => row.sender_id))])
@@ -657,6 +671,8 @@ export async function sendMessage(
   conversationId: string,
   body: string,
   file?: File | null,
+  // The id of the message this one answers.
+  replyTo?: string | null,
 ): Promise<ChatMessage> {
   const text = body.trim()
   if (!text && !file) throw new Error("Write a message or choose a file.")
@@ -675,6 +691,7 @@ export async function sendMessage(
       body: text,
       createdAt: new Date().toISOString(),
       deleted: false,
+      replyToId: replyTo ?? null,
       attachmentUrl: file ? await previewFileUrl(file) : null,
       attachmentName: file?.name ?? null,
       attachmentMime: file?.type || null,
@@ -707,6 +724,8 @@ export async function sendMessage(
       attachment_name: file?.name ?? null,
       attachment_mime: file?.type || null,
       attachment_size: file?.size ?? null,
+      // Left out unless replying, so sending still works before the replies SQL script is run.
+      ...(replyTo ? { reply_to: replyTo } : {}),
     })
     .select(
       "id, conversation_id, sender_id, body, created_at, attachment_path, attachment_name, attachment_mime, attachment_size",
@@ -716,13 +735,48 @@ export async function sendMessage(
     if (attachmentPath) {
       await supabase.storage.from("chat-files").remove([attachmentPath])
     }
+    if (replyTo && /reply_to/.test(error.message)) {
+      throw new Error("Run the message replies SQL script (20261118130000_message_replies.sql), then try again.")
+    }
     throw new Error(error.message)
   }
 
   const row = data as MessageRow
   const senders = await sendersFor([row.sender_id])
   const urls = await signedUrls(row.attachment_path ? [row.attachment_path] : [])
-  return rowToMessage(row, senders, urls)
+  return { ...rowToMessage(row, senders, urls), replyToId: replyTo ?? null }
+}
+
+/**
+ * Changes the text of one of this person's own messages, for everyone in the chat. Returns when it
+ * was edited, or null if the text was already the same.
+ */
+export async function editOwnMessage(session: Session, messageId: string, body: string): Promise<string | null> {
+  const text = body.trim()
+  if (text.length > 4000) throw new Error("Messages are limited to 4000 characters.")
+
+  if (!supabase) {
+    const db = readDb()
+    const message = db.messages.find((item) => item.id === messageId)
+    if (!message || message.deleted) throw new Error("That message is not available.")
+    if (message.senderId !== session.userId) throw new Error("You can only edit your own messages.")
+    if (!text && !message.attachmentName) throw new Error("Write a message first.")
+    if (text === message.body) return message.editedAt ?? null
+    message.body = text
+    message.editedAt = new Date().toISOString()
+    writeDb(db)
+    publishChatEvent({ type: "update", message })
+    return message.editedAt
+  }
+
+  const { data, error } = await supabase.rpc("edit_own_message", { message_id: messageId, new_body: text })
+  if (error) {
+    if (/does not exist|schema cache|Could not find the function|404/i.test(error.message)) {
+      throw new Error("Run the edit message SQL script (20261118120000_edit_message.sql), then try again.")
+    }
+    throw new Error(error.message)
+  }
+  return (data as string | null) ?? null
 }
 
 async function messageFromRow(row: MessageRow) {

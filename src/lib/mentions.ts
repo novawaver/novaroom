@@ -12,6 +12,22 @@ function patternFor(names: string[]) {
   return new RegExp(`(^|[^\\p{L}\\p{N}_@])@(${usable.map(escapeForPattern).join("|")})(?![\\p{L}\\p{N}_])`, "giu")
 }
 
+/**
+ * "@everyone" and "@all" mention everybody in a group chat or in Local chat's Broadcast. Like a
+ * mention by name, they show a notification even to people who turned the chat's notifications off.
+ */
+export const EVERYONE_NAMES = ["everyone", "all"]
+
+/** Whether the text mentions everyone. Only means something in a chat with more than two people. */
+export function mentionsEveryone(text: string) {
+  return patternFor(EVERYONE_NAMES)?.test(text) ?? false
+}
+
+/** Whether this mention, as written in a message ("@All"), is one of everyone. */
+export function isEveryoneMention(mention: string) {
+  return EVERYONE_NAMES.includes(mention.slice(1).toLowerCase())
+}
+
 /** Whether the text mentions this name. */
 export function mentionsName(text: string, name: string) {
   return patternFor([name])?.test(text) ?? false

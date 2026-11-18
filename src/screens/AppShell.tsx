@@ -6,9 +6,11 @@ import {
   useRef,
   useState,
   type ComponentType,
+  type CSSProperties,
   type FormEvent,
   type ReactNode,
 } from "react"
+import { LOCAL_ROOM } from "../lib/localChat"
 import { useAuth } from "../auth"
 import { accentFor } from "../lib/accent"
 import { notifyIncoming, onNotificationClick, openExternal, setUnreadBadge, windowIsActive } from "../lib/desktop"
@@ -41,6 +43,7 @@ import {
   readChatPermissions,
   type ChatPermissions,
   subscribeToMessages,
+  editOwnMessage,
   isMessageRead,
   loadReadStates,
   markConversationRead,
@@ -66,10 +69,21 @@ import { joinRoom, leaveRoom, listRooms, type RoomInfo } from "../lib/rooms"
 import { RoomPage } from "./RoomPage"
 import { groupTables } from "../lib/vault"
 import { Vault, VaultFileCard, VaultLeaveDialog, useVault, type VaultState } from "./Vault"
-import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
+import {
+  CopiedIcon,
+  CopyIcon,
+  EditIcon,
+  LocalChatRail,
+  LocalChatThread,
+  PinIcon,
+  RemoveIcon,
+  ReplyIcon,
+  type LocalChatState,
+} from "./LocalChat"
+import { loadPins, savePins } from "../lib/chatPins"
 import { CAPTURE_TABS, Capture, formatElapsed, type CaptureState, type CaptureTab } from "./Capture"
 import { chatIsQuiet, setChatQuiet, useQuietChats } from "../lib/chatAlerts"
-import { mentionsName } from "../lib/mentions"
+import { EVERYONE_NAMES, mentionsEveryone, mentionsName } from "../lib/mentions"
 import { useMentions } from "./Mentions"
 import { ChatText, useTextStyling } from "./ChatText"
 import { plainChatText } from "../lib/chatText"
@@ -86,22 +100,26 @@ import {
   type ConfirmAction,
 } from "./ChatTools"
 
+// One person with a plus: start a direct chat.
 function NewChatIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.2-4.2A8 8 0 1 1 21 12z" />
-      <path d="M12 9v6M9 12h6" />
+      <circle cx="10" cy="8" r="3.5" />
+      <path d="M3.5 20v-1A5.5 5.5 0 0 1 9 13.5h2a5.5 5.5 0 0 1 3 .9" />
+      <path d="M18 14.5v6M15 17.5h6" />
     </svg>
   )
 }
 
+// Two people with a plus: start a group.
 function NewGroupIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="9" cy="8" r="3" />
-      <path d="M3.5 19.5v-1.2A4.3 4.3 0 0 1 7.8 14h2.4a4.3 4.3 0 0 1 4.3 4.3v1.2" />
-      <circle cx="17" cy="8.5" r="2.4" />
-      <path d="M16.2 14.2h.7A3.6 3.6 0 0 1 20.5 17.8V19.5" />
+      <circle cx="8.5" cy="8.5" r="3" />
+      <path d="M2.5 20v-.9a4.6 4.6 0 0 1 4.6-4.6h2.8a4.6 4.6 0 0 1 2.6.8" />
+      <circle cx="15.5" cy="6.5" r="2.4" />
+      <path d="M14.8 11.6h1.4a3.6 3.6 0 0 1 2.3.8" />
+      <path d="M18.5 15v6M15.5 18h6" />
     </svg>
   )
 }
@@ -186,6 +204,14 @@ function VaultTableIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
       <path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10" />
+    </svg>
+  )
+}
+
+function ImportIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4v10M8 10.5l4 4 4-4M5 19h14" />
     </svg>
   )
 }
@@ -307,68 +333,20 @@ function SignOutIcon() {
   )
 }
 
-type MessageAction = { label: string; danger?: boolean; onSelect: () => void }
-
-function MessageMenu({ side, actions }: { side: "mine" | "theirs"; actions: MessageAction[] }) {
-  const [open, setOpen] = useState(false)
-  const [upward, setUpward] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    function onPointer(event: PointerEvent) {
-      if (!ref.current?.contains(event.target as Node)) setOpen(false)
-    }
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false)
-    }
-    document.addEventListener("pointerdown", onPointer)
-    document.addEventListener("keydown", onKey)
-    return () => {
-      document.removeEventListener("pointerdown", onPointer)
-      document.removeEventListener("keydown", onKey)
-    }
-  }, [open])
-
+function ReportIcon() {
   return (
-    <div className={`message-menu ${side}${open ? " open" : ""}`} ref={ref}>
-      <button
-        type="button"
-        className="message-menu-button"
-        aria-label="Message options"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={(event) => {
-          // Open upward when the message sits near the bottom of the window.
-          setUpward(window.innerHeight - event.currentTarget.getBoundingClientRect().bottom < 160)
-          setOpen((current) => !current)
-        }}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="5" cy="12" r="1.6" />
-          <circle cx="12" cy="12" r="1.6" />
-          <circle cx="19" cy="12" r="1.6" />
-        </svg>
-      </button>
-      {open && (
-        <div className={upward ? "bar-menu message-menu-list upward" : "bar-menu message-menu-list"} role="menu">
-          {actions.map(({ label, danger, onSelect }) => (
-            <button
-              key={label}
-              type="button"
-              role="menuitem"
-              className={danger ? "danger" : undefined}
-              onClick={() => {
-                setOpen(false)
-                onSelect()
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M5.5 20.5v-16M5.5 5h11l-2 4 2 4h-11" />
+    </svg>
+  )
+}
+
+function BlockIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M6.5 6.5l11 11" />
+    </svg>
   )
 }
 
@@ -692,6 +670,21 @@ export function VaultRail({ vault }: { vault: VaultState }) {
               </span>
             </button>
           )}
+          {vault.data && (
+            <button
+              type="button"
+              className="side-menu-item"
+              title="Add a table for each sheet of an Excel file"
+              onClick={vault.importExcel}
+            >
+              <span className="side-menu-icon">
+                <ImportIcon />
+              </span>
+              <span className="side-menu-text">
+                <strong>Import from Excel</strong>
+              </span>
+            </button>
+          )}
         </>
       }
     />
@@ -699,6 +692,53 @@ export function VaultRail({ vault }: { vault: VaultState }) {
 }
 
 type NavItem = "chats" | "rooms" | "people" | "leaddesk" | "timer" | "vault" | "capture" | "settings"
+
+// Pages that can be pinned. A pinned page stays open in a panel on the right of every other page,
+// so it can be used without leaving the page that is open. One page is pinned at a time, and the
+// choice and the panel's width are remembered on this computer.
+type PinnedPage = "chats" | "local" | "people" | "leaddesk" | "timer" | "vault" | "capture"
+
+const PINNED_LABELS: Record<PinnedPage, string> = {
+  chats: "Chats",
+  local: "Local chat",
+  people: "People",
+  leaddesk: "LeadDesk",
+  timer: "Tracker",
+  vault: "Vault",
+  capture: "Capture",
+}
+
+const PINNED_PAGE_KEY = "novaroom.pinned-page"
+const PINNED_WIDTH_KEY = "novaroom.pinned-width"
+const PINNED_MIN_WIDTH = 320
+
+const isPinnable = (page: string): page is PinnedPage => page in PINNED_LABELS
+
+function readPinnedPage(): PinnedPage | null {
+  try {
+    const saved = localStorage.getItem(PINNED_PAGE_KEY)
+    return saved && isPinnable(saved) ? saved : null
+  } catch {
+    return null
+  }
+}
+
+function readPinnedWidth() {
+  try {
+    const saved = Number(localStorage.getItem(PINNED_WIDTH_KEY))
+    return saved >= PINNED_MIN_WIDTH ? saved : 400
+  } catch {
+    return 400
+  }
+}
+
+function OpenAsPageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M14 5h5v5M19 5l-6.5 6.5M10 19H5v-5M5 19l6.5-6.5" />
+    </svg>
+  )
+}
 
 const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
   { id: "chats", label: "Chats", icon: ChatsNavIcon },
@@ -743,33 +783,34 @@ function ChatModeSwitch({
   unread: Record<ChatMode, number>
   onChange: (mode: ChatMode) => void
 }) {
-  const modes: Array<{ id: ChatMode; label: string; hint: string; icon: ComponentType }> = [
-    { id: "online", label: "Online chats", hint: "Chats over the internet", icon: OnlineChatsIcon },
-    {
-      id: "local",
-      label: "Local chats",
-      hint: "Chats with people on this network, without internet",
-      icon: LocalChatsIcon,
-    },
-  ]
+  const local = mode === "local"
+  const side = (id: ChatMode, Icon: ComponentType) => (
+    <span className={mode === id ? "chat-mode-side on" : "chat-mode-side"}>
+      <Icon />
+      {/* Unread messages in the kind of chat that is not showing. */}
+      {mode !== id && unread[id] > 0 && <span className="chat-mode-dot" />}
+    </span>
+  )
+  const waiting = unread[local ? "online" : "local"]
+  // One toggle, icons only: the globe is online chats, the network is Local chat. Clicking it flips it.
   return (
-    <div className="chat-mode" role="tablist" aria-label="Kind of chat">
-      {modes.map(({ id, label, hint, icon: Icon }) => (
-        <button
-          key={id}
-          type="button"
-          role="tab"
-          className="chat-mode-tab"
-          aria-selected={mode === id}
-          title={hint}
-          onClick={() => onChange(id)}
-        >
-          <Icon />
-          {label}
-          {unread[id] > 0 && <span className="chat-mode-count">{unread[id] > 9 ? "9+" : unread[id]}</span>}
-        </button>
-      ))}
-    </div>
+    <button
+      type="button"
+      className="chat-mode"
+      role="switch"
+      aria-checked={local}
+      aria-label="Local chats"
+      title={`${
+        local
+          ? "Showing Local chats (people on this network, without internet). Click for Online chats"
+          : "Showing Online chats (over the internet). Click for Local chats"
+      }${waiting > 0 ? ` - ${waiting > 9 ? "9+" : waiting} unread there` : ""}`}
+      onClick={() => onChange(local ? "online" : "local")}
+    >
+      <span className="chat-mode-knob" aria-hidden="true" />
+      {side("online", OnlineChatsIcon)}
+      {side("local", LocalChatsIcon)}
+    </button>
   )
 }
 
@@ -916,10 +957,19 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     }
   }, [session?.userId])
   const hasLeadDesk = isLeader || isAdmin
-  const desk = useLeadDesk(view === "leaddesk" && hasLeadDesk)
-  const vault = useVault(session?.userId ?? null, view === "vault")
-  // Leaving the Vault with unsaved changes first asks whether to save or discard them.
-  const leaveTo = (go: () => void) => (view === "vault" ? vault.guard(go) : go())
+  const [pinnedPage, setPinnedPage] = useState<PinnedPage | null>(readPinnedPage)
+  const [pinnedWidth, setPinnedWidth] = useState(readPinnedWidth)
+  // The pinned page while another page is open: shown in the panel on the right. On its own page
+  // there is no panel, since the page is already on screen.
+  const sidePage =
+    pinnedPage && pinnedPage !== view && (pinnedPage !== "leaddesk" || hasLeadDesk) ? pinnedPage : null
+  const sidePageRef = useRef(sidePage)
+  sidePageRef.current = sidePage
+  const desk = useLeadDesk((view === "leaddesk" || sidePage === "leaddesk") && hasLeadDesk)
+  const vault = useVault(session?.userId ?? null, view === "vault" || sidePage === "vault")
+  // Leaving the Vault with unsaved changes first asks whether to save or discard them. A pinned
+  // Vault stays open in the panel, so there is nothing to ask.
+  const leaveTo = (go: () => void) => (view === "vault" && pinnedPage !== "vault" ? vault.guard(go) : go())
   // Records awake and idle time in the background, whichever page is open.
   const timer = useTimer(session?.userId ?? null, isLeader)
   // Online, idle or offline for everyone, shown as a dot on profile pictures.
@@ -942,9 +992,9 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       // Not remembered, but still used for this session.
     }
   }
-  const timerHistory = useTimerHistory(session?.userId ?? null, view === "timer", timer.version, timer.live, timerZone)
+  const timerHistory = useTimerHistory(session?.userId ?? null, view === "timer" || sidePage === "timer", timer.version, timer.live, timerZone)
   const alerts = useEventAlerts(session?.userId ?? null, hasLeadDesk, () => {
-    if (view === "leaddesk") void desk.reload()
+    if (view === "leaddesk" || sidePage === "leaddesk") void desk.reload()
   })
   const refreshAlertEvents = alerts.refreshEvents
   const { unread: unreadDeskEvents, markRead: markDeskEventsRead } = alerts
@@ -986,6 +1036,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   const [peopleError, setPeopleError] = useState("")
   const [section, setSection] = useState<"chats" | "rooms">("chats")
   const [chats, setChats] = useState<ChatSummary[]>([])
+  const chatsRef = useRef(chats)
+  chatsRef.current = chats
   // What an admin has allowed this person to start. Unknown (null) until loaded.
   const [chatPermissions, setChatPermissions] = useState<ChatPermissions | null>(null)
   // Leadership members and admins can always start chats and groups; everyone else needs permission.
@@ -1008,6 +1060,26 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   const [groupEmails, setGroupEmails] = useState("")
   const [composer, setComposer] = useState<"direct" | "group" | null>(null)
   const [body, setBody] = useState("")
+  // One of this person's messages whose text is in the message box to be changed.
+  const [editing, setEditing] = useState<ChatMessage | null>(null)
+  const [savingEdit, setSavingEdit] = useState(false)
+  // The message the next one answers.
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null)
+  // Messages this person pinned in the open chat (on this computer), and which one the bar shows.
+  const [pinnedIds, setPinnedIds] = useState<string[]>([])
+  const [pinIndex, setPinIndex] = useState(0)
+  // The message whose text was just copied, so its button can say so for a moment.
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!copiedId) return
+    const timer = window.setTimeout(() => setCopiedId(null), 1500)
+    return () => window.clearTimeout(timer)
+  }, [copiedId])
+  useEffect(() => {
+    setReplyTo(null)
+    setPinIndex(0)
+    setPinnedIds(session && selectedId ? loadPins(session.userId, selectedId) : [])
+  }, [selectedId, session?.userId])
   const [sendingIds, setSendingIds] = useState<ReadonlySet<string>>(() => new Set())
   const bodyRef = useRef<HTMLTextAreaElement>(null)
   const [search, setSearch] = useState("")
@@ -1246,7 +1318,9 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
           void windowIsActive().then((active) => {
             // Seen only if the window is in front and this chat is open on the Chats page.
             const viewing =
-              active && viewRef.current === "chats" && message.conversationId === selectedRef.current
+              active &&
+              (viewRef.current === "chats" || sidePageRef.current === "chats") &&
+              message.conversationId === selectedRef.current
             if (viewing) return
             setUnread((current) => {
               const next = {
@@ -1256,10 +1330,17 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
               writeUnread(session.userId, next)
               return next
             })
-            // With the chat's notifications off, only a message that mentions this person shows one.
-            const mentioned = mentionsName(message.body, myNameRef.current)
-            if (!mentioned && chatIsQuiet(session.userId, message.conversationId)) return
-            const title = mentioned ? `${message.senderName || "Someone"} mentioned you` : message.senderName || "Novaroom"
+            // With the chat's notifications off, only a message that mentions this person, or
+            // everyone in a group chat, shows one.
+            const byName = mentionsName(message.body, myNameRef.current)
+            const direct = chatsRef.current.find((chat) => chat.id === message.conversationId)?.kind === "direct"
+            const everyone = !direct && mentionsEveryone(message.body)
+            if (!byName && !everyone && chatIsQuiet(session.userId, message.conversationId)) return
+            const title = byName
+              ? `${message.senderName || "Someone"} mentioned you`
+              : everyone
+                ? `${message.senderName || "Someone"} mentioned everyone`
+                : message.senderName || "Novaroom"
             void notifyIncoming(title, messageLabel(message), `chat:${message.conversationId}:${message.id}`, {
               name: message.senderName || "Someone",
               avatarUrl: message.senderAvatarUrl ?? null,
@@ -1388,8 +1469,12 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     }
   }, [selectedId])
   const myName = profile?.displayName ?? ""
+  // In a chat with more than two people, "@everyone" and "@all" mention them all at once.
+  const shownChat = chats.find((chat) => chat.id === selectedId)
+  const everyoneNames = shownChat && shownChat.kind !== "direct" ? EVERYONE_NAMES : []
+  const markedNames = [...memberNames, ...everyoneNames]
   const mentions = useMentions(
-    memberNames.filter((name) => name !== myName),
+    [...memberNames.filter((name) => name !== myName), ...everyoneNames],
     body,
     updateBody,
     bodyRef,
@@ -1442,14 +1527,14 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   // While a chat is on screen in the focused window, tell the others how far this person has read.
   const newestSeenAt = [...messages].reverse().find((message) => !sendingIds.has(message.id))?.createdAt
   useEffect(() => {
-    if (view !== "chats" || !selectedId || !newestSeenAt) return
+    if ((view !== "chats" && sidePage !== "chats") || !selectedId || !newestSeenAt) return
     const mark = () => {
       if (document.hasFocus()) void markConversationRead(selectedId, newestSeenAt).catch(() => {})
     }
     mark()
     window.addEventListener("focus", mark)
     return () => window.removeEventListener("focus", mark)
-  }, [view, selectedId, newestSeenAt])
+  }, [view, sidePage, selectedId, newestSeenAt])
 
   if (!session || !profile) return null
 
@@ -1482,6 +1567,11 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       })
     : readable
   const closed = lock !== "open"
+  // Pinned messages, newest first. Clicking the bar jumps to the one shown and moves on to the next older.
+  const pinned = readable.filter((message) => !message.deleted && pinnedIds.includes(message.id)).reverse()
+  const pinAt = Math.min(pinIndex, pinned.length - 1)
+  const shownPin = pinned[pinAt]
+  const nameOf = (message: ChatMessage) => (message.senderId === session.userId ? "You" : message.senderName || "Someone")
   const reporting = visible.find((message) => message.id === reportId) ?? null
   // A short line under the chat's name: whether the other person is around, or who is in it.
   const threadStatus = !selected
@@ -1531,19 +1621,12 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     })
   }
 
-  async function onDelete(message: ChatMessage) {
-    if (!window.confirm("Delete this message? People in the chat will see that it was removed.")) return
-    setSendError("")
-    try {
-      await deleteForEveryone(message)
-    } catch (caught) {
-      setSendError(caught instanceof Error ? caught.message : "Could not delete that message.")
-    }
+  function onDeleteChosen() {
+    askDelete(visible.filter((message) => selection.chosen.has(message.id)))
   }
 
-  // Asks how to delete the chosen messages. Only a person's own messages can go for everyone.
-  function onDeleteChosen() {
-    const chosen = visible.filter((message) => selection.chosen.has(message.id))
+  // Asks how to delete these messages. Only a person's own messages can go for everyone.
+  function askDelete(chosen: ChatMessage[]) {
     if (!selectedId || chosen.length === 0) return
     const chatId = selectedId
     const ids = chosen.map((message) => message.id)
@@ -1693,10 +1776,16 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     event.preventDefault()
     if (!selectedId || lock !== "open") return
     const text = body
+    if (editing) {
+      void saveEdit(editing, text.trim())
+      return
+    }
     if (!text.trim()) return
     markChatRead(selectedId)
     updateBody("")
     setSendError("")
+    const replying = replyTo
+    setReplyTo(null)
 
     // Show the message right away, then swap in the saved copy once the server confirms it.
     const localId = `local-${crypto.randomUUID()}`
@@ -1708,6 +1797,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       body: text.trim(),
       createdAt: new Date().toISOString(),
       deleted: false,
+      replyToId: replying?.id ?? null,
       attachmentUrl: null,
       attachmentName: null,
       attachmentMime: null,
@@ -1717,7 +1807,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     setSendingIds((current) => new Set(current).add(localId))
 
     try {
-      const message = await sendMessage(session!, selectedId, text)
+      const message = await sendMessage(session!, selectedId, text, null, replying?.id ?? null)
       setMessages((current) => {
         // Realtime may have delivered the saved message before this resolved.
         const withoutDraft = current.filter((item) => item.id !== localId)
@@ -1737,7 +1827,10 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       setMessages((current) => current.filter((item) => item.id !== localId))
       // Puts the text back as the chat's draft, even if the person has moved to another chat.
       saveDraft(session!.userId, draft.conversationId, text)
-      if (selectedIdRef.current === draft.conversationId) setBody(text)
+      if (selectedIdRef.current === draft.conversationId) {
+        setBody(text)
+        setReplyTo(replying)
+      }
       setSendError(caught instanceof Error ? caught.message : "Could not send that message.")
     } finally {
       setSendingIds((current) => {
@@ -1751,10 +1844,85 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   // Keeps each chat's unsent text, so leaving the chat or the page does not lose it.
   function updateBody(text: string) {
     setBody(text)
-    if (session && selectedId) saveDraft(session.userId, selectedId, text)
+    // The text of a message being edited is not the chat's draft.
+    if (session && selectedId && !editing) saveDraft(session.userId, selectedId, text)
+  }
+
+  function togglePin(id: string) {
+    if (!selectedId) return
+    const next = pinnedIds.includes(id) ? pinnedIds.filter((item) => item !== id) : [...pinnedIds, id]
+    setPinnedIds(next)
+    savePins(session!.userId, selectedId, next)
+  }
+
+  function onCopy(message: ChatMessage) {
+    navigator.clipboard.writeText(message.body).then(
+      () => setCopiedId(message.id),
+      () => setSendError("Could not copy that message."),
+    )
+  }
+
+  // Scrolls to a message of the open chat and marks it for a moment.
+  function showMessage(id: string) {
+    const target = logRef.current?.querySelector(`[data-message-id="${id}"]`)
+    if (!target) return
+    target.scrollIntoView({ block: "center", behavior: "smooth" })
+    target.classList.add("flash")
+    window.setTimeout(() => target.classList.remove("flash"), 1200)
+  }
+
+  function startReply(message: ChatMessage) {
+    if (editing) stopEditing()
+    setReplyTo(message)
+    bodyRef.current?.focus()
+  }
+
+  function startEditing(message: ChatMessage) {
+    typing.onType(false)
+    setReplyTo(null)
+    setEditing(message)
+    setSendError("")
+    setBody(message.body)
+    bodyRef.current?.focus()
+  }
+
+  // Back to what was being written before.
+  function stopEditing() {
+    const chatId = selectedIdRef.current
+    setEditing(null)
+    setBody(session && chatId ? loadDraft(session.userId, chatId) : "")
+  }
+
+  async function saveEdit(message: ChatMessage, text: string) {
+    // A message with a file can have its text taken away; one without can't be left empty.
+    if (savingEdit || (!text && !message.attachmentName)) return
+    if (text === message.body) {
+      stopEditing()
+      return
+    }
+    setSendError("")
+    setSavingEdit(true)
+    try {
+      const editedAt = await editOwnMessage(session!, message.id, text)
+      setMessages((current) => current.map((item) => (item.id === message.id ? { ...item, body: text, editedAt } : item)))
+      setChats((current) =>
+        current.map((chat) =>
+          chat.id === message.conversationId && chat.lastAt === message.createdAt
+            ? { ...chat, lastBody: messageLabel({ ...message, body: text }) }
+            : chat,
+        ),
+      )
+      // Unless the person has moved to another chat meanwhile, which already put its draft back.
+      if (selectedIdRef.current === message.conversationId) stopEditing()
+    } catch (caught) {
+      setSendError(caught instanceof Error ? caught.message : "Could not change that message.")
+    } finally {
+      setSavingEdit(false)
+    }
   }
 
   useEffect(() => {
+    setEditing(null)
     setBody(session && selectedId ? loadDraft(session.userId, selectedId) : "")
   }, [selectedId, session?.userId])
 
@@ -1949,6 +2117,36 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       </header>
       {selected ? (
         <>
+          {shownPin && (
+            <div className="pinned-bar">
+              <button
+                type="button"
+                className="pinned-bar-main"
+                title="Show this message"
+                onClick={() => {
+                  showMessage(shownPin.id)
+                  setPinIndex((pinAt + 1) % pinned.length)
+                }}
+              >
+                <PinIcon />
+                <span className="pinned-bar-text">
+                  <strong>{pinned.length === 1 ? "Pinned message" : `Pinned message ${pinAt + 1} of ${pinned.length}`}</strong>
+                  <span>
+                    {nameOf(shownPin)}: {messageLabel(shownPin)}
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="composer-extra-close"
+                aria-label="Unpin this message"
+                title="Unpin"
+                onClick={() => togglePin(shownPin.id)}
+              >
+                ×
+              </button>
+            </div>
+          )}
           <div
             className={selection.selecting ? "message-log selecting" : "message-log"}
             ref={logRef}
@@ -1989,6 +2187,9 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 // Messages still being sent can't be chosen yet.
                 const choosable = !sendingIds.has(message.id)
                 const chosen = selection.selecting && selection.chosen.has(message.id)
+                const isPinned = pinnedIds.includes(message.id)
+                // The answered message, when it is among the ones loaded and this person can read it.
+                const reply = message.replyToId ? readable.find((item) => item.id === message.replyToId) : undefined
                 return (
                   <Fragment key={message.id}>
                     <div
@@ -1998,7 +2199,15 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                     >
                       {selection.selecting && choosable && <SelectCheck checked={chosen} />}
                       {!mine && avatar}
-                      <article className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine ? " no-meta" : ""}`}>
+                      <article
+                        className={`bubble ${mine ? "mine" : "theirs"}${sameMinute && !mine && !message.editedAt && !isPinned ? " no-meta" : ""}${isPinned ? " pinned" : ""}`}
+                      >
+                        {reply && (
+                          <button type="button" className="bubble-quote" onClick={() => showMessage(reply.id)}>
+                            <strong>{nameOf(reply)}</strong>
+                            <span>{messageLabel(reply)}</span>
+                          </button>
+                        )}
                         {message.attachmentUrl && isImage(message.attachmentMime) && (
                           <img
                             className="bubble-image"
@@ -2020,11 +2229,21 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                         )}
                         {message.body && (
                           <p className={isEmojiOnly(message.body) ? "emoji-only" : undefined}>
-                            <ChatText text={message.body} names={memberNames} me={myName} />
+                            <ChatText text={message.body} names={markedNames} me={myName} />
                           </p>
                         )}
                         {message.deleted && <p className="deleted-note">Message deleted</p>}
                         <span className="bubble-meta">
+                          {isPinned && (
+                            <span className="bubble-pin" role="img" aria-label="Pinned" title="Pinned on this computer">
+                              <PinIcon />
+                            </span>
+                          )}
+                          {message.editedAt && !message.deleted && (
+                            <span className="bubble-edited" title={`Edited ${formatTime(message.editedAt)}`}>
+                              edited
+                            </span>
+                          )}
                           {!sameMinute && <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>}
                           {message.senderId === session.userId &&
                             (sendingIds.has(message.id) ? (
@@ -2042,29 +2261,85 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                               </svg>
                             ))}
                         </span>
-                        {!selection.selecting && !message.deleted && !sendingIds.has(message.id) && (
-                          <MessageMenu
-                            side={message.senderId === session.userId ? "mine" : "theirs"}
-                            actions={
-                              message.senderId === session.userId
-                                ? [{ label: "Delete", danger: true, onSelect: () => void onDelete(message) }]
-                                : [
-                                    {
-                                      label: "Report",
-                                      danger: true,
-                                      onSelect: () => {
-                                        setReportedId(null)
-                                        setReportId(message.id)
-                                        setReportReason("harassment")
-                                        setReportNote("")
-                                      },
-                                    },
-                                    ...(selected.kind === "group" && !blockedIds.includes(message.senderId)
-                                      ? [{ label: "Block", onSelect: () => void onBlock(message.senderId, true) }]
-                                      : []),
-                                  ]
-                            }
-                          />
+                        {/* Shown along the bottom of the bubble on hover, as in Local chat. */}
+                        {!selection.selecting && !sendingIds.has(message.id) && (
+                          <div className={`bubble-actions ${mine ? "mine" : "theirs"}`} role="group" aria-label="Message actions">
+                            {!message.deleted && !closed && (
+                              <button type="button" className="bubble-action" aria-label="Reply" title="Reply" onClick={() => startReply(message)}>
+                                <ReplyIcon />
+                              </button>
+                            )}
+                            {mine && !message.deleted && !closed && (
+                              <button
+                                type="button"
+                                className={editing?.id === message.id ? "bubble-action on" : "bubble-action"}
+                                aria-label="Edit"
+                                title="Edit"
+                                onClick={() => startEditing(message)}
+                              >
+                                <EditIcon />
+                              </button>
+                            )}
+                            {!message.deleted && (
+                              <button
+                                type="button"
+                                className={isPinned ? "bubble-action on" : "bubble-action"}
+                                aria-label={isPinned ? "Unpin" : "Pin"}
+                                aria-pressed={isPinned}
+                                title={isPinned ? "Unpin" : "Pin on this computer"}
+                                onClick={() => togglePin(message.id)}
+                              >
+                                <PinIcon />
+                              </button>
+                            )}
+                            {message.body && (
+                              <button
+                                type="button"
+                                className="bubble-action"
+                                aria-label="Copy text"
+                                title={copiedId === message.id ? "Copied" : "Copy text"}
+                                onClick={() => onCopy(message)}
+                              >
+                                {copiedId === message.id ? <CopiedIcon /> : <CopyIcon />}
+                              </button>
+                            )}
+                            {!mine && !message.deleted && (
+                              <button
+                                type="button"
+                                className="bubble-action danger"
+                                aria-label="Report"
+                                title="Report"
+                                onClick={() => {
+                                  setReportedId(null)
+                                  setReportId(message.id)
+                                  setReportReason("harassment")
+                                  setReportNote("")
+                                }}
+                              >
+                                <ReportIcon />
+                              </button>
+                            )}
+                            {!mine && selected.kind === "group" && !blockedIds.includes(message.senderId) && (
+                              <button
+                                type="button"
+                                className="bubble-action danger"
+                                aria-label="Block"
+                                title={`Block ${message.senderName}`}
+                                onClick={() => void onBlock(message.senderId, true)}
+                              >
+                                <BlockIcon />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="bubble-action danger"
+                              aria-label="Delete"
+                              title={mine && !message.deleted ? "Delete" : "Delete for me"}
+                              onClick={() => askDelete([message])}
+                            >
+                              <RemoveIcon />
+                            </button>
+                          </div>
                         )}
                       </article>
                       {mine && avatar}
@@ -2143,6 +2418,28 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                   {sendError}
                 </p>
               )}
+              {replyTo && (
+                <div className="composer-extra">
+                  <span className="composer-extra-text">
+                    <strong>Replying to {nameOf(replyTo)}</strong>
+                    <span>{messageLabel(replyTo)}</span>
+                  </span>
+                  <button type="button" className="composer-extra-close" aria-label="Cancel reply" title="Cancel reply" onClick={() => setReplyTo(null)}>
+                    ×
+                  </button>
+                </div>
+              )}
+              {editing && (
+                <div className="composer-extra">
+                  <span className="composer-extra-text">
+                    <strong>Editing message</strong>
+                    <span>{messageLabel(editing)}</span>
+                  </span>
+                  <button type="button" className="composer-extra-close" aria-label="Cancel editing" title="Cancel editing" onClick={stopEditing}>
+                    ×
+                  </button>
+                </div>
+              )}
               <div className="composer-row">
                 {mentions.list || styling.bar}
                 <EmojiPicker
@@ -2150,7 +2447,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                   body={body}
                   setBody={(text) => {
                     updateBody(text)
-                    typing.onType(true)
+                    if (!editing) typing.onType(true)
                   }}
                   boxRef={bodyRef}
                   maxLength={4000}
@@ -2167,7 +2464,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                   onChange={(event) => {
                     updateBody(event.target.value)
                     mentions.track(event.target, true)
-                    typing.onType(event.target.value.trim() !== "")
+                    if (!editing) typing.onType(event.target.value.trim() !== "")
                     if (selectedId) markChatRead(selectedId)
                   }}
                   onClick={(event) => mentions.track(event.currentTarget, false)}
@@ -2179,13 +2476,16 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                       event.preventDefault()
                       event.currentTarget.form?.requestSubmit()
                     }
+                    if (event.key === "Escape" && editing) stopEditing()
+                    else if (event.key === "Escape" && replyTo) setReplyTo(null)
                   }}
                 />
                 <button
                   type="submit"
                   className="button send-button"
-                  aria-label="Send"
-                  disabled={closed || !body.trim()}
+                  aria-label={editing ? "Save changes" : "Send"}
+                  title={editing ? "Save changes" : undefined}
+                  disabled={closed || savingEdit || (!body.trim() && !editing?.attachmentName)}
                 >
                   <SendIcon />
                 </button>
@@ -2242,8 +2542,168 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     }
   }
 
+  // The pages that can be pinned (all but the online chat, see renderThread): on the page itself,
+  // or in the pinned panel.
+  const pageOf = (page: typeof view) =>
+    page === "local" ? (
+        <LocalChatThread local={local} userId={session.userId} />
+      ) : page === "timer" ? (
+        <Timer
+          range={timerRange}
+          zone={timerZone}
+          onZoneChange={chooseTimerZone}
+          enabled={timer.enabled}
+          isLeader={isLeader}
+          optedIn={timer.optedIn}
+          onToggle={timer.setEnabled}
+          todaySegments={timerHistory.todaySegments}
+          rows={timerHistory.rows}
+          error={timerHistory.error}
+        />
+      ) : page === "leaddesk" ? (
+        <LeadDesk
+          tab={deskTab}
+          data={desk.data}
+          error={desk.error}
+          reload={desk.reload}
+          newEventIds={unreadEventIds}
+          onEventOpened={(id) => markDeskEventsRead([id])}
+          newTaskIds={unreadTaskIds}
+          onTaskOpened={markDeskTaskRead}
+          isAdmin={isAdmin}
+          focus={deskFocus}
+          onFocused={clearDeskFocus}
+        />
+      ) : page === "people" ? (
+        <People
+          users={people}
+          error={peopleError}
+          filter={peopleFilter}
+          canMessageLeaders={isLeader}
+          presenceOf={presenceOf}
+          onMessage={async (userId) => {
+            const id = await startLeaderChat(session, userId)
+            setChats(await listChats(session))
+            setSection("chats")
+            setComposer(null)
+            selectConversation(id)
+            setSearch("")
+            setView("chats")
+          }}
+        />
+      ) : page === "vault" ? (
+        <Vault vault={vault} />
+      ) : page === "capture" ? (
+        <Capture tab={captureTab} capture={capture} />
+      ) : null
+  const mainPage = pageOf(view)
+  const canPinView = isPinnable(view) && (view !== "leaddesk" || hasLeadDesk)
+
+  // Pins a page, or unpins (null). Closing the Vault's panel asks about unsaved changes first.
+  function pinPage(next: PinnedPage | null) {
+    const run = () => {
+      setPinnedPage(next)
+      try {
+        if (next) localStorage.setItem(PINNED_PAGE_KEY, next)
+        else localStorage.removeItem(PINNED_PAGE_KEY)
+      } catch {
+        // Not remembered; the choice still applies until the app closes.
+      }
+    }
+    if (sidePage === "vault" && next !== "vault") vault.guard(run)
+    else run()
+  }
+
+  // Dragging the panel's left edge changes its width.
+  function startPinnedResize(event: { preventDefault(): void; currentTarget: HTMLDivElement; pointerId: number }) {
+    event.preventDefault()
+    const handle = event.currentTarget
+    handle.setPointerCapture(event.pointerId)
+    let width = pinnedWidth
+    const move = (moved: PointerEvent) => {
+      const most = Math.max(PINNED_MIN_WIDTH, window.innerWidth - 560)
+      width = Math.round(Math.min(Math.max(window.innerWidth - moved.clientX, PINNED_MIN_WIDTH), most))
+      setPinnedWidth(width)
+    }
+    const up = () => {
+      handle.removeEventListener("pointermove", move)
+      handle.removeEventListener("pointerup", up)
+      handle.removeEventListener("pointercancel", up)
+      try {
+        localStorage.setItem(PINNED_WIDTH_KEY, String(width))
+      } catch {
+        // Not remembered; the width still applies until the app closes.
+      }
+    }
+    handle.addEventListener("pointermove", move)
+    handle.addEventListener("pointerup", up)
+    handle.addEventListener("pointercancel", up)
+  }
+
+  // Leaves the panel for the pinned page itself.
+  function openPinnedAsPage(page: PinnedPage) {
+    if (page === "local") {
+      setChatMode("local")
+      setView("local")
+    } else if (page === "chats") {
+      setChatMode("online")
+      setSection(selected?.kind === "room" ? "rooms" : "chats")
+      setView("chats")
+    } else setView(page)
+  }
+
+  // What the panel's list chooses, since the pinned page's sidebar is not on screen: the chat,
+  // the tab or the table.
+  type SidePicker = { label: string; value: string; options: Array<{ id: string; label: string }>; onChange: (id: string) => void }
+  const sidePicker: SidePicker | null =
+    sidePage === "local"
+      ? {
+          label: "Chat",
+          value: local.selected,
+          options: [
+            { id: LOCAL_ROOM, label: "Broadcast" },
+            ...[...new Set([...local.chats.map((chat) => chat.chat), ...local.peers.map((peer) => peer.userId)])]
+              .filter((id) => id !== LOCAL_ROOM)
+              .map((id) => ({ id, label: local.chatName(id) })),
+          ],
+          onChange: (id) => local.select(id),
+        }
+      : sidePage === "chats"
+        ? {
+            label: "Chat",
+            value: selectedId ?? "",
+            options: [
+              ...(selectedId ? [] : [{ id: "", label: "Choose a chat" }]),
+              ...chats.map((chat) => ({ id: chat.id, label: chat.title })),
+            ],
+            onChange: (id) => {
+              if (!id) return
+              selectConversation(id)
+              markChatRead(id)
+            },
+          }
+        : sidePage === "timer"
+          ? { label: "Time range", value: timerRange, options: TIMER_RANGES, onChange: (id) => setTimerRange(id as TimerRange) }
+          : sidePage === "leaddesk"
+            ? { label: "LeadDesk tab", value: deskTab, options: LEADDESK_TABS, onChange: (id) => setDeskTab(id as LeadDeskTab) }
+            : sidePage === "people"
+              ? { label: "People filter", value: peopleFilter, options: PEOPLE_FILTERS, onChange: setPeopleFilter }
+              : sidePage === "capture"
+                ? { label: "Capture tab", value: captureTab, options: CAPTURE_TABS, onChange: (id) => setCaptureTab(id as CaptureTab) }
+                : sidePage === "vault" && vault.data && vault.data.tables.length > 0
+                  ? {
+                      label: "Table",
+                      value: vault.table?.id ?? "",
+                      options: vault.data.tables.map((table) => ({ id: table.id, label: table.name || "Untitled table" })),
+                      onChange: (id) => vault.selectTable(id),
+                    }
+                  : null
+
   return (
-    <div className={navExpanded ? "shell nav-open" : "shell"}>
+    <div
+      className={`shell${navExpanded ? " nav-open" : ""}${sidePage ? " has-side-page" : ""}`}
+      style={{ "--side-page-width": `${pinnedWidth}px` } as CSSProperties}
+    >
       <NavBar
         expanded={navExpanded}
         onToggle={() => {
@@ -2284,6 +2744,36 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
           leaveTo(() => selectNav(item))
         }}
         footer={
+          <>
+          <button
+            type="button"
+            className="nav-item nav-pin"
+            aria-pressed={pinnedPage !== null && pinnedPage === view}
+            disabled={!canPinView && !pinnedPage}
+            title={
+              canPinView
+                ? pinnedPage === view
+                  ? "Unpin this page"
+                  : "Pin this page: keep it open on the right of every other page"
+                : pinnedPage
+                  ? `Unpin ${PINNED_LABELS[pinnedPage]}`
+                  : "This page can't be pinned"
+            }
+            onClick={() => pinPage(canPinView && isPinnable(view) && pinnedPage !== view ? view : null)}
+          >
+            <span className="nav-tile">
+              <PinIcon />
+            </span>
+            <span className="nav-label">
+              {canPinView
+                ? pinnedPage === view
+                  ? "Unpin this page"
+                  : "Pin this page"
+                : pinnedPage
+                  ? `Unpin ${PINNED_LABELS[pinnedPage]}`
+                  : "Pin this page"}
+            </span>
+          </button>
           <button
             type="button"
             className="nav-profile"
@@ -2310,14 +2800,12 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
             </span>
             <span className="nav-label">{profile.displayName || session.email}</span>
           </button>
+          </>
         }
       />
       <aside className="rail">
         {view === "local" ? (
-          <>
-            {chatModeSwitch}
-            <LocalChatRail local={local} />
-          </>
+          <LocalChatRail local={local} headerAction={chatModeSwitch} />
         ) : view === "timer" ? (
           <SideMenu
             label="Time ranges"
@@ -2406,7 +2894,6 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
           />
         ) : (
           <>
-        {section === "chats" && chatModeSwitch}
         <div className="rail-head">
           <p className="list-label">{section === "chats" ? "Chats" : "Rooms"}</p>
           {section === "chats" && (
@@ -2453,6 +2940,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
               >
                 <NewGroupIcon />
               </button>
+              {chatModeSwitch}
             </div>
           )}
         </div>
@@ -2543,7 +3031,17 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
           {section === "chats" && chatsLoaded && (conversations.length === 0 ? (
             <p className="empty-list">No chats yet. Start a direct chat or a group.</p>
           ) : (
-            conversations.map((chat) => (
+            // Direct chats first, then groups, each under its own heading.
+            [
+              { label: "Direct messages", items: conversations.filter((chat) => chat.kind === "direct") },
+              { label: "Groups", items: conversations.filter((chat) => chat.kind !== "direct") },
+            ].filter((group) => group.items.length > 0).map((group, index) => (
+            <Fragment key={group.label}>
+            <p className={index === 0 ? "list-label chat-group-label first" : "list-label chat-group-label"}>
+              {group.label}
+              <span className="chat-group-count">{group.items.length}</span>
+            </p>
+            {group.items.map((chat) => (
               <button
                 key={chat.id}
                 type="button"
@@ -2570,6 +3068,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                   <span className="unread-count">{unread[chat.id] > 9 ? "9+" : unread[chat.id]}</span>
                 )}
               </button>
+            ))}
+            </Fragment>
             ))
           ))}
           {section === "rooms" && !roomsLoaded && <ListSkeleton />}
@@ -2630,56 +3130,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
           />
         )}
       </aside>
-      {view === "local" ? (
-        <LocalChatThread local={local} userId={session.userId} />
-      ) : view === "timer" ? (
-        <Timer
-          range={timerRange}
-          zone={timerZone}
-          onZoneChange={chooseTimerZone}
-          enabled={timer.enabled}
-          isLeader={isLeader}
-          optedIn={timer.optedIn}
-          onToggle={timer.setEnabled}
-          todaySegments={timerHistory.todaySegments}
-          rows={timerHistory.rows}
-          error={timerHistory.error}
-        />
-      ) : view === "leaddesk" ? (
-        <LeadDesk
-          tab={deskTab}
-          data={desk.data}
-          error={desk.error}
-          reload={desk.reload}
-          newEventIds={unreadEventIds}
-          onEventOpened={(id) => markDeskEventsRead([id])}
-          newTaskIds={unreadTaskIds}
-          onTaskOpened={markDeskTaskRead}
-          isAdmin={isAdmin}
-          focus={deskFocus}
-          onFocused={clearDeskFocus}
-        />
-      ) : view === "people" ? (
-        <People
-          users={people}
-          error={peopleError}
-          filter={peopleFilter}
-          canMessageLeaders={isLeader}
-          presenceOf={presenceOf}
-          onMessage={async (userId) => {
-            const id = await startLeaderChat(session, userId)
-            setChats(await listChats(session))
-            setSection("chats")
-            setComposer(null)
-            selectConversation(id)
-            setSearch("")
-            setView("chats")
-          }}
-        />
-      ) : view === "vault" ? (
-        <Vault vault={vault} />
-      ) : view === "capture" ? (
-        <Capture tab={captureTab} capture={capture} />
+      {mainPage ? (
+        mainPage
       ) : view === "settings" ? (
         <Settings tab={settingsTab} />
       ) : view === "profile" ? (
@@ -2739,6 +3191,50 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
         </div>
       ) : (
         renderThread(false)
+      )}
+      {sidePage && (
+        <aside className="side-page" aria-label={`Pinned: ${PINNED_LABELS[sidePage]}`}>
+          <div className="side-page-resize" title="Drag to resize" onPointerDown={startPinnedResize} />
+          <header className="side-page-bar">
+            <PinIcon />
+            <strong>{PINNED_LABELS[sidePage]}</strong>
+            {sidePicker && (
+              <select
+                className="side-page-select"
+                aria-label={sidePicker.label}
+                value={sidePicker.value}
+                onChange={(event) => sidePicker.onChange(event.target.value)}
+              >
+                {sidePicker.options.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              className="side-page-button"
+              aria-label="Open as the page"
+              title="Open as the page"
+              onClick={() => leaveTo(() => openPinnedAsPage(sidePage))}
+            >
+              <OpenAsPageIcon />
+            </button>
+            <button
+              type="button"
+              className="side-page-button"
+              aria-label="Unpin"
+              title="Unpin"
+              onClick={() => pinPage(null)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </header>
+          <div className="side-page-body">{sidePage === "chats" ? renderThread(false) : pageOf(sidePage)}</div>
+        </aside>
       )}
       <Toasts
         toasts={alerts.toasts}

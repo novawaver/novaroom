@@ -328,6 +328,82 @@ pub async fn vault_pick(app: tauri::AppHandle) -> Result<Option<String>, String>
     Ok(Some(path_text(path)))
 }
 
+/// One sheet of a spreadsheet file as read for importing: its rows that hold anything, top to bottom.
+#[derive(Serialize)]
+pub struct ImportedSheet {
+    name: String,
+    rows: Vec<Vec<serde_json::Value>>,
+}
+
+/// A spreadsheet file read for importing. `name` is the file's name without its extension.
+#[derive(Serialize)]
+pub struct ImportedBook {
+    name: String,
+    sheets: Vec<ImportedSheet>,
+}
+
+/// A spreadsheet cell as the app takes it: text, a number, yes/no, or nothing. A date becomes
+/// "2026-03-05", with " 14:30" after it if it has a time; a time alone becomes "14:30".
+fn imported_cell(cell: &calamine::Data) -> serde_json::Value {
+    use calamine::Data;
+    use serde_json::Value;
+    let text = |text: &str| match text.trim() {
+        "" => Value::Null,
+        text => Value::String(text.to_string()),
+    };
+    match cell {
+        Data::Int(number) => Value::from(*number),
+        Data::Float(number) => serde_json::Number::from_f64(*number).map_or(Value::Null, Value::Number),
+        Data::String(value) => text(value),
+        Data::Bool(value) => Value::Bool(*value),
+        Data::DateTime(at) if at.is_datetime() => {
+            let (year, month, day, hour, minute, _, _) = at.to_ymd_hms_milli();
+            if at.as_f64() < 1.0 {
+                Value::String(format!("{hour:02}:{minute:02}"))
+            } else if hour == 0 && minute == 0 {
+                Value::String(format!("{year:04}-{month:02}-{day:02}"))
+            } else {
+                Value::String(format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}"))
+            }
+        }
+        Data::DateTime(at) => serde_json::Number::from_f64(at.as_f64()).map_or(Value::Null, Value::Number),
+        Data::DateTimeIso(value) | Data::DurationIso(value) => text(value),
+        Data::Error(_) | Data::Empty => Value::Null,
+    }
+}
+
+/// Asks which spreadsheet (Excel or OpenDocument) to import and returns what its sheets hold, with
+/// formulas as their last calculated values. The app turns the sheets into tables; nothing is
+/// written here. Returns None if the person closes the dialog.
+#[tauri::command]
+pub async fn vault_import_excel(app: tauri::AppHandle) -> Result<Option<ImportedBook>, String> {
+    use calamine::Reader;
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Import from Excel")
+        .add_filter("Spreadsheets", &["xlsx", "xlsm", "xlsb", "xls", "ods"])
+        .blocking_pick_file();
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.into_path().map_err(message)?;
+    let mut book = calamine::open_workbook_auto(&path)
+        .map_err(|_| "Could not read that file. Import an Excel file (.xlsx or .xls) that is not password-protected.".to_string())?;
+    let sheets = book
+        .worksheets()
+        .into_iter()
+        .map(|(name, range)| ImportedSheet {
+            name,
+            rows: range
+                .rows()
+                .map(|row| row.iter().map(imported_cell).collect::<Vec<_>>())
+                .filter(|row| row.iter().any(|cell| !cell.is_null()))
+                .collect(),
+        })
+        .collect();
+    let name = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(Some(ImportedBook { name, sheets }))
+}
+
 #[tauri::command]
 pub async fn vault_read(path: String) -> Result<VaultData, String> {
     read(&connect(Path::new(&path))?)

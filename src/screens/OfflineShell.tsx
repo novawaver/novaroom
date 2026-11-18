@@ -80,7 +80,7 @@ export function OfflineShell({
       </p>
       <div className="shell offline-shell-body">
         <aside className="rail">
-          <div className="chat-mode" role="tablist" aria-label="Offline tools">
+          <div className="offline-tabs" role="tablist" aria-label="Offline tools">
             {tabs.map(({ id, label, hint, count }) => (
               <button
                 key={id}

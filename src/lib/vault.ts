@@ -187,6 +187,64 @@ export function vaultCategories(tables: VaultTable[]) {
     .filter(Boolean)
 }
 
+/** A spreadsheet cell as read for importing: text, a number, yes/no, or nothing. */
+type ImportedCell = string | number | boolean | null
+export type ImportedBook = { name: string; sheets: Array<{ name: string; rows: ImportedCell[][] }> }
+
+/**
+ * Asks which Excel file to import and reads its sheets. Null if the person cancels. Nothing is
+ * added to the Vault yet; see importedTables.
+ */
+export const pickExcelFile = () => call<ImportedBook | null>("vault_import_excel")
+
+/** The column type that fits every value of an imported column. Text when they are mixed. */
+function importedKind(values: ImportedCell[]): VaultColumnKind {
+  const filled = values.filter((value) => value !== null)
+  if (filled.length === 0) return "text"
+  if (filled.every((value) => typeof value === "boolean")) return "checkbox"
+  if (filled.every((value) => typeof value === "number")) return "number"
+  const texts = filled.filter((value): value is string => typeof value === "string")
+  if (texts.length < filled.length) return "text"
+  if (texts.every((text) => /^\d{4}-\d{2}-\d{2}$/.test(text))) return "date"
+  if (texts.every(looksLikeEmail)) return "email"
+  if (texts.every((text) => /^https?:\/\/\S+$/i.test(text))) return "url"
+  if (texts.some((text) => text.includes("\n"))) return "notes"
+  return "text"
+}
+
+/**
+ * The tables an imported spreadsheet becomes: one per sheet that holds anything. A sheet's first
+ * row gives the column names and every row under it becomes a row. Each column gets the type that
+ * fits all its values (Number, Date, Yes / no, Email, URL, Notes), or Text.
+ */
+export function importedTables(book: ImportedBook, category = ""): VaultTable[] {
+  const sheets = book.sheets.filter((sheet) => sheet.rows.length > 0)
+  return sheets.map((sheet) => {
+    const [header, ...body] = sheet.rows
+    const width = Math.max(...sheet.rows.map((row) => row.length))
+    const columns: VaultColumn[] = Array.from({ length: width }, (_, index) => {
+      const title = header[index]
+      const name = title === null || title === undefined ? "" : String(title).trim()
+      return {
+        id: crypto.randomUUID(),
+        name: name || `Column ${index + 1}`,
+        kind: importedKind(body.map((row) => row[index] ?? null)),
+      }
+    })
+    const rows: VaultRow[] = body.map((row) => {
+      const cells: Record<string, VaultCell> = {}
+      columns.forEach((column, index) => {
+        const value = row[index] ?? null
+        if (value !== null) cells[column.id] = convertCell(value, column.kind)
+      })
+      return { id: crypto.randomUUID(), cells }
+    })
+    // A file with one sheet is named after the file, since the sheet is usually just "Sheet1".
+    const name = (sheets.length === 1 ? book.name : sheet.name).trim() || "Imported table"
+    return { id: crypto.randomUUID(), name, category, columns, rows }
+  })
+}
+
 export function newColumn(name: string): VaultColumn {
   return { id: crypto.randomUUID(), name, kind: "text" }
 }

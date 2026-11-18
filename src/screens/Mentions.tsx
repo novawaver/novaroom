@@ -1,5 +1,5 @@
 import { useState, type KeyboardEvent } from "react"
-import { mentionQuery, splitMentions } from "../lib/mentions"
+import { isEveryoneMention, mentionQuery, splitMentions } from "../lib/mentions"
 
 const MOST_SHOWN = 6
 
@@ -90,14 +90,14 @@ export function useMentions(
   }
 }
 
-/** A message's text with its mentions marked; mentions of `me` stand out more. */
+/** A message's text with its mentions marked; mentions of `me`, and of everyone, stand out more. */
 export function MentionText({ text, names, me }: { text: string; names: string[]; me: string }) {
   const mine = `@${me}`.toLowerCase()
   return (
     <>
       {splitMentions(text, names).map((part, index) =>
         part.mention ? (
-          <span key={index} className={part.text.toLowerCase() === mine ? "mention me" : "mention"}>
+          <span key={index} className={part.text.toLowerCase() === mine || isEveryoneMention(part.text) ? "mention me" : "mention"}>
             {part.text}
           </span>
         ) : (

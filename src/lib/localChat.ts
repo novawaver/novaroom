@@ -32,6 +32,8 @@ export type LocalMessage = {
   file: LocalFile | null
   // Pinned on this computer: shown at the top of the chat and never auto-deleted. Others don't see it.
   pinned: boolean
+  // When its sender last changed its text (milliseconds since 1970, by their clock), if ever.
+  editedAt: number | null
 }
 
 /** Largest file Local chat sends, as in the other chats. */
@@ -125,6 +127,19 @@ export const markLocalRead = (chat: string) => call<void>("local_chat_mark_read"
 export const deleteLocalMessages = (ids: string[]) => call<void>("local_chat_delete_messages", { ids })
 
 /**
+ * Deletes this person's own messages from this computer and from everyone else's. Someone away
+ * from the network loses their copy when they are back; apps from before this keep theirs.
+ */
+export const deleteLocalMessagesForEveryone = (ids: string[]) =>
+  call<void>("local_chat_delete_for_everyone", { ids })
+
+/**
+ * Changes the text of one of this person's own messages, for everyone who has it. Someone away
+ * from the network gets the change when they are back; apps from before editing keep the old text.
+ */
+export const editLocalMessage = (id: string, body: string) => call<LocalMessage>("local_chat_edit", { id, body })
+
+/**
  * Pins or unpins a message on this computer. Pinned messages are kept by auto-delete; unpinning starts
  * the message's auto-delete time again from now.
  */
@@ -184,6 +199,8 @@ type Unlisten = () => void
 /** Listens for Local chat events from the desktop app. Returns a function that stops listening. */
 export function onLocalChat(handlers: {
   message: (message: LocalMessage) => void
+  // Someone changed the text of a message that is already here.
+  edited: (message: LocalMessage) => void
   delivered: (id: string) => void
   peers: (peers: LocalPeer[]) => void
   typing: (event: { chat: string; userId: string; typing: boolean }) => void
@@ -198,6 +215,7 @@ export function onLocalChat(handlers: {
   void import("@tauri-apps/api/event").then(async ({ listen }) => {
     const stops = await Promise.all([
       listen<LocalMessage>("local-chat-message", (event) => handlers.message(event.payload)),
+      listen<LocalMessage>("local-chat-edited", (event) => handlers.edited(event.payload)),
       listen<string>("local-chat-delivered", (event) => handlers.delivered(event.payload)),
       listen<LocalPeer[]>("local-chat-peers", (event) => handlers.peers(event.payload)),
       listen<{ chat: string; userId: string; typing: boolean }>("local-chat-typing", (event) => handlers.typing(event.payload)),

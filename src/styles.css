@@ -1486,6 +1486,8 @@ textarea:focus {
   position: absolute;
   top: 50%;
   z-index: 5;
+  display: flex;
+  gap: 4px;
   transform: translateY(-50%);
   opacity: 0;
   transition: opacity 0.12s;
@@ -1526,6 +1528,21 @@ textarea:focus {
   width: 16px;
   height: 16px;
   fill: currentColor;
+}
+
+.message-menu-button.message-edit-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Beside a message's time, once its sender has changed its text. */
+.bubble-edited {
+  font-style: italic;
 }
 
 .message-menu-list {
@@ -6324,10 +6341,91 @@ code {
   grid-template-columns: 320px 1fr;
 }
 
-/* Chats: the Online / Local switch at the top of the sidebar. */
+/* Chats: the Online / Local toggle at the right of the sidebar's heading. Icons only: the knob
+   sits behind the kind of chat that is showing. */
 .chat-mode {
+  position: relative;
+  flex: none;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 30px 30px;
+  height: 36px;
+  padding: 3px;
+  border: 1px solid var(--side-line);
+  border-radius: 999px;
+  background: var(--side-soft);
+  color: var(--side-muted);
+}
+
+.chat-mode:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.chat-mode-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 30px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--brand);
+  transition: transform 0.16s ease;
+}
+
+.chat-mode[aria-checked="true"] .chat-mode-knob {
+  transform: translateX(30px);
+}
+
+.chat-mode-side {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.chat-mode-side.on {
+  color: #fff;
+}
+
+.chat-mode-side svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-mode-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--brand-bright);
+  border: 1.5px solid var(--side-soft);
+}
+
+.chat-mode-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Without internet: the tabs for the tools that still work, at the top of the sidebar. */
+.offline-tabs {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   gap: 4px;
   margin-bottom: 14px;
   padding: 4px;
@@ -6365,31 +6463,6 @@ code {
 .chat-mode-tab:focus-visible {
   outline: 2px solid var(--brand-bright);
   outline-offset: 1px;
-}
-
-.chat-mode-tab svg {
-  width: 16px;
-  height: 16px;
-  flex: none;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.chat-mode-count {
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--brand);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
 }
 
 .chat-mode-tab[aria-selected="true"] .chat-mode-count {
@@ -8737,4 +8810,174 @@ code {
 
 .style-bar button:hover {
   background: var(--side-soft);
+}
+
+/* A pinned page: a panel on the right of every other page, resized by dragging its left edge. */
+.shell.has-side-page {
+  grid-template-columns: var(--nav-width) 320px minmax(0, 1fr) min(var(--side-page-width, 400px), 50vw);
+}
+
+.side-page {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.side-page-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  width: 7px;
+  z-index: 5;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.side-page-resize:hover,
+.side-page-resize:active {
+  background: color-mix(in srgb, var(--brand-bright) 35%, transparent);
+}
+
+.side-page-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  font-size: 13px;
+}
+
+.side-page-bar svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.side-page-bar > svg {
+  color: var(--muted);
+}
+
+.side-page-bar strong {
+  flex: none;
+  margin-right: auto;
+}
+
+.side-page-select {
+  flex: 0 1 200px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: inherit;
+  font: inherit;
+}
+
+.side-page-button {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.side-page-button:hover {
+  background: var(--side-soft);
+  color: inherit;
+}
+
+/* The page fills what is left of the panel and scrolls on its own, as it does as the main page. */
+.side-page-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+}
+
+.side-page-body > * {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Chats are tighter in the panel, like a room's chat beside its page. */
+.side-page .thread-bar {
+  padding: 8px 12px;
+}
+
+.side-page .thread-actions {
+  min-width: 0;
+}
+
+.side-page .thread-actions .search {
+  width: 100%;
+  min-width: 70px;
+  max-width: 170px;
+}
+
+.side-page .message-log {
+  padding: 16px;
+}
+
+.side-page .composer {
+  padding: 8px 12px 10px;
+}
+
+/* The pin button sits above the profile at the bottom of the nav bar. */
+.nav-pin {
+  margin-top: auto;
+}
+
+.nav-pin + .nav-profile {
+  margin-top: 0;
+}
+
+.nav-pin[aria-pressed="true"] {
+  color: var(--side-ink);
+}
+
+.nav-pin:disabled {
+  opacity: 0.4;
+}
+
+/* Too narrow for a panel beside the page: the pinned page waits until the window is wider. */
+@media (max-width: 1000px) {
+  .shell.has-side-page {
+    grid-template-columns: var(--nav-width) 320px 1fr;
+  }
+
+  .side-page {
+    display: none;
+  }
+}
+
+/* The headings that split the chat list into direct chats and groups. */
+.list-label.chat-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 4px 4px;
+}
+
+.list-label.chat-group-label.first {
+  margin-top: 2px;
+}
+
+.chat-group-count {
+  letter-spacing: 0;
 }

@@ -30,6 +30,8 @@ import {
   newFilter,
   newRow,
   newTable,
+  importedTables,
+  pickExcelFile,
   openVaultAttachment,
   passesFilter,
   pickVaultFile,
@@ -488,6 +490,25 @@ export function useVault(userId: string | null, active: boolean) {
     setEditing(true)
   }
 
+  /** Asks for an Excel file and adds a table for each of its sheets. Saved like any other change. */
+  function importExcel() {
+    if (!data) return
+    setError("")
+    const category = table?.category.trim() ?? ""
+    void pickExcelFile()
+      .then((book) => {
+        if (!book) return
+        const created = importedTables(book, category)
+        if (created.length === 0) {
+          setError("That file has nothing to import: its sheets are empty.")
+          return
+        }
+        update((current) => ({ tables: [...current.tables, ...created] }))
+        setTableId(created[0].id)
+      })
+      .catch((caught) => setError(caught instanceof Error ? caught.message : "Could not import that file."))
+  }
+
   function removeTable(id: string) {
     if (!data) return
     const index = data.tables.findIndex((item) => item.id === id)
@@ -557,6 +578,7 @@ export function useVault(userId: string | null, active: boolean) {
     chooseFile,
     updateTable,
     addTable,
+    importExcel,
     removeTable,
   }
 }
@@ -3129,6 +3151,32 @@ export function Vault({ vault }: { vault: VaultState }) {
   const [searching, setSearching] = useState(false)
   const hasFile = Boolean(vault.file && vault.data)
 
+  // Shift + mouse wheel scrolls a table sideways: the one under the pointer (a Sub-table's own
+  // table first), or the one around it when that one has no more to show that way.
+  useEffect(() => {
+    function onWheel(event: WheelEvent) {
+      if (!event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return
+      // Some mice and systems already turn Shift + wheel into a sideways delta.
+      const raw = event.deltaX || event.deltaY
+      if (!raw) return
+      // Lines or pages rather than pixels, from some mice.
+      const delta = event.deltaMode === 1 ? raw * 40 : event.deltaMode === 2 ? raw * window.innerWidth : raw
+      let wrap = event.target instanceof Element ? event.target.closest<HTMLElement>(".vault-grid-wrap") : null
+      while (wrap) {
+        const most = wrap.scrollWidth - wrap.clientWidth
+        const room = delta < 0 ? wrap.scrollLeft > 0 : wrap.scrollLeft < most - 1
+        if (most > 0 && room && getComputedStyle(wrap).overflowX !== "hidden") {
+          event.preventDefault()
+          wrap.scrollLeft += delta
+          return
+        }
+        wrap = wrap.parentElement?.closest<HTMLElement>(".vault-grid-wrap") ?? null
+      }
+    }
+    document.addEventListener("wheel", onWheel, { passive: false })
+    return () => document.removeEventListener("wheel", onWheel)
+  }, [])
+
   // Ctrl+S saves, as in most desktop apps.
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -3254,6 +3302,9 @@ export function Vault({ vault }: { vault: VaultState }) {
             <div className="form-actions">
               <button type="button" className="button" onClick={vault.addTable}>
                 Create a table
+              </button>
+              <button type="button" className="button secondary" onClick={vault.importExcel}>
+                Import from Excel
               </button>
             </div>
           </div>
