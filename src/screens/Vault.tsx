@@ -71,6 +71,29 @@ import {
   type VaultTable,
 } from "../lib/vault"
 import { setExitGuard } from "../lib/unsaved"
+import { listUsers } from "../lib/users"
+import { localPeers } from "../lib/localChat"
+import {
+  SHARE_NOTE_LIMIT,
+  cancelLocalShare,
+  listLocalShares,
+  listSentShares,
+  listShares,
+  pickShared,
+  removeLocalShare,
+  removeShare,
+  sendLocalShares,
+  sendShares,
+  sharedAs,
+  sharedTable,
+  subscribeToLocalShares,
+  subscribeToShares,
+  tableFromShare,
+  type SentShare,
+  type ShareVia,
+  type SharedTable,
+  type VaultShare,
+} from "../lib/vaultShare"
 import { ImageViewer } from "./ImageViewer"
 
 function SaveIcon() {
@@ -394,6 +417,32 @@ function AddPaneIcon() {
 }
 
 /** A table row with a smaller table hanging under it: Sub-table items shown in their cells. */
+function ShareIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="6" cy="12" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <circle cx="17.5" cy="5.5" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <circle cx="17.5" cy="18.5" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="m8.2 10.8 7.1-4.1M8.2 13.2l7.1 4.1" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function InboxIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M4 13.5 6.4 6h11.2l2.4 7.5V18H4v-4.5Zm0 0h4.5a3.5 3.5 0 0 0 7 0H20"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 function SubRowsIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -478,6 +527,36 @@ export function useVault(userId: string | null, active: boolean) {
   // Tables shown beside the open one, each in its own pane, and whether the panes are stacked.
   const [split, setSplit] = useState<string[]>([])
   const [stacked, setStacked] = useState(false)
+  // What other people have shared with this person and they have not removed yet.
+  const [shares, setShares] = useState<VaultShare[]>([])
+  // What this person has shared and can still cancel.
+  const [sent, setSent] = useState<SentShare[]>([])
+  const refreshShares = useCallback(async () => {
+    if (!userId) return
+    // The two ways of sharing are read apart, so one being unreachable does not hide the other.
+    const [online, local] = await Promise.allSettled([
+      Promise.all([listShares(userId), listSentShares(userId)]),
+      listLocalShares(userId),
+    ])
+    const near = local.status === "fulfilled" ? local.value : { received: [], sent: [] }
+    const far = online.status === "fulfilled" ? online.value : ([[], []] as [VaultShare[], SentShare[]])
+    const newestFirst = (a: { createdAt: string }, b: { createdAt: string }) => b.createdAt.localeCompare(a.createdAt)
+    setShares([...far[0], ...near.received].sort(newestFirst))
+    setSent([...far[1], ...near.sent].sort(newestFirst))
+    if (online.status === "rejected") throw online.reason
+  }, [userId])
+  useEffect(() => {
+    if (!active || !available || !userId) return
+    // Quietly: offline, or before the sharing SQL script is run, there is simply nothing shared.
+    const refresh = () => void refreshShares().catch(() => undefined)
+    refresh()
+    const stopOnline = subscribeToShares(userId, refresh)
+    const stopLocal = subscribeToLocalShares(refresh)
+    return () => {
+      stopOnline()
+      stopLocal()
+    }
+  }, [active, available, userId, refreshShares])
   // The tables on the page: the open one first, then the ones beside it.
   const panes = useMemo(() => {
     if (!data || !table) return []
@@ -665,6 +744,26 @@ export function useVault(userId: string | null, active: boolean) {
     )
   }
 
+  /** Adds what someone shared as a new table. It is saved like any other change. */
+  function addShared(share: VaultShare) {
+    if (!data) return
+    const created = tableFromShare(share, data.tables, "Shared with me")
+    update((current) => ({ tables: [...current.tables, created] }))
+    setTableId(created.id)
+  }
+
+  /** Takes a share off the list. A table already added from it stays. */
+  async function dropShare(share: VaultShare) {
+    await (share.via === "local" ? removeLocalShare(share.id) : removeShare(share.id))
+    setShares((current) => current.filter((item) => item.id !== share.id))
+  }
+
+  /** Cancels something this person shared: the other person no longer has it to add. */
+  async function cancelShare(share: SentShare) {
+    await (share.via === "local" ? cancelLocalShare(share.id) : removeShare(share.id))
+    setSent((current) => current.filter((item) => item.id !== share.id))
+  }
+
   /** Moves the rows of one table into another and removes the emptied table. */
   function mergeInto(intoId: string, fromId: string) {
     update((current) => ({ tables: mergeTables(current.tables, intoId, fromId) }))
@@ -753,6 +852,13 @@ export function useVault(userId: string | null, active: boolean) {
     importJson,
     mergeInto,
     removeTable,
+    userId,
+    shares,
+    sent,
+    refreshShares,
+    addShared,
+    dropShare,
+    cancelShare,
   }
 }
 
@@ -2286,10 +2392,492 @@ function MergeDialog({ vault, table, onClose }: { vault: VaultState; table: Vaul
   )
 }
 
+/** What a cell of a shared copy shows in a preview. Passwords stay covered. */
+function sharedCellText(column: VaultColumn, value: VaultCell | undefined) {
+  if (value === null || value === undefined) return ""
+  if (column.kind === "password") return "••••••"
+  if (column.kind === "subtable") {
+    const count = subRows(value).length
+    return count === 0 ? "" : count === 1 ? "1 item" : `${count} items`
+  }
+  if (column.kind === "list") return listItems(value).join(", ")
+  return cellText(value, column.kind)
+}
+
+function counted(count: number, one: string, many = `${one}s`) {
+  return count === 1 ? `1 ${one}` : `${count} ${many}`
+}
+
+/** A shared copy as a small read-only table, with a tick box per row when rows can be chosen. */
+function SharedPreview({
+  table,
+  limit,
+  picked,
+  onPick,
+  onPickAll,
+}: {
+  table: SharedTable
+  limit?: number
+  picked?: ReadonlySet<string>
+  onPick?: (rowId: string, on: boolean) => void
+  onPickAll?: (on: boolean) => void
+}) {
+  const rows = limit ? table.rows.slice(0, limit) : table.rows
+  const all = picked ? table.rows.length > 0 && table.rows.every((row) => picked.has(row.id)) : false
+  return (
+    <div className="vault-share-rows">
+      <table className="vault-share-grid">
+        <thead>
+          <tr>
+            {picked && (
+              <th className="vault-share-tick">
+                <input
+                  type="checkbox"
+                  aria-label="Choose every row"
+                  title={all ? "Choose no rows" : "Choose every row"}
+                  checked={all}
+                  onChange={(event) => onPickAll?.(event.target.checked)}
+                />
+              </th>
+            )}
+            {table.columns.map((column) => (
+              <th key={column.id}>{column.name || "Untitled"}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={row.id} className={picked && !picked.has(row.id) ? "vault-share-off" : undefined}>
+              {picked && (
+                <td className="vault-share-tick">
+                  <input
+                    type="checkbox"
+                    aria-label={`Share row ${index + 1}`}
+                    checked={picked.has(row.id)}
+                    onChange={(event) => onPick?.(row.id, event.target.checked)}
+                  />
+                </td>
+              )}
+              {table.columns.map((column) => (
+                <td key={column.id}>{sharedCellText(column, row.cells[column.id])}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {limit !== undefined && table.rows.length > limit && (
+        <p className="hint vault-share-more">and {counted(table.rows.length - limit, "more row")}</p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Sends a copy of chosen rows and columns to chosen people. `rows` are the rows on screen when it
+ * was opened, so a search or filter narrows what is offered.
+ */
+function ShareDialog({
+  vault,
+  table,
+  rows,
+  labelIn,
+  onClose,
+}: {
+  vault: VaultState
+  table: VaultTable
+  rows: VaultRow[]
+  labelIn: (column: VaultColumn) => (rowId: string) => string
+  onClose: () => void
+}) {
+  // The copy as it was when the dialog opened.
+  const [copy] = useState(() => sharedTable(table, rows, labelIn))
+  // Passwords are left out unless the person ticks them.
+  const [columnIds, setColumnIds] = useState(
+    () => new Set(copy.columns.filter((column) => column.kind !== "password").map((column) => column.id)),
+  )
+  const [rowIds, setRowIds] = useState(() => new Set(copy.rows.map((row) => row.id)))
+  // Through Novaroom to any registered person, or straight to someone on the office network.
+  const [via, setVia] = useState<ShareVia>("online")
+  const [people, setPeople] = useState<Array<{ userId: string; name: string; detail: string }> | null>(null)
+  const [peopleError, setPeopleError] = useState("")
+  const [find, setFind] = useState("")
+  const [picked, setPicked] = useState<Set<string>>(() => new Set())
+  const [note, setNote] = useState("")
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState("")
+  const [sentTo, setSentTo] = useState<string[] | null>(null)
+  const { userId } = vault
+
+  useEffect(() => {
+    let stale = false
+    setPeople(null)
+    setPeopleError("")
+    setPicked(new Set())
+    const load =
+      via === "local"
+        ? localPeers().then((peers) =>
+            peers.map((peer) => ({ userId: peer.userId, name: peer.name || "Unnamed", detail: peer.idle ? "Away" : "" })),
+          )
+        : listUsers().then((users) =>
+            users.map((user) => ({ userId: user.userId, name: user.displayName || "Unnamed", detail: user.role })),
+          )
+    load
+      .then((list) => {
+        if (!stale) setPeople(list.filter((person) => person.userId !== userId))
+      })
+      .catch(() => {
+        if (stale) return
+        setPeopleError(
+          via === "local"
+            ? "Local chat is not running on this computer, so nobody on the network can be reached."
+            : "Could not load the list of people. Check your connection, or share over the local network.",
+        )
+      })
+    return () => {
+      stale = true
+    }
+  }, [userId, via])
+
+  const toggle = (set: Set<string>, id: string, on: boolean) => {
+    const next = new Set(set)
+    if (on) next.add(id)
+    else next.delete(id)
+    return next
+  }
+  const chosen = useMemo(() => pickShared(copy, columnIds, new Set(copy.rows.map((row) => row.id))), [copy, columnIds])
+  const wanted = find.trim().toLowerCase()
+  const listed = (people ?? []).filter(
+    (person) => !wanted || `${person.name} ${person.detail}`.toLowerCase().includes(wanted),
+  )
+  const sharesPassword = copy.columns.some((column) => column.kind === "password" && columnIds.has(column.id))
+  const ready = picked.size > 0 && rowIds.size > 0 && columnIds.size > 0 && !sending
+
+  async function send() {
+    if (!userId || !ready) return
+    setSending(true)
+    setError("")
+    try {
+      const part = pickShared(copy, columnIds, rowIds)
+      if (via === "local") await sendLocalShares([...picked], part, note)
+      else await sendShares(userId, [...picked], part, note)
+      setSentTo((people ?? []).filter((person) => picked.has(person.userId)).map((person) => person.name))
+      void vault.refreshShares().catch(() => undefined)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not share that.")
+    } finally {
+      setSending(false)
+    }
+  }
+
+  if (sentTo) {
+    return (
+      <VaultModal title="Shared" onClose={onClose}>
+        <p className="vault-share-done" role="status">
+          {counted(rowIds.size, "row")} and {counted(columnIds.size, "column")} of “{copy.name}” shared with{" "}
+          {sentTo.join(", ")}
+          {via === "local" ? " over the local network" : ""}. They will find it under “Shared with you” in their
+          Vault. You can cancel it there too, under “Shared by you”.
+        </p>
+        <div className="form-actions">
+          <button type="button" className="button vault-small" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </VaultModal>
+    )
+  }
+
+  return (
+    <VaultModal title={`Share from ${copy.name}`} wide onClose={onClose}>
+      <div className="vault-share-section">
+        <div className="vault-share-heading">
+          <h3>People</h3>
+          <span className="hint">{picked.size > 0 ? `${picked.size} chosen` : "Choose who gets a copy"}</span>
+        </div>
+        <div className="desk-segmented vault-share-via" role="group" aria-label="How to send it">
+          <button
+            type="button"
+            aria-pressed={via === "online"}
+            title="Send through Novaroom to any registered person. Needs internet."
+            onClick={() => setVia("online")}
+          >
+            Through Novaroom
+          </button>
+          <button
+            type="button"
+            aria-pressed={via === "local"}
+            title="Send straight to people on the same office network, as in Local chat. Works without internet."
+            onClick={() => setVia("local")}
+          >
+            Local network
+          </button>
+        </div>
+        <label className="vault-search vault-share-find">
+          <SearchIcon />
+          <input
+            type="search"
+            aria-label="Find a person"
+            placeholder="Find a person"
+            value={find}
+            onChange={(event) => setFind(event.target.value)}
+          />
+        </label>
+        <div className="vault-share-people">
+          {peopleError ? (
+            <p className="form-error" role="alert">
+              {peopleError}
+            </p>
+          ) : people === null ? (
+            <p className="hint">Loading people…</p>
+          ) : listed.length === 0 ? (
+            <p className="hint">
+              {people.length > 0
+                ? "Nobody matches."
+                : via === "local"
+                  ? "Nobody else is on the local network right now."
+                  : "Nobody else is registered yet."}
+            </p>
+          ) : (
+            listed.map((person) => (
+              <label key={person.userId} className="vault-share-person">
+                <input
+                  type="checkbox"
+                  checked={picked.has(person.userId)}
+                  onChange={(event) => setPicked(toggle(picked, person.userId, event.target.checked))}
+                />
+                <span>{person.name}</span>
+                {person.detail && <span className="hint">{person.detail}</span>}
+              </label>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="vault-share-section">
+        <div className="vault-share-heading">
+          <h3>Columns</h3>
+          <span className="hint">
+            {columnIds.size} of {copy.columns.length}
+          </span>
+        </div>
+        <div className="vault-share-columns">
+          {table.columns.map((column) => {
+            const becomes = sharedAs(column)
+            return (
+              <label key={column.id} title={becomes ? `${column.name || "Untitled"}: ${becomes}` : undefined}>
+                <input
+                  type="checkbox"
+                  checked={columnIds.has(column.id)}
+                  onChange={(event) => setColumnIds(toggle(columnIds, column.id, event.target.checked))}
+                />
+                {column.name || "Untitled"}
+                {becomes && <span className="hint"> *</span>}
+              </label>
+            )
+          })}
+        </div>
+        {table.columns.some((column) => sharedAs(column)) && (
+          <p className="hint">
+            * Links are shared as the names they show, and attached files as their file names only. The files stay on
+            this computer.
+          </p>
+        )}
+        {sharesPassword && (
+          <p className="form-error" role="alert">
+            Passwords will be readable by the people you choose.
+          </p>
+        )}
+      </div>
+
+      <div className="vault-share-section">
+        <div className="vault-share-heading">
+          <h3>Rows</h3>
+          <span className="hint">
+            {rowIds.size} of {copy.rows.length}
+            {rows.length < table.rows.length ? ` shown (the table has ${table.rows.length})` : ""}
+          </span>
+        </div>
+        {chosen.columns.length === 0 ? (
+          <p className="hint">Choose at least one column.</p>
+        ) : (
+          <SharedPreview
+            table={chosen}
+            picked={rowIds}
+            onPick={(rowId, on) => setRowIds(toggle(rowIds, rowId, on))}
+            onPickAll={(on) => setRowIds(on ? new Set(copy.rows.map((row) => row.id)) : new Set())}
+          />
+        )}
+      </div>
+
+      <label className="vault-merge-pick">
+        <span>Note (optional)</span>
+        <input
+          type="text"
+          maxLength={SHARE_NOTE_LIMIT}
+          placeholder="What this is, for the people you share it with"
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+        />
+      </label>
+      <p className="hint">
+        {via === "local"
+          ? "Your Vault stays on this computer. Only the rows and columns ticked here are sent, straight to the computers of the people you choose over the local network, as a Local chat message. Nothing is kept on the server. It stays until that chat's auto-delete time (24 hours unless changed)."
+          : "Your Vault stays on this computer. Only the rows and columns ticked here are sent, through Novaroom, to the people you choose."}{" "}
+        They get a copy: later changes are not shared. You can cancel the share until they add it to their Vault.
+      </p>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="form-actions">
+        <button type="button" className="button secondary vault-small" onClick={onClose}>
+          Cancel
+        </button>
+        <button type="button" className="button vault-small" disabled={!ready} onClick={() => void send()}>
+          <ShareIcon />{" "}
+          {sending
+            ? "Sharing…"
+            : picked.size > 0
+              ? `Share ${counted(rowIds.size, "row")} with ${counted(picked.size, "person", "people")}`
+              : "Share"}
+        </button>
+      </div>
+    </VaultModal>
+  )
+}
+
+/** What other people have shared with this person, each to look at, add to the Vault, or remove. */
+function SharedWithYouDialog({ vault, onClose }: { vault: VaultState; onClose: () => void }) {
+  const [openId, setOpenId] = useState<string | null>(null)
+  const [added, setAdded] = useState<Set<string>>(() => new Set())
+  const [error, setError] = useState("")
+  const [tab, setTab] = useState<"in" | "out">("in")
+  const { refreshShares } = vault
+
+  useEffect(() => {
+    refreshShares().catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load what was shared."))
+  }, [refreshShares])
+
+  return (
+    <VaultModal title="Sharing" wide onClose={onClose}>
+      <div className="desk-segmented vault-share-via" role="group" aria-label="Which shares to list">
+        <button type="button" aria-pressed={tab === "in"} onClick={() => setTab("in")}>
+          Shared with you
+          {vault.shares.length > 0 && <span className="vault-filter-count">{vault.shares.length}</span>}
+        </button>
+        <button type="button" aria-pressed={tab === "out"} onClick={() => setTab("out")}>
+          Shared by you
+          {vault.sent.length > 0 && <span className="vault-filter-count">{vault.sent.length}</span>}
+        </button>
+      </div>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {tab === "out" && vault.sent.length === 0 && <p className="hint">Nothing you shared is waiting.</p>}
+      {tab === "out" &&
+        vault.sent.map((share) => (
+          <div key={share.id} className="vault-shared-item">
+            <div className="vault-shared-head">
+              <div>
+                <strong>{share.tableName}</strong>
+                <p className="hint">
+                  To {share.recipientName} · {new Date(share.createdAt).toLocaleString()} ·{" "}
+                  {share.via === "local" ? "Local network" : "Through Novaroom"}
+                </p>
+              </div>
+              <div className="vault-shared-actions">
+                <button
+                  type="button"
+                  className="button danger vault-small"
+                  title={
+                    share.via === "local"
+                      ? "Delete it from their computer too. If they are away, it goes when they are back on the network."
+                      : "Take it off their list."
+                  }
+                  onClick={() => {
+                    setError("")
+                    vault
+                      .cancelShare(share)
+                      .catch((caught) => setError(caught instanceof Error ? caught.message : "Could not cancel that."))
+                  }}
+                >
+                  Cancel sharing
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      {tab === "out" && vault.sent.length > 0 && (
+        <p className="hint">
+          Cancelling takes the share away from the other person. A table they already added to their Vault stays there.
+        </p>
+      )}
+      {tab === "in" && vault.shares.length === 0 && !error && <p className="hint">Nothing has been shared with you.</p>}
+      {(tab === "in" ? vault.shares : []).map((share) => (
+        <div key={share.id} className="vault-shared-item">
+          <div className="vault-shared-head">
+            <div>
+              <strong>{share.table.name}</strong>
+              <p className="hint">
+                From {share.senderName} · {new Date(share.createdAt).toLocaleString()} ·{" "}
+                {share.via === "local" ? "Local network · " : ""}
+                {counted(share.table.rows.length, "row")}, {counted(share.table.columns.length, "column")}
+              </p>
+            </div>
+            <div className="vault-shared-actions">
+              <button
+                type="button"
+                className="button secondary vault-small"
+                aria-expanded={openId === share.id}
+                onClick={() => setOpenId(openId === share.id ? null : share.id)}
+              >
+                {openId === share.id ? "Hide" : "Look"}
+              </button>
+              <button
+                type="button"
+                className="button vault-small"
+                disabled={added.has(share.id)}
+                title="Add this as a new table in your Vault"
+                onClick={() => {
+                  vault.addShared(share)
+                  setAdded(new Set(added).add(share.id))
+                }}
+              >
+                {added.has(share.id) ? "Added" : "Add to my Vault"}
+              </button>
+              <button
+                type="button"
+                className="button danger vault-small vault-icon-button"
+                aria-label={`Remove ${share.table.name} from this list`}
+                title="Remove from this list. A table you already added stays in your Vault."
+                onClick={() => {
+                  setError("")
+                  vault.dropShare(share).catch((caught) => setError(caught instanceof Error ? caught.message : "Could not remove that."))
+                }}
+              >
+                <TrashIcon />
+              </button>
+            </div>
+          </div>
+          {share.note && <p className="vault-shared-note">{share.note}</p>}
+          {openId === share.id && <SharedPreview table={share.table} limit={50} />}
+        </div>
+      ))}
+      {tab === "in" && added.size > 0 && (
+        <p className="hint">Added tables are under “Shared with me” in the sidebar. Save your Vault to keep them.</p>
+      )}
+    </VaultModal>
+  )
+}
+
 function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable }) {
   const change = (next: (current: VaultTable) => VaultTable) => vault.updateTable(table.id, next)
   const { editing } = vault
   const [merging, setMerging] = useState(false)
+  const [sharing, setSharing] = useState(false)
   const [query, setQuery] = useState("")
   const [fit, setFit] = useState(readFit)
   const [markRepeated, setMarkRepeated] = useState(() => readMarkRepeated(table.id))
@@ -2934,6 +3522,20 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
             <FitWidthIcon />
           </button>
         )}
+        <button
+          type="button"
+          className="button secondary vault-small vault-icon-button"
+          aria-label="Share rows and columns with other people"
+          title={
+            shown.length === 0 || table.columns.length === 0
+              ? "There are no rows to share"
+              : "Share rows and columns with other people"
+          }
+          disabled={!vault.userId || shown.length === 0 || table.columns.length === 0}
+          onClick={() => setSharing(true)}
+        >
+          <ShareIcon />
+        </button>
         {editing && (
           <>
             <button
@@ -2963,6 +3565,9 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
         )}
       </div>
       {merging && <MergeDialog vault={vault} table={table} onClose={() => setMerging(false)} />}
+      {sharing && (
+        <ShareDialog vault={vault} table={table} rows={shown} labelIn={labelIn} onClose={() => setSharing(false)} />
+      )}
       {cards && showCardFields && table.columns.length > 0 && (
         <CardFieldsBar
           table={table}
@@ -3521,6 +4126,7 @@ function VaultSearchDialog({ vault, onClose }: { vault: VaultState; onClose: () 
 export function Vault({ vault }: { vault: VaultState }) {
   const { save, dirty } = vault
   const [searching, setSearching] = useState(false)
+  const [showShared, setShowShared] = useState(false)
   const hasFile = Boolean(vault.file && vault.data)
 
   // Shift + mouse wheel scrolls a table sideways: the one under the pointer (a Sub-table's own
@@ -3624,6 +4230,20 @@ export function Vault({ vault }: { vault: VaultState }) {
                   <AddPaneIcon />
                 </button>
               )}
+              <button
+                type="button"
+                className="bar-icon vault-save"
+                aria-label="Sharing: shared with you and shared by you"
+                title={
+                  vault.shares.length > 0
+                    ? `Shared with you: ${vault.shares.length === 1 ? "1 table" : `${vault.shares.length} tables`}`
+                    : "Shared with you, and what you shared"
+                }
+                onClick={() => setShowShared(true)}
+              >
+                <InboxIcon />
+                {vault.shares.length > 0 && <span className="vault-dot" aria-hidden="true" />}
+              </button>
               <button
                 type="button"
                 className="bar-icon"
@@ -3762,6 +4382,7 @@ export function Vault({ vault }: { vault: VaultState }) {
           </div>
         )}
         {searching && hasFile && <VaultSearchDialog vault={vault} onClose={() => setSearching(false)} />}
+        {showShared && hasFile && <SharedWithYouDialog vault={vault} onClose={() => setShowShared(false)} />}
       </section>
     </AttachmentsContext.Provider>
   )

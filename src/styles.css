@@ -9172,3 +9172,191 @@ code {
 .vault-grid td.vault-fixed-last {
   border-right: 2px solid color-mix(in srgb, var(--ink) 24%, transparent);
 }
+
+/* Vault: sharing rows and columns with other people, and the list of what was shared with you. */
+.vault-share-section {
+  display: grid;
+  gap: 8px;
+}
+
+.vault-share-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.vault-share-heading h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.vault-share-find {
+  max-width: 320px;
+}
+
+.vault-share-people {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 2px 12px;
+  max-height: 150px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.vault-share-person,
+.vault-share-columns label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 2px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.vault-share-person span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-share-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 18px;
+}
+
+.vault-share-rows {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.vault-share-grid {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.vault-share-grid th,
+.vault-share-grid td {
+  max-width: 260px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-share-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
+  font-weight: 700;
+}
+
+.vault-share-grid tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.vault-share-grid .vault-share-tick {
+  width: 34px;
+  padding-right: 0;
+}
+
+.vault-share-grid tr.vault-share-off td:not(.vault-share-tick) {
+  opacity: 0.45;
+}
+
+.vault-share-more {
+  margin: 0;
+  padding: 6px 10px;
+}
+
+.vault-share-done {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.vault-shared-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.vault-shared-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.vault-shared-head p,
+.vault-shared-note {
+  margin: 2px 0 0;
+}
+
+.vault-shared-note {
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.vault-shared-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Vault sharing: the choice of how to send, and of which shares to list. */
+.vault-share-via {
+  justify-self: start;
+}
+
+/* Vault Notes: a note never spills out of its cell, panel field or column, however long it is. */
+.vault-cell-view.vault-notes {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.vault-notes-preview {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* In a column sized by hand, a note wraps inside the width and still stops after a few lines. */
+.vault-grid td.vault-col-sized .vault-notes-preview {
+  display: -webkit-box;
+  max-width: 100%;
+  white-space: pre-wrap;
+}
+
+/* While editing, the note box shrinks with a narrow column instead of covering the next one. */
+.vault-notes-edit {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.vault-notes-edit textarea {
+  min-width: 0;
+}
+
+.vault-grid.vault-fit .vault-notes-edit textarea.vault-list-input,
+.vault-grid td.vault-col-sized .vault-notes-edit textarea.vault-list-input {
+  min-width: 0;
+}
+
+.vault-panel-fields,
+.vault-panel-field {
+  grid-template-columns: minmax(0, 1fr);
+}

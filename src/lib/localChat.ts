@@ -117,6 +117,9 @@ export function localFileUrl(id: string, mime: string) {
   return url
 }
 
+/** The contents of a message's file, once it is on this computer. */
+export const localFileBytes = (id: string) => call<ArrayBuffer>("local_chat_file", { id })
+
 /** Asks where to save a message's file and saves it. False if the person cancelled. */
 export const saveLocalFile = (id: string) => call<boolean>("local_chat_save_file", { id })
 
