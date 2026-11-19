@@ -64,6 +64,8 @@ import { TIMER_RANGES, Timer, rangeTotals, useTimer, useTimerHistory, type Timer
 import { formatDuration } from "../lib/timer"
 import { isTimeZone, localTimeZone } from "../lib/timezone"
 import { listUsers, readIsAdmin, type RegisteredUser } from "../lib/users"
+import { CallButtons, VoiceCallBar, useVoiceCall } from "./VoiceCall"
+import { MAX_CALL_PEOPLE } from "../lib/calls"
 import { PRESENCE_LABELS, usePresence } from "../lib/presence"
 import { typingText, useTyping } from "../lib/typing"
 import { PROFILE_TABS, Profile, type ProfileTab } from "./Profile"
@@ -1035,6 +1037,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   sidePageRef.current = sidePage
   const desk = useLeadDesk((view === "leaddesk" || sidePage === "leaddesk") && hasLeadDesk)
   const vault = useVault(session?.userId ?? null, view === "vault" || sidePage === "vault")
+  // Voice calls ring and carry on whatever page is open.
+  const voice = useVoiceCall(session ?? null)
   // Leaving the Vault with unsaved changes first asks whether to save or discard them. A pinned
   // Vault stays open in the panel, so there is nothing to ask.
   const leaveTo = (go: () => void) => (view === "vault" && pinnedPage !== "vault" ? vault.guard(go) : go())
@@ -2200,6 +2204,27 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
         </div>
         {selected && (
           <div className="thread-actions">
+            {/* A person, or a group or room small enough for everyone to connect to everyone. */}
+            {(selected.kind === "direct" ? Boolean(selected.otherUserId) : selected.memberCount <= MAX_CALL_PEOPLE) && (
+              <CallButtons
+                voice={voice}
+                target={{
+                  transport: "online",
+                  conversationId: selected.id,
+                  title: selected.title,
+                  avatarUrl: selected.avatarUrl,
+                  group: selected.kind !== "direct",
+                  otherId: selected.kind === "direct" ? selected.otherUserId : null,
+                }}
+                blockedHint={
+                  selected.kind === "direct" && selected.otherUserId && blockedIds.includes(selected.otherUserId)
+                    ? "Unblock this person to call them"
+                    : selected.kind !== "direct" && selected.memberCount < 2
+                      ? "Nobody else is in this chat"
+                      : undefined
+                }
+              />
+            )}
             {selected.kind === "direct" && selected.otherUserId && (
               <button
                 type="button"
@@ -2232,6 +2257,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                   label: quietChats.has(selected.id) ? "Turn on notifications" : "Turn off notifications",
                   onSelect: () => setChatQuiet(session.userId, selected.id, !quietChats.has(selected.id)),
                 },
+                { label: "Call history", onSelect: voice.openHistory },
               ]}
             />
           </div>
@@ -2669,7 +2695,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   // or in the pinned panel.
   const pageOf = (page: typeof view) =>
     page === "local" ? (
-        <LocalChatThread local={local} userId={session.userId} />
+        <LocalChatThread local={local} userId={session.userId} voice={voice} />
       ) : page === "timer" ? (
         <Timer
           range={timerRange}
@@ -3365,6 +3391,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
         onOpen={(toast) => openDesk(toast.tab, toast.itemId)}
       />
       <VaultLeaveDialog vault={vault} />
+      <VoiceCallBar voice={voice} />
       {confirm && <ConfirmDialog {...confirm} onClose={() => setConfirm(null)} />}
       {alertBox && <AlertDialog {...alertBox} onClose={() => setAlertBox(null)} />}
     </div>

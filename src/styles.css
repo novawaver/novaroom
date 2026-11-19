@@ -9360,3 +9360,383 @@ code {
 .vault-panel-field {
   grid-template-columns: minmax(0, 1fr);
 }
+
+/* Vault sharing: the columns to share sit on one line, each name whole, scrolling sideways. */
+.vault-share-columns {
+  flex-wrap: nowrap;
+  gap: 2px 18px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.vault-share-columns label {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* Voice calls: the call button in a direct chat's header, and the call itself floating over the page. */
+.icon-button.thread-call {
+  flex: none;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.icon-button.thread-call:disabled {
+  opacity: 0.45;
+  cursor: default;
+  background: transparent;
+}
+
+.voice-call {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(360px, calc(100vw - 40px));
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+
+.voice-call audio {
+  display: none;
+}
+
+.avatar.voice-call-avatar {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  font-size: 15px;
+}
+
+/* A soft pulse round the photo while the call rings on either side. */
+.voice-call.ringing .voice-call-avatar,
+.voice-call.calling .voice-call-avatar {
+  animation: voice-call-pulse 1.6s ease-out infinite;
+}
+
+@keyframes voice-call-pulse {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in srgb, #1f8a4c 55%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-call.ringing .voice-call-avatar,
+  .voice-call.calling .voice-call-avatar {
+    animation: none;
+  }
+}
+
+.voice-call-who {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.voice-call-who strong {
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-call-who span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.voice-call-actions {
+  flex: none;
+  display: flex;
+  gap: 8px;
+}
+
+.voice-call-button {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+}
+
+.voice-call-button:hover {
+  background: var(--side-soft);
+}
+
+.voice-call-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.voice-call-button[aria-pressed="true"] {
+  border-color: transparent;
+  background: var(--ink);
+  color: var(--card);
+}
+
+.voice-call-button.accept,
+.voice-call-button.hang-up {
+  border-color: transparent;
+  color: #fff;
+}
+
+.voice-call-button.accept {
+  background: #1f8a4c;
+}
+
+.voice-call-button.hang-up {
+  background: #d93036;
+}
+
+/* The receiver lies down on the button that ends the call. */
+.voice-call-button.hang-up svg {
+  transform: rotate(135deg);
+}
+
+.voice-call-button.accept:hover,
+.voice-call-button.hang-up:hover {
+  filter: brightness(1.08);
+}
+
+/* Calls: joining a group call from the chat's header. */
+.button.thread-call-join {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-color: #1f8a4c;
+  color: #1f8a4c;
+}
+
+.button.thread-call-join svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The call as a bar: the row of who, how it is going and the buttons. */
+.voice-call {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.voice-call-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Sound plays from here while no pictures are shown. */
+.voice-call-sound {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* The call with pictures or several people: tiles above the row. */
+.voice-call.tiles {
+  width: min(460px, calc(100vw - 40px));
+}
+
+.voice-call.tiles.large {
+  width: min(1100px, calc(100vw - 40px));
+}
+
+.voice-call.tiles .voice-call-row > .voice-call-avatar {
+  display: none;
+}
+
+.voice-call-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  max-height: calc(100vh - 150px);
+  overflow: auto;
+}
+
+.voice-call-stage[data-count="0"],
+.voice-call-stage[data-count="1"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.voice-call.large .voice-call-stage:not([data-count="0"], [data-count="1"], [data-count="2"], [data-count="4"]) {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.voice-call-waiting {
+  margin: 0;
+  padding: 36px 12px;
+  border-radius: 12px;
+  background: var(--side-soft);
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+.voice-call-tile {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #16181d;
+  color: #fff;
+}
+
+.voice-call-tile video,
+.voice-call-self video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.voice-call-tile video {
+  position: absolute;
+  inset: 0;
+}
+
+/* Their sound still plays while their camera is off; only the picture is hidden. */
+.voice-call-tile:not(.camera) video {
+  opacity: 0;
+}
+
+.voice-call-tile .voice-call-avatar {
+  width: 64px;
+  height: 64px;
+  font-size: 21px;
+  animation: none;
+}
+
+.voice-call-name {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 16px);
+  padding: 2px 8px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* This person's own camera, small in the corner, mirrored as in a mirror. */
+.voice-call-self {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  width: 26%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border: 2px solid var(--card);
+  border-radius: 10px;
+  background: #16181d;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.voice-call-self video {
+  transform: scaleX(-1);
+}
+
+/* Alone so far: the own camera fills the space under the waiting note. */
+.voice-call-stage[data-count="0"] .voice-call-self {
+  position: static;
+  width: 100%;
+  border: 0;
+  box-shadow: none;
+}
+
+/* Call history */
+.vault-modal.call-history {
+  width: min(560px, 100%);
+}
+
+.call-history-list {
+  display: grid;
+  gap: 2px;
+  max-height: min(60vh, 520px);
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.call-history-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 6px;
+  border-radius: 12px;
+}
+
+.call-history-list li:hover {
+  background: var(--side-soft);
+}
+
+.avatar.call-history-avatar {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  font-size: 13px;
+}
+
+.call-history-who {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.call-history-who strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-history-who span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.call-history-list li.missed .call-history-who strong {
+  color: #d93036;
+}
+
+.call-history-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}

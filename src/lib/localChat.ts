@@ -48,7 +48,8 @@ export function localMessageLabel(message: Pick<LocalMessage, "body" | "file">) 
 
 // idle: no keyboard or mouse input on their computer for a while. Apps from before this was shared
 // never say, so they always show as active.
-export type LocalPeer = { userId: string; name: string; idle: boolean }
+// calls: whether their app can take voice and video calls; apps from before calls cannot.
+export type LocalPeer = { userId: string; name: string; idle: boolean; calls?: boolean }
 
 export type LocalChatSummary = { chat: string; name: string; lastBody: string; lastAt: number }
 

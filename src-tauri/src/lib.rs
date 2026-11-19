@@ -382,6 +382,7 @@ pub fn run() {
             localchat::local_chat_file,
             localchat::local_chat_save_file,
             localchat::local_chat_typing,
+            localchat::local_chat_signal,
             localchat::local_chat_mark_read,
             localchat::local_chat_delete_messages,
             localchat::local_chat_delete_for_everyone,

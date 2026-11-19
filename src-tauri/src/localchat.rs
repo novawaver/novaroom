@@ -58,7 +58,12 @@ const FEATURE_FILES: &str = "files";
 const FEATURE_DELETE: &str = "delete";
 /// Understands Pin frames: someone pinning or unpinning a message for everyone in the chat.
 const FEATURE_PIN: &str = "pin";
-const FEATURES: &[&str] = &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES, FEATURE_DELETE, FEATURE_PIN];
+/// Understands Signal frames: the short notes two apps swap to set up a voice or video call.
+const FEATURE_CALLS: &str = "calls";
+const FEATURES: &[&str] =
+    &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES, FEATURE_DELETE, FEATURE_PIN, FEATURE_CALLS];
+/// The longest call set-up note, in bytes. It has to fit one packet with room to spare.
+const MAX_SIGNAL: usize = 30_000;
 /// The longest Noise message, which is also the most one length-prefixed packet can hold.
 const NOISE_MAX: usize = 65535;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -295,6 +300,8 @@ pub struct LocalPeer {
     /// No keyboard or mouse input on any of their computers for a while. Apps from before idle
     /// status was shared never say, so they always count as active.
     idle: bool,
+    /// Whether one of their computers runs an app that can take voice and video calls.
+    calls: bool,
 }
 
 /// A chat with messages, for the list of chats.
@@ -376,6 +383,10 @@ enum Frame {
     FileChunk { id: String, offset: u64, data: String },
     /// The file of message `id` can't be sent any more.
     FileMissing { id: String },
+    /// A note for setting up a call with `to`: ringing, answering, how to reach each other, hanging
+    /// up. The windows agree on what `data` holds; it is passed on as it is and never stored. The
+    /// call's sound and picture go between the two windows directly. Needs "calls".
+    Signal { to: String, data: String },
 }
 
 struct Peer {
@@ -539,6 +550,7 @@ impl Session {
             user_id: self.user_id.clone(),
             name: self.name.lock().unwrap().clone(),
             idle: self.idle.load(Ordering::Relaxed),
+            calls: true,
         }
     }
 
@@ -562,11 +574,15 @@ impl Session {
         for peer in peers.values().filter(|peer| peer.user_id != self.user_id) {
             people
                 .entry(&peer.user_id)
-                .and_modify(|person| person.idle &= peer.idle)
+                .and_modify(|person| {
+                    person.idle &= peer.idle;
+                    person.calls |= peer.features.contains(FEATURE_CALLS);
+                })
                 .or_insert_with(|| LocalPeer {
                     user_id: peer.user_id.clone(),
                     name: peer.name.clone(),
                     idle: peer.idle,
+                    calls: peer.features.contains(FEATURE_CALLS),
                 });
         }
         let mut list: Vec<LocalPeer> = people.into_values().collect();
@@ -1001,6 +1017,14 @@ async fn run_connection(session: Arc<Session>, stream: TcpStream, initiator: boo
     }
 }
 
+/// A call set-up note from someone on the network, for the window.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SignalEvent {
+    user_id: String,
+    data: String,
+}
+
 /// Something the window shows about a chat: someone typing, or how far they have read.
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -1165,6 +1189,11 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
             if from != session.user_id {
                 let event = TypingEvent { chat, user_id: from.to_string(), typing };
                 let _ = session.app.emit("local-chat-typing", event);
+            }
+        }
+        Frame::Signal { to, data } => {
+            if to == session.user_id && from != session.user_id && data.len() <= MAX_SIGNAL {
+                let _ = session.app.emit("local-chat-signal", SignalEvent { user_id: from.to_string(), data });
             }
         }
         Frame::Read { up_to } => {
@@ -1903,6 +1932,29 @@ pub fn local_chat_typing(state: tauri::State<'_, LocalChat>, chat: String, typin
         peer.features.contains(FEATURE_TYPING).then(|| Frame::Typing { to: to.clone(), typing })
     });
     Ok(())
+}
+
+/// Passes a call set-up note to someone on the network. False if none of their computers is
+/// connected with an app that takes calls.
+#[tauri::command]
+pub fn local_chat_signal(state: tauri::State<'_, LocalChat>, to: String, data: String) -> Result<bool, String> {
+    let session = running(&state)?;
+    if !valid_user_id(&to) || to == session.user_id {
+        return Err("That person is not valid.".into());
+    }
+    if data.len() > MAX_SIGNAL {
+        return Err("That is too much to send.".into());
+    }
+    let reachable = session
+        .peers
+        .lock()
+        .unwrap()
+        .values()
+        .any(|peer| peer.user_id == to && peer.features.contains(FEATURE_CALLS));
+    session.send_to(Some(&to), |peer| {
+        peer.features.contains(FEATURE_CALLS).then(|| Frame::Signal { to: to.clone(), data: data.clone() })
+    });
+    Ok(reachable)
 }
 
 /// Records that this person has seen a direct chat up to its newest message from the other

@@ -46,6 +46,7 @@ import { ChatText, useTextStyling } from "./ChatText"
 import { plainChatText } from "../lib/chatText"
 import { EmojiPicker } from "./EmojiPicker"
 import { isEmojiOnly } from "../lib/emoji"
+import { CallButtons, type VoiceCallState } from "./VoiceCall"
 
 // While online, how often to download the registered keys again, so people who set up Local chat
 // since can be recognised on the network.
@@ -889,7 +890,16 @@ function LocalFileView({ message, onOpenImage }: { message: LocalMessage; onOpen
 }
 
 /** The open Local chat: its messages and the box to write one. */
-export function LocalChatThread({ local, userId }: { local: LocalChatState; userId: string }) {
+export function LocalChatThread({
+  local,
+  userId,
+  voice,
+}: {
+  local: LocalChatState
+  userId: string
+  // Calls, where the page has them: buttons to call the person this chat is with.
+  voice?: VoiceCallState
+}) {
   const [body, setBody] = useState("")
   const [sendError, setSendError] = useState("")
   const [sending, setSending] = useState(false)
@@ -1207,6 +1217,28 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
           </p>
         </div>
         <div className="thread-actions">
+          {voice && !isRoom && (
+            <CallButtons
+              voice={voice}
+              target={{
+                transport: "local",
+                conversationId: selected,
+                title: local.chatName(selected),
+                avatarUrl: local.avatarOf(selected),
+                group: false,
+                otherId: selected,
+              }}
+              blockedHint={
+                !local.running
+                  ? "Local chat is not running"
+                  : !peer
+                    ? "They are not on the local network right now"
+                    : peer.calls === false
+                      ? "Their app is too old for calls"
+                      : undefined
+              }
+            />
+          )}
           <AutoDeleteMenu
             hours={local.autoDeleteHours}
             onChange={(hours) => void local.changeAutoDelete(hours)}
@@ -1221,6 +1253,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                 label: quiet ? "Turn on notifications" : "Turn off notifications",
                 onSelect: () => setChatQuiet(userId, localAlertKey(selected), !quiet),
               },
+              ...(voice ? [{ label: "Call history", onSelect: voice.openHistory }] : []),
             ]}
             disabled={!local.running}
           />

@@ -72,7 +72,7 @@ import {
 } from "../lib/vault"
 import { setExitGuard } from "../lib/unsaved"
 import { listUsers } from "../lib/users"
-import { localPeers } from "../lib/localChat"
+import { localAvatars, localPeers } from "../lib/localChat"
 import {
   SHARE_NOTE_LIMIT,
   cancelLocalShare,
@@ -2472,6 +2472,23 @@ function SharedPreview({
   )
 }
 
+type SharePerson = { userId: string; name: string; detail: string; avatarUrl: string | null }
+
+/** A round photo of someone, or their initials when they have none. */
+function ShareAvatar({ person }: { person: SharePerson }) {
+  const letters = person.name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("")
+  return (
+    <span className="avatar event-avatar" aria-hidden="true">
+      {person.avatarUrl ? <img src={person.avatarUrl} alt="" /> : <span>{letters || "?"}</span>}
+    </span>
+  )
+}
+
 /**
  * Sends a copy of chosen rows and columns to chosen people. `rows` are the rows on screen when it
  * was opened, so a search or filter narrows what is offered.
@@ -2498,7 +2515,9 @@ function ShareDialog({
   const [rowIds, setRowIds] = useState(() => new Set(copy.rows.map((row) => row.id)))
   // Through Novaroom to any registered person, or straight to someone on the office network.
   const [via, setVia] = useState<ShareVia>("online")
-  const [people, setPeople] = useState<Array<{ userId: string; name: string; detail: string }> | null>(null)
+  const [people, setPeople] = useState<SharePerson[] | null>(null)
+  // True while the list of people to add is open under the photos.
+  const [picking, setPicking] = useState(true)
   const [peopleError, setPeopleError] = useState("")
   const [find, setFind] = useState("")
   const [picked, setPicked] = useState<Set<string>>(() => new Set())
@@ -2515,11 +2534,21 @@ function ShareDialog({
     setPicked(new Set())
     const load =
       via === "local"
-        ? localPeers().then((peers) =>
-            peers.map((peer) => ({ userId: peer.userId, name: peer.name || "Unnamed", detail: peer.idle ? "Away" : "" })),
+        ? Promise.all([localPeers(), localAvatars().catch(() => ({}) as Record<string, string>)]).then(([peers, avatars]) =>
+            peers.map((peer) => ({
+              userId: peer.userId,
+              name: peer.name || "Unnamed",
+              detail: peer.idle ? "Away" : "",
+              avatarUrl: avatars[peer.userId] ?? null,
+            })),
           )
         : listUsers().then((users) =>
-            users.map((user) => ({ userId: user.userId, name: user.displayName || "Unnamed", detail: user.role })),
+            users.map((user) => ({
+              userId: user.userId,
+              name: user.displayName || "Unnamed",
+              detail: user.role,
+              avatarUrl: user.avatarUrl,
+            })),
           )
     load
       .then((list) => {
@@ -2546,7 +2575,10 @@ function ShareDialog({
   }
   const chosen = useMemo(() => pickShared(copy, columnIds, new Set(copy.rows.map((row) => row.id))), [copy, columnIds])
   const wanted = find.trim().toLowerCase()
-  const listed = (people ?? []).filter(
+  const chosenPeople = (people ?? []).filter((person) => picked.has(person.userId))
+  // People who can still be added, narrowed by the search.
+  const addable = (people ?? []).filter((person) => !picked.has(person.userId))
+  const listed = addable.filter(
     (person) => !wanted || `${person.name} ${person.detail}`.toLowerCase().includes(wanted),
   )
   const sharesPassword = copy.columns.some((column) => column.kind === "password" && columnIds.has(column.id))
@@ -2612,45 +2644,89 @@ function ShareDialog({
             Local network
           </button>
         </div>
-        <label className="vault-search vault-share-find">
-          <SearchIcon />
-          <input
-            type="search"
-            aria-label="Find a person"
-            placeholder="Find a person"
-            value={find}
-            onChange={(event) => setFind(event.target.value)}
-          />
-        </label>
-        <div className="vault-share-people">
-          {peopleError ? (
-            <p className="form-error" role="alert">
-              {peopleError}
-            </p>
-          ) : people === null ? (
-            <p className="hint">Loading people…</p>
-          ) : listed.length === 0 ? (
-            <p className="hint">
-              {people.length > 0
-                ? "Nobody matches."
-                : via === "local"
-                  ? "Nobody else is on the local network right now."
-                  : "Nobody else is registered yet."}
-            </p>
-          ) : (
-            listed.map((person) => (
-              <label key={person.userId} className="vault-share-person">
-                <input
-                  type="checkbox"
-                  checked={picked.has(person.userId)}
-                  onChange={(event) => setPicked(toggle(picked, person.userId, event.target.checked))}
-                />
-                <span>{person.name}</span>
-                {person.detail && <span className="hint">{person.detail}</span>}
-              </label>
-            ))
+        {/* As when assigning a task: the chosen people as photos (click one to remove it), then a "+". */}
+        <div className="task-form-avatars">
+          {chosenPeople.map((person) => (
+            <button
+              key={person.userId}
+              type="button"
+              className="task-form-avatar"
+              aria-label={`Remove ${person.name}`}
+              title={`Remove ${person.name}`}
+              onClick={() => setPicked(toggle(picked, person.userId, false))}
+            >
+              <ShareAvatar person={person} />
+              <svg className="task-form-remove" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M8.5 8.5l7 7M15.5 8.5l-7 7" />
+              </svg>
+            </button>
+          ))}
+          {addable.length > 0 && (
+            <button
+              type="button"
+              className="task-form-add"
+              aria-label={picking ? "Close the list" : "Add a person"}
+              title={picking ? "Close the list" : "Add a person"}
+              aria-expanded={picking}
+              onClick={() => setPicking(!picking)}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
           )}
         </div>
+        {peopleError ? (
+          <p className="form-error" role="alert">
+            {peopleError}
+          </p>
+        ) : people === null ? (
+          <p className="hint">Loading people…</p>
+        ) : people.length === 0 ? (
+          <p className="hint">
+            {via === "local" ? "Nobody else is on the local network right now." : "Nobody else is registered yet."}
+          </p>
+        ) : (
+          picking &&
+          addable.length > 0 && (
+            <>
+              {addable.length > 6 && (
+                <label className="vault-search vault-share-find">
+                  <SearchIcon />
+                  <input
+                    type="search"
+                    aria-label="Find a person"
+                    placeholder="Find a person"
+                    value={find}
+                    onChange={(event) => setFind(event.target.value)}
+                  />
+                </label>
+              )}
+              {listed.length === 0 ? (
+                <p className="hint">Nobody matches.</p>
+              ) : (
+                <ul className="task-form-picker">
+                  {listed.map((person) => (
+                    <li key={person.userId}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPicked(toggle(picked, person.userId, true))
+                          if (addable.length === 1) setPicking(false)
+                        }}
+                      >
+                        <ShareAvatar person={person} />
+                        {person.name}
+                        {person.detail && <span className="hint">{person.detail}</span>}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )
+        )}
       </div>
 
       <div className="vault-share-section">

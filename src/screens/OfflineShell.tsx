@@ -4,6 +4,7 @@ import type { Session } from "../types"
 import { CaptureRail, VaultRail } from "./AppShell"
 import { Capture, type CaptureState, type CaptureTab } from "./Capture"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
+import { VoiceCallBar, useVoiceCall } from "./VoiceCall"
 import { Vault, VaultLeaveDialog, useVault } from "./Vault"
 
 type OfflineView = "local" | "vault" | "capture"
@@ -29,6 +30,8 @@ export function OfflineShell({
   const [view, setView] = useState<OfflineView>("local")
   const [captureTab, setCaptureTab] = useState<CaptureTab>("record")
   const vault = useVault(session.userId, view === "vault")
+  // Without internet, calls still work with people on the same network.
+  const voice = useVoiceCall(session, true)
   // Leaving the Vault with unsaved changes first asks whether to save or discard them.
   const leaveTo = (go: () => void) => (view === "vault" ? vault.guard(go) : go())
   const { select } = local
@@ -109,7 +112,7 @@ export function OfflineShell({
           )}
         </aside>
         {view === "local" ? (
-          <LocalChatThread local={local} userId={session.userId} />
+          <LocalChatThread local={local} userId={session.userId} voice={voice} />
         ) : view === "capture" ? (
           <Capture tab={captureTab} capture={capture} />
         ) : (
@@ -117,6 +120,7 @@ export function OfflineShell({
         )}
       </div>
       <VaultLeaveDialog vault={vault} />
+      <VoiceCallBar voice={voice} />
     </div>
   )
 }
