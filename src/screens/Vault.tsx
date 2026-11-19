@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -31,7 +32,12 @@ import {
   newRow,
   newTable,
   importedTables,
+  importedJsonTables,
   pickExcelFile,
+  pickJsonFile,
+  groupTables,
+  mergePlan,
+  mergeTables,
   openVaultAttachment,
   passesFilter,
   pickVaultFile,
@@ -305,6 +311,88 @@ function readWidths(tableId: string): Record<string, number> {
   }
 }
 
+// Columns fixed in place, so scrolling sideways never hides them. Kept on this computer per table,
+// like column widths.
+const fixedKey = (tableId: string) => `novaroom.vault-fixed.${tableId}`
+
+function readFixed(tableId: string): string[] {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(fixedKey(tableId)) ?? "[]")
+    return Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string") : []
+  } catch {
+    return []
+  }
+}
+
+// The tables shown beside the open one and whether they are stacked, per Vault file on this computer.
+const splitKey = (file: string) => `novaroom.vault-split.${file}`
+const MAX_PANES = 4
+
+function readSplit(file: string): { ids: string[]; stacked: boolean } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(splitKey(file)) ?? "null")
+    const ids = Array.isArray(saved?.ids) ? saved.ids.filter((id: unknown): id is string => typeof id === "string") : []
+    return { ids, stacked: saved?.stacked === true }
+  } catch {
+    return { ids: [], stacked: false }
+  }
+}
+
+/** A pin: the column stays in place while the table scrolls sideways. */
+function FixIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M9 4.5h6l-1 5.5 3 3.5H7l3-3.5-1-5.5zM12 13.5V20" />
+    </svg>
+  )
+}
+
+function AddRowIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="14.5" width="16" height="5.5" rx="1.5" />
+      <path d="M12 3.5v7M8.5 7h7" />
+    </svg>
+  )
+}
+
+function AddColumnIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="14.5" y="4" width="5.5" height="16" rx="1.5" />
+      <path d="M7 8.5v7M3.5 12h7" />
+    </svg>
+  )
+}
+
+function MergeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 4.5v3a6 6 0 0 0 6 6M18 4.5v3a6 6 0 0 1-6 6v6M9 17l3 3 3-3" />
+    </svg>
+  )
+}
+
+/** Two panes, side by side or one above the other. */
+function PanesIcon({ stacked }: { stacked?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+      <path d={stacked ? "M3.5 12h17" : "M12 4.5v15"} />
+    </svg>
+  )
+}
+
+/** A pane with a plus beside it: show another table. */
+function AddPaneIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3.5" y="4.5" width="10" height="15" rx="2" />
+      <path d="M18.5 9v6M15.5 12h6" />
+    </svg>
+  )
+}
+
 /** A table row with a smaller table hanging under it: Sub-table items shown in their cells. */
 function SubRowsIcon() {
   return (
@@ -387,6 +475,54 @@ export function useVault(userId: string | null, active: boolean) {
     [data, saved],
   )
   const table = data?.tables.find((item) => item.id === tableId) ?? data?.tables[0] ?? null
+  // Tables shown beside the open one, each in its own pane, and whether the panes are stacked.
+  const [split, setSplit] = useState<string[]>([])
+  const [stacked, setStacked] = useState(false)
+  // The tables on the page: the open one first, then the ones beside it.
+  const panes = useMemo(() => {
+    if (!data || !table) return []
+    const shown = [table]
+    for (const id of split) {
+      const other = data.tables.find((item) => item.id === id)
+      if (other && !shown.includes(other) && shown.length < MAX_PANES) shown.push(other)
+    }
+    return shown
+  }, [data, table, split])
+
+  // Remember the panes for this file.
+  const loaded = data !== null
+  useEffect(() => {
+    if (!file || !loaded) return
+    try {
+      if (split.length > 0 || stacked) localStorage.setItem(splitKey(file), JSON.stringify({ ids: split, stacked }))
+      else localStorage.removeItem(splitKey(file))
+    } catch {
+      // Not remembered; the panes still show until the file is closed.
+    }
+  }, [file, loaded, split, stacked])
+
+  /** Shows a table in a pane. A table already in another pane swaps places with it. */
+  function showInPane(index: number, id: string) {
+    const ids = panes.map((pane) => pane.id)
+    if (index >= ids.length) return
+    const other = ids.indexOf(id)
+    if (other !== -1) ids[other] = ids[index]
+    ids[index] = id
+    setTableId(ids[0])
+    setSplit(ids.slice(1))
+  }
+
+  /** Adds a pane showing the first table that is not on the page yet. */
+  function addPane() {
+    const next = data?.tables.find((item) => !panes.includes(item))
+    if (next && panes.length < MAX_PANES) setSplit([...panes.slice(1).map((pane) => pane.id), next.id])
+  }
+
+  function closePane(index: number) {
+    const ids = panes.map((pane) => pane.id).filter((_, at) => at !== index)
+    setTableId(ids[0] ?? null)
+    setSplit(ids.slice(1))
+  }
 
   const load = useCallback(
     async (path: string) => {
@@ -400,6 +536,9 @@ export function useVault(userId: string | null, active: boolean) {
         setTableId(next.tables[0]?.id ?? null)
         setEditing(false)
         setFilters({})
+        const view = readSplit(path)
+        setSplit(view.ids)
+        setStacked(view.stacked)
         if (userId) rememberVaultFile(userId, path)
       } catch (caught) {
         setFile(null)
@@ -490,23 +629,46 @@ export function useVault(userId: string | null, active: boolean) {
     setEditing(true)
   }
 
-  /** Asks for an Excel file and adds a table for each of its sheets. Saved like any other change. */
-  function importExcel() {
+  /**
+   * Adds the tables read from a file the person picks; `read` gives null if they cancel. The tables
+   * join the category of the open table and are saved like any other change.
+   */
+  function importTables(read: (category: string) => Promise<VaultTable[] | null>, nothing: string) {
     if (!data) return
     setError("")
-    const category = table?.category.trim() ?? ""
-    void pickExcelFile()
-      .then((book) => {
-        if (!book) return
-        const created = importedTables(book, category)
+    void read((table?.category ?? "").trim())
+      .then((created) => {
+        if (!created) return
         if (created.length === 0) {
-          setError("That file has nothing to import: its sheets are empty.")
+          setError(nothing)
           return
         }
         update((current) => ({ tables: [...current.tables, ...created] }))
         setTableId(created[0].id)
       })
       .catch((caught) => setError(caught instanceof Error ? caught.message : "Could not import that file."))
+  }
+
+  /** Asks for an Excel file and adds a table for each of its sheets. */
+  function importExcel() {
+    importTables(
+      (category) => pickExcelFile().then((book) => book && importedTables(book, category)),
+      "That file has nothing to import: its sheets are empty.",
+    )
+  }
+
+  /** Asks for a JSON file and adds a table for each list of records in it. */
+  function importJson() {
+    importTables(
+      (category) => pickJsonFile().then((picked) => picked && importedJsonTables(picked, category)),
+      'That file has nothing to import. It needs a list of records, such as [{ "name": "Ada" }].',
+    )
+  }
+
+  /** Moves the rows of one table into another and removes the emptied table. */
+  function mergeInto(intoId: string, fromId: string) {
+    update((current) => ({ tables: mergeTables(current.tables, intoId, fromId) }))
+    if (table?.id === fromId) setTableId(intoId)
   }
 
   function removeTable(id: string) {
@@ -548,7 +710,8 @@ export function useVault(userId: string | null, active: boolean) {
 
   /** Follows a Link: opens the table it points to and shows the row. */
   function openRow(targetTableId: string, rowId: string) {
-    setTableId(targetTableId)
+    // A table already in a pane shows the row there.
+    if (!panes.some((pane) => pane.id === targetTableId)) setTableId(targetTableId)
     setFocusRow({ tableId: targetTableId, rowId })
   }
 
@@ -564,7 +727,15 @@ export function useVault(userId: string | null, active: boolean) {
     reportError: setError,
     pending,
     setPending,
-    selectTable: setTableId,
+    // Choosing a table shows it in the first pane.
+    selectTable: (id: string | null) => (id && panes.length > 0 ? showInPane(0, id) : setTableId(id)),
+    panes,
+    stacked,
+    setStacked,
+    canSplit: data !== null && panes.length > 0 && panes.length < Math.min(MAX_PANES, data.tables.length),
+    showInPane,
+    addPane,
+    closePane,
     editing,
     setEditing,
     focusRow,
@@ -579,6 +750,8 @@ export function useVault(userId: string | null, active: boolean) {
     updateTable,
     addTable,
     importExcel,
+    importJson,
+    mergeInto,
     removeTable,
   }
 }
@@ -2052,9 +2225,71 @@ function RowPanel({
   )
 }
 
+function columnNames(columns: VaultColumn[]) {
+  return columns.map((column) => column.name.trim() || "Untitled").join(", ")
+}
+
+/** Picks the table to merge into this one, and says what the merge does before it happens. */
+function MergeDialog({ vault, table, onClose }: { vault: VaultState; table: VaultTable; onClose: () => void }) {
+  const others = (vault.data?.tables ?? []).filter((item) => item.id !== table.id)
+  const [fromId, setFromId] = useState(others[0]?.id ?? "")
+  const from = others.find((item) => item.id === fromId) ?? null
+  const plan = from ? mergePlan(table, from) : null
+  const name = table.name || "Untitled"
+  const fromName = from?.name || "Untitled"
+
+  return (
+    <VaultModal title={`Merge a table into ${name}`} onClose={onClose}>
+      <label className="vault-merge-pick">
+        <span>Table to merge in</span>
+        <select value={fromId} onChange={(event) => setFromId(event.target.value)}>
+          {others.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.name || "Untitled"} ({item.rows.length === 1 ? "1 row" : `${item.rows.length} rows`})
+            </option>
+          ))}
+        </select>
+      </label>
+      {from && plan && (
+        <div className="vault-merge-plan" role="status">
+          <p>
+            {from.rows.length === 1 ? "The 1 row" : `The ${from.rows.length} rows`} of “{fromName}” go under the{" "}
+            {table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`} of “{name}”, and “{fromName}” is
+            removed. Links to its rows keep working.
+          </p>
+          <p>
+            {plan.shared.length > 0
+              ? `Combined, because they have the same name and type: ${columnNames(plan.shared.map((pair) => pair.into))}.`
+              : "No columns have the same name and type, so none are combined."}
+          </p>
+          {plan.added.length > 0 && <p>Added as new columns: {columnNames(plan.added)}.</p>}
+          <p>You can still discard this before you save.</p>
+        </div>
+      )}
+      <div className="form-actions">
+        <button type="button" className="button secondary vault-small" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="button vault-small"
+          disabled={!from}
+          onClick={() => {
+            if (from) vault.mergeInto(table.id, from.id)
+            onClose()
+          }}
+        >
+          <MergeIcon /> Merge
+        </button>
+      </div>
+    </VaultModal>
+  )
+}
+
 function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable }) {
   const change = (next: (current: VaultTable) => VaultTable) => vault.updateTable(table.id, next)
   const { editing } = vault
+  const [merging, setMerging] = useState(false)
   const [query, setQuery] = useState("")
   const [fit, setFit] = useState(readFit)
   const [markRepeated, setMarkRepeated] = useState(() => readMarkRepeated(table.id))
@@ -2170,6 +2405,55 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   const wrapRef = useRef<HTMLDivElement>(null)
   const cardsRef = useRef<HTMLDivElement>(null)
 
+  // Columns fixed in place while the table scrolls sideways; ones deleted since are left out.
+  const [fixed, setFixed] = useState(() => readFixed(table.id))
+  const fixedIds = fixed.filter((id) => table.columns.some((column) => column.id === id))
+  // With a fixed column, the row numbers (and row handles) stay in place too.
+  const hasFixed = fixedIds.length > 0 && !cards
+  const lastFixed = hasFixed ? [...table.columns].reverse().find((column) => fixedIds.includes(column.id))?.id : undefined
+  // How far from the left edge each fixed cell stays: the widths of the fixed cells before it.
+  const [lefts, setLefts] = useState<Record<string, number>>({})
+
+  function toggleFixed(columnId: string) {
+    const next = fixedIds.includes(columnId) ? fixedIds.filter((id) => id !== columnId) : [...fixedIds, columnId]
+    setFixed(next)
+    try {
+      if (next.length > 0) localStorage.setItem(fixedKey(table.id), JSON.stringify(next))
+      else localStorage.removeItem(fixedKey(table.id))
+    } catch {
+      // Not remembered; the columns still stay fixed until the page is closed.
+    }
+  }
+
+  // Which cells are fixed and in what order, so they are measured again when that changes.
+  const fixedLayout = `${editing}|${table.columns.map((column) => (fixedIds.includes(column.id) ? `${column.id}*` : column.id)).join(",")}`
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap || !hasFixed) return
+    const cells = [...wrap.querySelectorAll<HTMLElement>("thead th[data-fixed]")]
+    const measure = () => {
+      const next: Record<string, number> = {}
+      let left = 0
+      for (const cell of cells) {
+        next[cell.dataset.fixed ?? ""] = left
+        left += cell.getBoundingClientRect().width
+      }
+      setLefts((current) =>
+        Object.keys(next).length === Object.keys(current).length &&
+        Object.entries(next).every(([key, value]) => Math.abs((current[key] ?? -1) - value) < 0.5)
+          ? current
+          : next,
+      )
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    cells.forEach((cell) => observer.observe(cell))
+    return () => observer.disconnect()
+  }, [hasFixed, fixedLayout])
+
+  const isFixed = (key: string) => hasFixed && (key === "grip" || key === "no" || fixedIds.includes(key))
+  const fixedStyle = (key: string) => (isFixed(key) && key in lefts ? { left: lefts[key] } : undefined)
+
   const tables = vault.data?.tables ?? []
   /** Where a Link column points, for showing, searching, and following its cells. */
   function linkFor(column: VaultColumn): LinkTarget | undefined {
@@ -2254,6 +2538,8 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   const columnClass = (column: VaultColumn, index: number) =>
     [
       widths[column.id] && "vault-col-sized",
+      isFixed(column.id) && "vault-fixed",
+      lastFixed === column.id && "vault-fixed-last",
       columnDrag?.id === column.id && "vault-col-dragged",
       columnDropAt === index && "vault-col-drop-before",
       columnDropAt === table.columns.length && index === table.columns.length - 1 && "vault-col-drop-after",
@@ -2449,24 +2735,35 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
     }))
   }
 
-  function addColumn() {
-    change((current) => ({ ...current, columns: [...current.columns, newColumn(`Column ${current.columns.length + 1}`)] }))
-    // Show the new column, which is added at the far right.
-    window.requestAnimationFrame(() => wrapRef.current?.scrollTo({ left: wrapRef.current.scrollWidth, behavior: "smooth" }))
+  /** Adds a column after the last one, or before the first one with `atStart`. */
+  function addColumn(atStart = false) {
+    change((current) => {
+      const column = newColumn(`Column ${current.columns.length + 1}`)
+      return { ...current, columns: atStart ? [column, ...current.columns] : [...current.columns, column] }
+    })
+    // Show the new column, at the far left or the far right.
+    window.requestAnimationFrame(() =>
+      wrapRef.current?.scrollTo({ left: atStart ? 0 : wrapRef.current.scrollWidth, behavior: "smooth" }),
+    )
   }
 
-  function addRow() {
+  /** Adds a row under the last one, or above the first one with `atStart`. */
+  function addRow(atStart = false) {
     // A new, empty row would not match the search, filters or duplicates, so show every row again.
     setQuery("")
     setFilters([])
     setDuplicateColumnIds(null)
+    // The rows are no longer in the order they were sorted into.
+    setSorted(null)
     const row = newRow()
-    change((current) => ({ ...current, rows: [...current.rows, row] }))
+    change((current) => ({ ...current, rows: atStart ? [row, ...current.rows] : [...current.rows, row] }))
     // In Cards, open the new row to fill in.
     if (cards) setSelected(row.id)
-    // Show the new row, which is added at the bottom.
+    // Show the new row, at the top or the bottom.
     const scroller = cards ? cardsRef : wrapRef
-    window.requestAnimationFrame(() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }))
+    window.requestAnimationFrame(() =>
+      scroller.current?.scrollTo({ top: atStart ? 0 : scroller.current.scrollHeight, behavior: "smooth" }),
+    )
   }
 
   function removeColumn(columnId: string) {
@@ -2508,11 +2805,11 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               aria-label="Category"
               placeholder="Category"
               title="Tables with the same category are listed together"
-              list="vault-categories"
+              list={`vault-categories-${table.id}`}
               value={table.category ?? ""}
               onChange={(event) => change((current) => ({ ...current, category: event.target.value }))}
             />
-            <datalist id="vault-categories">
+            <datalist id={`vault-categories-${table.id}`}>
               {vaultCategories(tables).map((category) => (
                 <option key={category} value={category} />
               ))}
@@ -2641,6 +2938,16 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
           <>
             <button
               type="button"
+              className="button secondary vault-small vault-icon-button"
+              aria-label="Merge another table into this one"
+              title="Merge another table into this one"
+              disabled={tables.length < 2}
+              onClick={() => setMerging(true)}
+            >
+              <MergeIcon />
+            </button>
+            <button
+              type="button"
               className="button danger vault-small vault-icon-button"
               aria-label="Delete table"
               title="Delete table"
@@ -2655,6 +2962,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
           </>
         )}
       </div>
+      {merging && <MergeDialog vault={vault} table={table} onClose={() => setMerging(false)} />}
       {cards && showCardFields && table.columns.length > 0 && (
         <CardFieldsBar
           table={table}
@@ -2677,7 +2985,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
       {table.columns.length === 0 ? (
         <p className="hint vault-note">
           {editing ? (
-            <button type="button" className="button secondary vault-small" onClick={addColumn}>
+            <button type="button" className="button secondary vault-small" onClick={() => addColumn()}>
               <PlusIcon /> Add a column
             </button>
           ) : (
@@ -2712,7 +3020,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               ))
             )}
             {editing && (
-              <button type="button" className="vault-card vault-card-add" onClick={addRow}>
+              <button type="button" className="vault-card vault-card-add" onClick={() => addRow()}>
                 <PlusIcon /> Add row
               </button>
             )}
@@ -2744,6 +3052,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               !editing && "vault-viewing",
               fit && "vault-fit",
               hasWidths && "vault-has-widths",
+              hasFixed && "vault-has-fixed",
               columnDrag && "vault-col-dragging",
             ]
               .filter(Boolean)
@@ -2751,17 +3060,52 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
           >
             <thead>
               <tr>
-                {editing && <th className="vault-grip-cell" aria-label="Move rows" />}
-                <th scope="col" className="vault-no">
-                  No
+                {/* The corner: a new row above the first one, and a new column before the first one. */}
+                {editing && (
+                  <th
+                    className={isFixed("grip") ? "vault-grip-cell vault-fixed" : "vault-grip-cell"}
+                    data-fixed={hasFixed ? "grip" : undefined}
+                    style={fixedStyle("grip")}
+                  >
+                    <button
+                      type="button"
+                      className="vault-add"
+                      aria-label="Add row at the top"
+                      title="Add a row at the top"
+                      onClick={() => addRow(true)}
+                    >
+                      <AddRowIcon />
+                    </button>
+                  </th>
+                )}
+                <th
+                  scope="col"
+                  className={isFixed("no") ? "vault-no vault-fixed" : "vault-no"}
+                  data-fixed={hasFixed ? "no" : undefined}
+                  style={fixedStyle("no")}
+                >
+                  {editing ? (
+                    <button
+                      type="button"
+                      className="vault-add"
+                      aria-label="Add column at the start"
+                      title="Add a column at the start"
+                      onClick={() => addColumn(true)}
+                    >
+                      <AddColumnIcon />
+                    </button>
+                  ) : (
+                    "No"
+                  )}
                 </th>
                 {table.columns.map((column, columnIndex) => (
                   <th
                     key={column.id}
                     scope="col"
                     data-column
+                    data-fixed={isFixed(column.id) ? column.id : undefined}
                     className={columnClass(column, columnIndex)}
-                    style={widthStyle(column.id)}
+                    style={{ ...widthStyle(column.id), ...fixedStyle(column.id) }}
                   >
                     <div className="vault-col-head">
                       {editing && table.columns.length > 1 && (
@@ -2818,6 +3162,20 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         onClick={() => sortBy(column)}
                       >
                         <SortIcon direction={sorted?.columnId === column.id ? sorted.direction : null} />
+                      </button>
+                      <button
+                        type="button"
+                        className="vault-sort vault-fix"
+                        aria-label={`Keep ${column.name || "this column"} in place when scrolling sideways`}
+                        aria-pressed={fixedIds.includes(column.id)}
+                        title={
+                          fixedIds.includes(column.id)
+                            ? "This column stays in place when the table scrolls sideways. Click to let it scroll."
+                            : "Keep this column in place when the table scrolls sideways"
+                        }
+                        onClick={() => toggleFixed(column.id)}
+                      >
+                        <FixIcon />
                       </button>
                       {editing && (
                         <button
@@ -2917,7 +3275,13 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                 ))}
                 {editing && (
                   <th className="vault-row-actions">
-                    <button type="button" className="vault-add" aria-label="Add column" title="Add column" onClick={addColumn}>
+                    <button
+                      type="button"
+                      className="vault-add"
+                      aria-label="Add column at the end"
+                      title="Add a column at the end"
+                      onClick={() => addColumn()}
+                    >
                       <PlusIcon />
                     </button>
                   </th>
@@ -2955,7 +3319,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                     }
                   >
                     {editing && (
-                      <td className="vault-grip-cell">
+                      <td className={isFixed("grip") ? "vault-grip-cell vault-fixed" : "vault-grip-cell"} style={fixedStyle("grip")}>
                         {canMove && (
                           <button
                             type="button"
@@ -2989,7 +3353,9 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         )}
                       </td>
                     )}
-                    <td className="vault-no">{index + 1}</td>
+                    <td className={isFixed("no") ? "vault-no vault-fixed" : "vault-no"} style={fixedStyle("no")}>
+                      {index + 1}
+                    </td>
                     {table.columns.map((column, columnIndex) => (
                       <td
                         key={column.id}
@@ -2998,7 +3364,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                             .filter(Boolean)
                             .join(" ") || undefined
                         }
-                        style={widthStyle(column.id)}
+                        style={{ ...widthStyle(column.id), ...fixedStyle(column.id) }}
                       >
                         {editing ? (
                           <CellEditor
@@ -3042,7 +3408,13 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               <tfoot>
                 <tr>
                   <td className="vault-grip-cell">
-                    <button type="button" className="vault-add" aria-label="Add row" title="Add row" onClick={addRow}>
+                    <button
+                      type="button"
+                      className="vault-add"
+                      aria-label="Add row at the bottom"
+                      title="Add a row at the bottom"
+                      onClick={() => addRow()}
+                    >
                       <PlusIcon />
                     </button>
                   </td>
@@ -3212,12 +3584,46 @@ export function Vault({ vault }: { vault: VaultState }) {
       <section className="settings vault">
         <header className="thread-bar profile-bar">
           <div className="vault-title">
-            <h1>{opened ? vault.table?.name || "Vault" : "Vault"}</h1>
+            <h1>{opened && vault.panes.length < 2 ? vault.table?.name || "Vault" : "Vault"}</h1>
             {/* The file itself, with Open and New, is at the top of the sidebar. */}
             {opened && vault.dirty && <p className="thread-email vault-unsaved">Unsaved changes</p>}
           </div>
           {opened && (
             <div className="profile-bar-actions">
+              {vault.panes.length > 1 && (
+                <button
+                  type="button"
+                  className="bar-icon"
+                  aria-label="Stack the tables"
+                  aria-pressed={vault.stacked}
+                  title={
+                    vault.stacked
+                      ? "Tables are one above the other. Click to show them side by side."
+                      : "Tables are side by side. Click to show them one above the other."
+                  }
+                  onClick={() => vault.setStacked(!vault.stacked)}
+                >
+                  <PanesIcon stacked={vault.stacked} />
+                </button>
+              )}
+              {vault.table && (
+                <button
+                  type="button"
+                  className="bar-icon"
+                  aria-label="Show another table on this page"
+                  title={
+                    vault.canSplit
+                      ? "Show another table on this page"
+                      : vault.panes.length >= MAX_PANES
+                        ? `Up to ${MAX_PANES} tables fit on the page`
+                        : "Every table is already on the page"
+                  }
+                  disabled={!vault.canSplit}
+                  onClick={vault.addPane}
+                >
+                  <AddPaneIcon />
+                </button>
+              )}
               <button
                 type="button"
                 className="bar-icon"
@@ -3294,6 +3700,49 @@ export function Vault({ vault }: { vault: VaultState }) {
               </button>
             </div>
           </div>
+        ) : vault.table && vault.panes.length > 1 ? (
+          <div className={vault.stacked ? "vault-panes stacked" : "vault-panes"}>
+            {vault.panes.map((pane, index) => (
+              <section key={pane.id} className="vault-pane" aria-label={pane.name || "Untitled"}>
+                <div className="vault-pane-head">
+                  <select
+                    aria-label="Table shown here"
+                    title="Table shown here"
+                    value={pane.id}
+                    onChange={(event) => vault.showInPane(index, event.target.value)}
+                  >
+                    {groupTables(vault.data?.tables ?? []).map(({ category, tables }) => {
+                      const options = tables.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.name || "Untitled"}
+                        </option>
+                      ))
+                      return category ? (
+                        <optgroup key={category} label={category}>
+                          {options}
+                        </optgroup>
+                      ) : (
+                        options
+                      )
+                    })}
+                  </select>
+                  <button
+                    type="button"
+                    className="vault-remove"
+                    aria-label={`Close ${pane.name || "Untitled"}`}
+                    title="Take this table off the page"
+                    onClick={() => vault.closePane(index)}
+                  >
+                    <RemoveIcon />
+                  </button>
+                </div>
+                {/* New attachments go in the folder of the pane's own table. */}
+                <AttachmentsContext.Provider value={{ file: vault.file, table: pane.name, report: vault.reportError }}>
+                  <TableEditor key={pane.id} vault={vault} table={pane} />
+                </AttachmentsContext.Provider>
+              </section>
+            ))}
+          </div>
         ) : vault.table ? (
           <TableEditor key={vault.table.id} vault={vault} table={vault.table} />
         ) : (
@@ -3305,6 +3754,9 @@ export function Vault({ vault }: { vault: VaultState }) {
               </button>
               <button type="button" className="button secondary" onClick={vault.importExcel}>
                 Import from Excel
+              </button>
+              <button type="button" className="button secondary" onClick={vault.importJson}>
+                Import from JSON
               </button>
             </div>
           </div>

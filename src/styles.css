@@ -8981,3 +8981,194 @@ code {
 .chat-group-count {
   letter-spacing: 0;
 }
+
+/* Vault: a category heading in the sidebar hides and shows its tables. */
+.side-menu-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 4px;
+  margin: 0 -4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-menu-group-toggle:hover {
+  color: var(--side-ink, inherit);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.side-menu-group-toggle:focus-visible {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: 1px;
+}
+
+.side-menu-group-toggle svg {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s ease;
+}
+
+.side-menu-group-toggle[aria-expanded="false"] svg {
+  transform: rotate(-90deg);
+}
+
+.side-menu-group-toggle > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-menu-group-count {
+  flex: none;
+  font-weight: 600;
+  letter-spacing: 0;
+  opacity: 0.75;
+}
+
+/* Vault: several tables on one page, each in its own pane. */
+.vault-panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.vault-panes.stacked {
+  flex-direction: column;
+}
+
+.vault-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--line);
+}
+
+.vault-panes:not(.stacked) .vault-pane + .vault-pane {
+  border-left: 1px solid var(--line);
+}
+
+.vault-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 0;
+}
+
+.vault-pane-head select {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  padding: 6px 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.vault-pane .vault-toolbar {
+  padding: 10px 12px;
+}
+
+.vault-pane .vault-grid-wrap {
+  margin: 0 12px 12px;
+}
+
+/* Vault: the plan shown before two tables are merged. */
+.vault-merge-pick {
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.vault-merge-plan {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--side-soft);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.vault-merge-plan p {
+  margin: 0;
+}
+
+/* Vault: the pin in a column's header, shown while the pointer is over the header or the column is fixed. */
+.vault-fix:not([aria-pressed="true"]) {
+  opacity: 0;
+}
+
+.vault-grid th:hover .vault-fix,
+.vault-fix:focus-visible {
+  opacity: 1;
+}
+
+/* Vault: fixed columns stay in place while the table scrolls sideways. Borders only move with a
+   cell when they are its own, so the grid's lines are not shared between cells here. */
+.vault-grid.vault-has-fixed {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.vault-grid.vault-has-fixed th {
+  z-index: 2;
+}
+
+.vault-grid.vault-has-fixed th.vault-fixed {
+  z-index: 3;
+}
+
+/* A fixed cell covers what scrolls under it, so its row's shading is painted over the card colour
+   instead of being see-through. */
+.vault-grid tbody tr:nth-child(even) {
+  --vault-row-tint: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+
+.vault-grid tbody tr:hover {
+  --vault-cell-tint: color-mix(in srgb, var(--side-soft) 45%, transparent);
+}
+
+.vault-grid tbody tr.vault-dup-even {
+  --vault-cell-tint: color-mix(in srgb, var(--brand-bright) 8%, transparent);
+}
+
+.vault-grid tbody tr.vault-dup-odd {
+  --vault-cell-tint: color-mix(in srgb, var(--brand-bright) 16%, transparent);
+}
+
+.vault-grid tbody td.vault-cell-repeated {
+  --vault-cell-tint: color-mix(in srgb, var(--timer-idle) 14%, transparent);
+}
+
+.vault-grid tbody tr td.vault-fixed.vault-fixed {
+  position: sticky;
+  z-index: 1;
+  background:
+    linear-gradient(var(--vault-cell-tint, transparent), var(--vault-cell-tint, transparent)),
+    linear-gradient(var(--vault-row-tint, transparent), var(--vault-row-tint, transparent)), var(--card);
+}
+
+/* A stronger line where the fixed columns end. */
+.vault-grid th.vault-fixed-last,
+.vault-grid td.vault-fixed-last {
+  border-right: 2px solid color-mix(in srgb, var(--ink) 24%, transparent);
+}

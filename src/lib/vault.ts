@@ -245,6 +245,247 @@ export function importedTables(book: ImportedBook, category = ""): VaultTable[] 
   })
 }
 
+/** Anything a JSON file can hold. */
+type Json = null | string | number | boolean | Json[] | { [key: string]: Json }
+type JsonRecord = { [key: string]: Json }
+export type ImportedJson = { name: string; value: Json }
+
+/**
+ * Asks which JSON file to import and reads it. Null if the person cancels. Nothing is added to the
+ * Vault yet; see importedJsonTables.
+ */
+export const pickJsonFile = () => call<ImportedJson | null>("vault_import_json")
+
+function isRecord(value: Json | undefined): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** A record with the records inside it folded in, e.g. { address: { city } } gives "address.city". */
+function flattenRecord(record: JsonRecord, prefix = "", out: JsonRecord = {}): JsonRecord {
+  for (const [key, value] of Object.entries(record)) {
+    const name = prefix ? `${prefix}.${key}` : key
+    if (isRecord(value) && Object.keys(value).length > 0) flattenRecord(value, name, out)
+    else out[name] = isRecord(value) ? null : value
+  }
+  return out
+}
+
+/** A JSON value as one cell: lists and records that have no column type of their own stay as JSON text. */
+function jsonCell(value: Json): ImportedCell {
+  if (value === null) return null
+  if (typeof value === "object") return JSON.stringify(value)
+  if (typeof value === "string") return value.trim() === "" ? null : value
+  return value
+}
+
+/**
+ * Columns and rows for a list of records: one column per key, in the order the keys first appear.
+ * A key holding lists becomes a List column, or a Sub-table when the lists hold records (only when
+ * `nested`, since a Sub-table cannot hold another).
+ */
+function tableFromRecords(records: JsonRecord[], nested: boolean): Pick<VaultTable, "columns" | "rows"> {
+  const flat = records.map((record) => flattenRecord(record))
+  const names = [...new Set(flat.flatMap((record) => Object.keys(record)))]
+  const rows = flat.map(() => newRow())
+  const columns = names.map((name): VaultColumn => {
+    const id = crypto.randomUUID()
+    const values = flat.map((record) => record[name] ?? null)
+    const put = (index: number, cell: VaultCell) => {
+      if (cell !== null) rows[index].cells[id] = cell
+    }
+    const lists = values.filter((value): value is Json[] => Array.isArray(value))
+    const filled = values.filter((value) => value !== null)
+    if (lists.length > 0 && lists.length === filled.length) {
+      const items = lists.flat()
+      if (nested && items.length > 0 && items.every(isRecord)) {
+        // One set of columns for the items of every row, then each row takes its own items back.
+        const inner = tableFromRecords(items, false)
+        let next = 0
+        values.forEach((value, index) => {
+          if (!Array.isArray(value) || value.length === 0) return
+          put(index, inner.rows.slice(next, next + value.length))
+          next += value.length
+        })
+        return { id, name, kind: "subtable", columns: inner.columns }
+      }
+      values.forEach((value, index) => {
+        if (!Array.isArray(value)) return
+        put(index, convertCell(value.map((item) => String(jsonCell(item) ?? "")), "list"))
+      })
+      return { id, name, kind: "list" }
+    }
+    const cells = values.map(jsonCell)
+    const kind = importedKind(cells)
+    cells.forEach((cell, index) => put(index, cell === null ? null : convertCell(cell, kind)))
+    return { id, name, kind }
+  })
+  return { columns, rows }
+}
+
+/**
+ * A JSON list as records: a list of records as it is, a list of lists with its first list as the
+ * column names (like a sheet), and a list of plain values as one "Value" column. Null for anything else.
+ */
+function jsonRecords(value: Json | undefined): JsonRecord[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+  if (value.every(isRecord)) return value
+  if (value.every((item): item is Json[] => Array.isArray(item))) {
+    const [header, ...body] = value
+    const width = Math.max(...value.map((row) => row.length))
+    const names: string[] = []
+    for (let index = 0; index < width; index++) {
+      const title = String(jsonCell(header[index] ?? null) ?? "").trim() || `Column ${index + 1}`
+      names.push(names.includes(title) ? `${title} (${index + 1})` : title)
+    }
+    return body.map((row) => Object.fromEntries(names.map((name, index) => [name, row[index] ?? null])))
+  }
+  return value.map((item) => (isRecord(item) ? item : { Value: item }))
+}
+
+/**
+ * The tables a JSON file becomes. A list of records is one table named after the file, with a
+ * column per key. A record holding such lists, e.g. { "people": [...], "orders": [...] }, gives a
+ * table per list, named by its key. A record of records gives a row per key, and any other record
+ * a single row. Records inside records become columns like "address.city"; lists inside a record
+ * become a List column, or a Sub-table when they hold records.
+ */
+export function importedJsonTables(file: ImportedJson, category = ""): VaultTable[] {
+  const make = (name: string, records: JsonRecord[]): VaultTable[] => {
+    const { columns, rows } = tableFromRecords(records, true)
+    if (columns.length === 0) return []
+    return [{ id: crypto.randomUUID(), name: name.trim() || "Imported table", category, columns, rows }]
+  }
+  const whole = jsonRecords(file.value)
+  if (whole) return make(file.name, whole)
+  if (!isRecord(file.value)) return []
+  const entries = Object.entries(file.value)
+  const parts = entries.flatMap(([key, inner]) => {
+    const holdsRecords = Array.isArray(inner) && inner.some((item) => typeof item === "object" && item !== null)
+    const records = holdsRecords ? jsonRecords(inner) : null
+    return records ? make(key, records) : []
+  })
+  if (parts.length > 0) return parts
+  if (entries.length > 0 && entries.every(([, inner]) => isRecord(inner))) {
+    return make(
+      file.name,
+      entries.map(([key, inner]) => ({ Key: key, ...(inner as JsonRecord) })),
+    )
+  }
+  return make(file.name, [file.value])
+}
+
+// Merging ---------------------------------------------------------------------
+
+const columnNameKey = (column: VaultColumn) => column.name.trim().toLowerCase()
+
+/**
+ * Pairs each column of `from` with a column of `into` that has the same name (whatever its capitals)
+ * and type, and passes `same`. A column of `into` is paired once; the rest of `from` is `added`.
+ */
+function matchColumns(into: VaultColumn[], from: VaultColumn[], same: (a: VaultColumn, b: VaultColumn) => boolean) {
+  const taken = new Set<string>()
+  const shared: Array<{ into: VaultColumn; from: VaultColumn }> = []
+  const added: VaultColumn[] = []
+  for (const column of from) {
+    const match = into.find(
+      (item) =>
+        !taken.has(item.id) &&
+        columnNameKey(item) === columnNameKey(column) &&
+        item.kind === column.kind &&
+        same(item, column),
+    )
+    if (match) {
+      taken.add(match.id)
+      shared.push({ into: match, from: column })
+    } else added.push(column)
+  }
+  return { shared, added }
+}
+
+/**
+ * What merging `from` into `into` does to the columns: `shared` ones have the same name and type
+ * (and, for Links, point to the same table) and are combined; `added` ones become new columns.
+ */
+export function mergePlan(into: VaultTable, from: VaultTable) {
+  // Once merged, links to either table point to the merged one.
+  const target = (column: VaultColumn) => (column.target === from.id ? into.id : column.target)
+  return matchColumns(into.columns, from.columns, (a, b) => !linksRows(a.kind) || target(a) === target(b))
+}
+
+/**
+ * Merges one table into another: the rows of `from` go under the rows of `into`, with columns
+ * combined as mergePlan says, and `from` is removed. Rows keep their ids and links to `from` are
+ * pointed at `into`, so links to the moved rows keep working.
+ */
+export function mergeTables(tables: VaultTable[], intoId: string, fromId: string): VaultTable[] {
+  const into = tables.find((table) => table.id === intoId)
+  const from = tables.find((table) => table.id === fromId)
+  if (!into || !from || into === from) return tables
+  const { shared, added } = mergePlan(into, from)
+  // Where each column of `from` goes: its id there, to its id in the merged table.
+  const ids = new Map<string, string>()
+  for (const column of added) {
+    ids.set(column.id, into.columns.some((item) => item.id === column.id) ? crypto.randomUUID() : column.id)
+  }
+  // Shared Sub-tables combine their own columns the same way.
+  const subIds = new Map<string, Map<string, string>>()
+  const subColumns = new Map<string, VaultColumn[]>()
+  for (const pair of shared) {
+    ids.set(pair.from.id, pair.into.id)
+    if (pair.into.kind !== "subtable") continue
+    const inner = matchColumns(pair.into.columns ?? [], pair.from.columns ?? [], () => true)
+    subColumns.set(pair.into.id, [...(pair.into.columns ?? []), ...inner.added])
+    subIds.set(
+      pair.from.id,
+      new Map([
+        ...inner.shared.map((item) => [item.from.id, item.into.id] as const),
+        ...inner.added.map((item) => [item.id, item.id] as const),
+      ]),
+    )
+  }
+  const rekey = (cells: Record<string, VaultCell>, map: Map<string, string>) =>
+    Object.fromEntries(
+      Object.entries(cells).flatMap(([id, value]) => {
+        const to = map.get(id)
+        return to ? [[to, value] as const] : []
+      }),
+    )
+  const moved = from.rows.map((row): VaultRow => {
+    const cells: Record<string, VaultCell> = {}
+    for (const [id, value] of Object.entries(row.cells)) {
+      const to = ids.get(id)
+      if (!to) continue
+      const inner = subIds.get(id)
+      if (!inner) cells[to] = value
+      else {
+        const items = subRows(value).map((item) => ({ ...item, cells: rekey(item.cells, inner) }))
+        cells[to] = items.length > 0 ? items : null
+      }
+    }
+    return { ...row, cells }
+  })
+  const merged: VaultTable = {
+    ...into,
+    columns: [
+      ...into.columns.map((column) =>
+        subColumns.has(column.id) ? { ...column, columns: subColumns.get(column.id) } : column,
+      ),
+      ...added.map((column) => ({ ...column, id: ids.get(column.id) ?? column.id })),
+    ],
+    rows: [...into.rows, ...moved],
+  }
+  return tables
+    .filter((table) => table.id !== fromId)
+    .map((table) => {
+      const next = table.id === intoId ? merged : table
+      if (!next.columns.some((column) => column.target === fromId)) return next
+      return {
+        ...next,
+        columns: next.columns.map((column) => (column.target === fromId ? { ...column, target: intoId } : column)),
+      }
+    })
+}
+
 export function newColumn(name: string): VaultColumn {
   return { id: crypto.randomUUID(), name, kind: "text" }
 }

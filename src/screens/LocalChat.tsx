@@ -13,6 +13,7 @@ import {
   clearLocalChat,
   deleteLocalMessages,
   deleteLocalMessagesForEveryone,
+  pinLocalForEveryone,
   editLocalMessage,
   localAutoDelete,
   localAvatars,
@@ -221,6 +222,16 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
         if (message.chat === selectedRef.current) setMessages((current) => withEdit(current, message))
         reloadChats()
       },
+      pinned(message) {
+        if (message.chat !== selectedRef.current) return
+        setMessages((current) =>
+          current.map((item) =>
+            item.id === message.id
+              ? { ...item, pinned: message.pinned, pinnedForEveryone: message.pinnedForEveryone }
+              : item,
+          ),
+        )
+      },
       delivered(id) {
         setMessages((current) => current.map((item) => (item.id === id ? { ...item, delivered: true } : item)))
       },
@@ -348,6 +359,16 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     }
   }
 
+  /** Pins or unpins a message of the open chat for everyone in it. */
+  async function setPinnedForEveryone(id: string, pinned: boolean) {
+    const saved = await pinLocalForEveryone(id, pinned)
+    setMessages((current) =>
+      current.map((item) =>
+        item.id === id ? { ...item, pinned: saved.pinned, pinnedForEveryone: saved.pinnedForEveryone } : item,
+      ),
+    )
+  }
+
   /** Deletes every message of the open chat from this computer. */
   async function clear() {
     const chat = selected
@@ -421,6 +442,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     edit,
     deleteMessages,
     setPinned,
+    setPinnedForEveryone,
     clear,
     autoDeleteHours,
     changeAutoDelete,
@@ -1058,6 +1080,27 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
     })
   }
 
+  // Pinning asks whether it is for this person or for everyone in the chat. Unpinning asks the
+  // same of a message pinned for everyone; a message pinned only here is just unpinned.
+  function askPin(message: LocalMessage) {
+    const others = selected === LOCAL_ROOM ? "everyone on the network" : local.chatName(selected)
+    if (message.pinned && !message.pinnedForEveryone) {
+      void local.setPinned(message.id, false)
+      return
+    }
+    const pin = !message.pinned
+    setConfirm({
+      title: pin ? "Pin message?" : "Unpin message?",
+      text: pin
+        ? `Pin for everyone also pins it for ${others}. Pin for me only pins it on this computer. Auto-delete keeps pinned messages.`
+        : `This message is pinned for everyone. Unpin for everyone also unpins it for ${others}. Unpin for me only unpins it on this computer.`,
+      actions: [
+        { label: pin ? "Pin for me" : "Unpin for me", onSelect: () => local.setPinned(message.id, pin) },
+        { label: pin ? "Pin for everyone" : "Unpin for everyone", onSelect: () => local.setPinnedForEveryone(message.id, pin) },
+      ],
+    })
+  }
+
   function onCopy(message: LocalMessage) {
     navigator.clipboard.writeText(message.body).then(
       () => setCopiedId(message.id),
@@ -1208,7 +1251,7 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
             aria-label="Unpin this message"
             title="Unpin"
             disabled={!local.running}
-            onClick={() => void local.setPinned(shownPin.id, false)}
+            onClick={() => askPin(shownPin)}
           >
             ×
           </button>
@@ -1321,8 +1364,8 @@ export function LocalChatThread({ local, userId }: { local: LocalChatState; user
                           className={message.pinned ? "bubble-action on" : "bubble-action"}
                           aria-label={message.pinned ? "Unpin" : "Pin"}
                           aria-pressed={message.pinned}
-                          title={message.pinned ? "Unpin" : "Pin. Auto-delete keeps pinned messages."}
-                          onClick={() => void local.setPinned(message.id, !message.pinned)}
+                          title={message.pinned ? (message.pinnedForEveryone ? "Unpin (pinned for everyone)" : "Unpin") : "Pin. Auto-delete keeps pinned messages."}
+                          onClick={() => askPin(message)}
                         >
                           <PinIcon />
                         </button>

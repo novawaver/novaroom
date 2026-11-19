@@ -30,8 +30,10 @@ export type LocalMessage = {
   // The message this one answers, when it is on this computer.
   replyTo: LocalReply | null
   file: LocalFile | null
-  // Pinned on this computer: shown at the top of the chat and never auto-deleted. Others don't see it.
+  // Pinned on this computer: shown at the top of the chat and never auto-deleted.
   pinned: boolean
+  // Pinned for everyone in the chat by someone in it, as this computer last heard.
+  pinnedForEveryone: boolean
   // When its sender last changed its text (milliseconds since 1970, by their clock), if ever.
   editedAt: number | null
 }
@@ -145,6 +147,13 @@ export const editLocalMessage = (id: string, body: string) => call<LocalMessage>
  */
 export const setLocalPinned = (id: string, pinned: boolean) => call<void>("local_chat_set_pinned", { id, pinned })
 
+/**
+ * Pins or unpins a message for everyone in its chat. Someone away from the network gets the change
+ * when they are back; apps from before this do not.
+ */
+export const pinLocalForEveryone = (id: string, pinned: boolean) =>
+  call<LocalMessage>("local_chat_pin_for_everyone", { id, pinned })
+
 /** Deletes every message of a chat from this computer only. Others keep their copies. */
 export const clearLocalChat = (chat: string) => call<void>("local_chat_clear", { chat })
 
@@ -201,6 +210,8 @@ export function onLocalChat(handlers: {
   message: (message: LocalMessage) => void
   // Someone changed the text of a message that is already here.
   edited: (message: LocalMessage) => void
+  // Someone pinned or unpinned a message for everyone.
+  pinned: (message: LocalMessage) => void
   delivered: (id: string) => void
   peers: (peers: LocalPeer[]) => void
   typing: (event: { chat: string; userId: string; typing: boolean }) => void
@@ -216,6 +227,7 @@ export function onLocalChat(handlers: {
     const stops = await Promise.all([
       listen<LocalMessage>("local-chat-message", (event) => handlers.message(event.payload)),
       listen<LocalMessage>("local-chat-edited", (event) => handlers.edited(event.payload)),
+      listen<LocalMessage>("local-chat-pinned", (event) => handlers.pinned(event.payload)),
       listen<string>("local-chat-delivered", (event) => handlers.delivered(event.payload)),
       listen<LocalPeer[]>("local-chat-peers", (event) => handlers.peers(event.payload)),
       listen<{ chat: string; userId: string; typing: boolean }>("local-chat-typing", (event) => handlers.typing(event.payload)),

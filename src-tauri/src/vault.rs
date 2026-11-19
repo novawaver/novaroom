@@ -404,6 +404,34 @@ pub async fn vault_import_excel(app: tauri::AppHandle) -> Result<Option<Imported
     Ok(Some(ImportedBook { name, sheets }))
 }
 
+/// A JSON file read for importing. `name` is the file's name without its extension.
+#[derive(Serialize)]
+pub struct ImportedJson {
+    name: String,
+    value: serde_json::Value,
+}
+
+/// Asks which JSON file to import and returns what it holds. The app turns it into tables; nothing
+/// is written here. Returns None if the person closes the dialog.
+#[tauri::command]
+pub async fn vault_import_json(app: tauri::AppHandle) -> Result<Option<ImportedJson>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Import from JSON")
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file();
+    let Some(picked) = picked else { return Ok(None) };
+    let path = picked.into_path().map_err(message)?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| "Could not read that file. Import a JSON file saved as text (UTF-8).".to_string())?;
+    // Some editors put a byte-order mark first, which is not part of the JSON.
+    let value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|problem| format!("That file is not valid JSON: {problem}."))?;
+    let name = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(Some(ImportedJson { name, value }))
+}
+
 #[tauri::command]
 pub async fn vault_read(path: String) -> Result<VaultData, String> {
     read(&connect(Path::new(&path))?)

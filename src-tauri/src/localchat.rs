@@ -56,7 +56,9 @@ const FEATURE_READ: &str = "read";
 const FEATURE_FILES: &str = "files";
 /// Understands Delete frames: a sender taking a message back from everyone.
 const FEATURE_DELETE: &str = "delete";
-const FEATURES: &[&str] = &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES, FEATURE_DELETE];
+/// Understands Pin frames: someone pinning or unpinning a message for everyone in the chat.
+const FEATURE_PIN: &str = "pin";
+const FEATURES: &[&str] = &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES, FEATURE_DELETE, FEATURE_PIN];
 /// The longest Noise message, which is also the most one length-prefixed packet can hold.
 const NOISE_MAX: usize = 65535;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -142,6 +144,10 @@ const ADDED_COLUMNS: &[(&str, &str)] = &[
     ("pinned", "INTEGER NOT NULL DEFAULT 0"),
     // When its sender last changed its text, by the sender's clock. Empty if never.
     ("edited_at", "INTEGER"),
+    // Pinned for everyone in the chat, as last heard, and when that last changed by the clock of
+    // whoever changed it. The newest change wins. `pinned` is still what this computer shows.
+    ("pin_shared", "INTEGER NOT NULL DEFAULT 0"),
+    ("pin_shared_at", "INTEGER"),
 ];
 
 fn migrate(db: &Connection) -> Result<(), String> {
@@ -223,8 +229,10 @@ pub struct LocalMessage {
     /// The answered message, if it is on this computer. Filled in when reading from the file.
     reply_to: Option<ReplyPreview>,
     file: Option<LocalFile>,
-    /// Pinned on this computer, so auto-delete keeps it. Others do not see pins.
+    /// Pinned on this computer, so auto-delete keeps it.
     pinned: bool,
+    /// Pinned for everyone in the chat by someone in it, as last heard.
+    pinned_for_everyone: bool,
     /// When its sender last changed its text (milliseconds since 1970, by their clock), if ever.
     edited_at: Option<i64>,
     #[serde(skip)]
@@ -235,7 +243,7 @@ pub struct LocalMessage {
 
 const MESSAGE_SELECT: &str = "SELECT m.id, m.chat, m.sender_id, m.sender_name, m.body, m.sent_at, m.delivered,
        m.read, m.reply_to, m.file_name, m.file_mime, m.file_size, m.file_state, m.file_path,
-       r.sender_id, r.sender_name, r.body, r.file_name, m.pinned, m.edited_at
+       r.sender_id, r.sender_name, r.body, r.file_name, m.pinned, m.edited_at, m.pin_shared
      FROM messages m LEFT JOIN messages r ON r.id = m.reply_to";
 
 fn message_row(row: &rusqlite::Row) -> rusqlite::Result<LocalMessage> {
@@ -271,6 +279,7 @@ fn message_row(row: &rusqlite::Row) -> rusqlite::Result<LocalMessage> {
             None => None,
         },
         pinned: row.get(18)?,
+        pinned_for_everyone: row.get(20)?,
         edited_at: row.get(19)?,
         reply_to_id,
         file_path: row.get(13)?,
@@ -350,6 +359,10 @@ enum Frame {
     /// The sender deleted their own message `id` for everyone, in the room (no `to`) or in the
     /// direct chat with `to`. A direct one is confirmed with an Ack. Needs "delete".
     Delete { id: String, to: Option<String> },
+    /// The sender pinned or unpinned message `id` for everyone in the room (no `to`) or in the
+    /// direct chat with `to`. `at` is when, by their clock; a change older than the one an app
+    /// already has is ignored. Needs "pin".
+    Pin { id: String, to: Option<String>, pinned: bool, at: i64 },
     Ping,
     /// The sender's idle status changed. Only sent to apps that said they understand it.
     Status { idle: bool },
@@ -728,6 +741,33 @@ impl Session {
             };
             frames.extend(rows.into_iter().map(|(id, chat)| Frame::Delete { id, to: (chat != ROOM).then_some(chat) }));
         }
+        if features.contains(FEATURE_PIN) {
+            // Pins for everyone this app may have missed while it was away. An app that already
+            // has a change, or a newer one, ignores it.
+            let direct = if peer_user_id != self.user_id { peer_user_id } else { "" };
+            let rows: Vec<(String, String, bool, i64)> = {
+                let db = self.db.lock().unwrap();
+                let statement = db.prepare(
+                    "SELECT id, chat, pin_shared, pin_shared_at FROM messages
+                     WHERE pin_shared_at IS NOT NULL AND ((chat = ?1 AND sent_at > ?2) OR chat = ?3)",
+                );
+                match statement {
+                    Ok(mut statement) => statement
+                        .query_map(params![ROOM, since, direct], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                        })
+                        .map(|rows| rows.filter_map(Result::ok).collect())
+                        .unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                }
+            };
+            frames.extend(rows.into_iter().map(|(id, chat, pinned, at)| Frame::Pin {
+                id,
+                to: (chat != ROOM).then_some(chat),
+                pinned,
+                at,
+            }));
+        }
         frames
     }
 
@@ -1021,6 +1061,7 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 file_path: None,
                 chat: chat.clone(),
                 pinned: false,
+                pinned_for_everyone: false,
                 edited_at,
             };
             if session.store(&item) {
@@ -1089,6 +1130,30 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
             }
             if chat != ROOM {
                 let _ = outbox.send(Frame::Ack { id });
+            }
+        }
+        Frame::Pin { id, to, pinned, at } => {
+            let chat = match to {
+                None => ROOM.to_string(),
+                Some(to) if to == session.user_id && from != session.user_id => from.to_string(),
+                _ => return,
+            };
+            // Anyone in the chat may pin any of its messages. Unpinning starts the message's
+            // auto-delete time again, as unpinning on this computer does.
+            let changed = {
+                let db = session.db.lock().unwrap();
+                db.execute(
+                    "UPDATE messages SET pinned = ?1, pin_shared = ?1, pin_shared_at = ?2,
+                            stored_at = CASE WHEN ?1 THEN stored_at ELSE ?3 END
+                     WHERE id = ?4 AND chat = ?5 AND COALESCE(pin_shared_at, 0) < ?2",
+                    params![pinned, at, now_ms(), id, chat],
+                )
+                .unwrap_or(0)
+            };
+            if changed > 0 {
+                if let Some(stored) = session.message(&id) {
+                    let _ = session.app.emit("local-chat-pinned", &stored);
+                }
             }
         }
         Frame::Typing { to, typing } => {
@@ -1605,6 +1670,7 @@ pub fn local_chat_send(
         file_path,
         chat,
         pinned: false,
+        pinned_for_everyone: false,
         edited_at: None,
     };
     if !session.store(&item) {
@@ -1792,6 +1858,40 @@ pub fn local_chat_set_pinned(state: tauri::State<'_, LocalChat>, id: String, pin
         return Err("That message is no longer on this computer.".into());
     }
     Ok(())
+}
+
+/// Pins or unpins a message for everyone in its chat: on this computer, and on the computers of
+/// the others, who are told now if connected and when they are next connected otherwise. Apps from
+/// before this are not told.
+#[tauri::command]
+pub fn local_chat_pin_for_everyone(
+    state: tauri::State<'_, LocalChat>,
+    id: String,
+    pinned: bool,
+) -> Result<LocalMessage, String> {
+    let session = running(&state)?;
+    let at = {
+        let db = session.db.lock().unwrap();
+        let before: Option<i64> = db
+            .query_row("SELECT pin_shared_at FROM messages WHERE id = ?1", params![id], |row| row.get(0))
+            .map_err(|_| "That message is no longer on this computer.".to_string())?;
+        // Later than the change it replaces, even if this computer's clock is behind.
+        let at = now_ms().max(before.unwrap_or(0) + 1);
+        db.execute(
+            "UPDATE messages SET pinned = ?1, pin_shared = ?1, pin_shared_at = ?2,
+                    stored_at = CASE WHEN ?1 THEN stored_at ELSE ?3 END
+             WHERE id = ?4",
+            params![pinned, at, now_ms(), id],
+        )
+        .map_err(message)?;
+        at
+    };
+    let item = session.message(&id).ok_or("That message is no longer on this computer.")?;
+    let to = (item.chat != ROOM).then(|| item.chat.clone());
+    session.send_to(to.as_deref(), |peer| {
+        peer.features.contains(FEATURE_PIN).then(|| Frame::Pin { id: id.clone(), to: to.clone(), pinned, at })
+    });
+    Ok(item)
 }
 
 /// Tells the room, or the other person in a direct chat, that this person started or stopped typing.
@@ -1989,6 +2089,7 @@ mod tests {
             reply_to_id: None,
             file_path: None,
             pinned: false,
+            pinned_for_everyone: false,
             edited_at: None,
         };
         // An app without files gets a note in the body instead of the file.

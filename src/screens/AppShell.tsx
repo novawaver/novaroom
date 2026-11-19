@@ -32,6 +32,9 @@ import {
 import {
   clearConversation,
   hideMessages,
+  loadSharedPins,
+  setSharedPin,
+  subscribeToSharedPins,
   listChats,
   listMemberNames,
   loadMessages,
@@ -564,6 +567,8 @@ function SideMenu<T extends string>({
   header,
   footer,
   plain,
+  collapsed,
+  onToggleGroup,
 }: {
   label: string
   // Items with a group are listed under a heading for it; items should come sorted by group.
@@ -575,6 +580,10 @@ function SideMenu<T extends string>({
   footer?: ReactNode
   // A compact list without lines between items, e.g. Vault tables.
   plain?: boolean
+  // Groups whose items are hidden, by name in small letters. With onToggleGroup, a group's heading
+  // hides and shows its items.
+  collapsed?: ReadonlySet<string>
+  onToggleGroup?: (group: string) => void
 }) {
   return (
     <nav className={plain ? "side-menu side-menu-plain" : "side-menu"} aria-label={label}>
@@ -582,9 +591,26 @@ function SideMenu<T extends string>({
       {items.map(({ id, label: itemLabel, hint, icon: Icon, badge, group }, index) => [
         group && group !== items[index - 1]?.group && (
           <h3 key={`group-${group}`} className="side-menu-group">
-            {group}
+            {onToggleGroup ? (
+              <button
+                type="button"
+                className="side-menu-group-toggle"
+                aria-expanded={!collapsed?.has(group.toLowerCase())}
+                title={collapsed?.has(group.toLowerCase()) ? `Show the tables in ${group}` : `Hide the tables in ${group}`}
+                onClick={() => onToggleGroup(group)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+                <span>{group}</span>
+                <span className="side-menu-group-count">{items.filter((item) => item.group === group).length}</span>
+              </button>
+            ) : (
+              group
+            )}
           </h3>
         ),
+        group && collapsed?.has(group.toLowerCase()) ? null : (
         <button
           key={id}
           type="button"
@@ -605,7 +631,8 @@ function SideMenu<T extends string>({
               {badge > 9 ? "9+" : badge}
             </span>
           ) : null}
-        </button>,
+        </button>
+        ),
       ])}
       {footer && <div className="side-menu-footer">{footer}</div>}
     </nav>
@@ -639,12 +666,38 @@ export function CaptureRail({
   )
 }
 
+const VAULT_COLLAPSED_KEY = "novaroom.vault-collapsed"
+
 /** The Vault's tables, grouped by category, for the sidebar. Also used by the offline app. */
 export function VaultRail({ vault }: { vault: VaultState }) {
+  // Categories whose tables are hidden, by name in small letters. Remembered on this computer.
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(VAULT_COLLAPSED_KEY) ?? "[]")
+      return new Set(Array.isArray(saved) ? saved.filter((item): item is string => typeof item === "string") : [])
+    } catch {
+      return new Set()
+    }
+  })
+
+  function toggleCategory(category: string) {
+    const key = category.toLowerCase()
+    const next = new Set(collapsed)
+    if (!next.delete(key)) next.add(key)
+    setCollapsed(next)
+    try {
+      localStorage.setItem(VAULT_COLLAPSED_KEY, JSON.stringify([...next]))
+    } catch {
+      // Not remembered; the category still stays as it is until the app is closed.
+    }
+  }
+
   return (
     <SideMenu
       label="Vault tables"
       plain
+      collapsed={collapsed}
+      onToggleGroup={toggleCategory}
       items={groupTables(vault.data?.tables ?? []).flatMap(({ category, tables }) =>
         tables.map((table) => ({
           id: table.id,
@@ -682,6 +735,21 @@ export function VaultRail({ vault }: { vault: VaultState }) {
               </span>
               <span className="side-menu-text">
                 <strong>Import from Excel</strong>
+              </span>
+            </button>
+          )}
+          {vault.data && (
+            <button
+              type="button"
+              className="side-menu-item"
+              title="Add a table for each list of records in a JSON file"
+              onClick={vault.importJson}
+            >
+              <span className="side-menu-icon">
+                <ImportIcon />
+              </span>
+              <span className="side-menu-text">
+                <strong>Import from JSON</strong>
               </span>
             </button>
           )}
@@ -1067,6 +1135,23 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null)
   // Messages this person pinned in the open chat (on this computer), and which one the bar shows.
   const [pinnedIds, setPinnedIds] = useState<string[]>([])
+  // Messages pinned for everyone in the open chat, kept on the server.
+  const [sharedPinIds, setSharedPinIds] = useState<string[]>([])
+  useEffect(() => {
+    setSharedPinIds([])
+    if (!session || !selectedId) return
+    let active = true
+    const load = () =>
+      void loadSharedPins(selectedId).then((ids) => {
+        if (active) setSharedPinIds(ids)
+      })
+    load()
+    const stop = subscribeToSharedPins(load)
+    return () => {
+      active = false
+      stop()
+    }
+  }, [selectedId, session?.userId])
   const [pinIndex, setPinIndex] = useState(0)
   // The message whose text was just copied, so its button can say so for a moment.
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -1568,7 +1653,9 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     : readable
   const closed = lock !== "open"
   // Pinned messages, newest first. Clicking the bar jumps to the one shown and moves on to the next older.
-  const pinned = readable.filter((message) => !message.deleted && pinnedIds.includes(message.id)).reverse()
+  const pinned = readable
+    .filter((message) => !message.deleted && (pinnedIds.includes(message.id) || sharedPinIds.includes(message.id)))
+    .reverse()
   const pinAt = Math.min(pinIndex, pinned.length - 1)
   const shownPin = pinned[pinAt]
   const nameOf = (message: ChatMessage) => (message.senderId === session.userId ? "You" : message.senderName || "Someone")
@@ -1848,11 +1935,46 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
     if (session && selectedId && !editing) saveDraft(session.userId, selectedId, text)
   }
 
-  function togglePin(id: string) {
+  // Pins or unpins a message for this person only, on this computer.
+  function setOwnPin(id: string, pin: boolean) {
     if (!selectedId) return
-    const next = pinnedIds.includes(id) ? pinnedIds.filter((item) => item !== id) : [...pinnedIds, id]
+    const next = pin ? [...pinnedIds.filter((item) => item !== id), id] : pinnedIds.filter((item) => item !== id)
     setPinnedIds(next)
     savePins(session!.userId, selectedId, next)
+  }
+
+  // Pinning asks whether it is for this person or for everyone in the chat. Unpinning a message
+  // pinned for everyone unpins it for everyone, after asking; one pinned only here is just unpinned.
+  function askPin(id: string) {
+    if (!selectedId) return
+    const chatId = selectedId
+    const shared = sharedPinIds.includes(id)
+    const forEveryone = async (pin: boolean) => {
+      await setSharedPin(session!, chatId, id, pin)
+      // The pin for everyone replaces this person's own pin of the same message.
+      setOwnPin(id, false)
+      setSharedPinIds((current) => (pin ? [...current.filter((item) => item !== id), id] : current.filter((item) => item !== id)))
+    }
+    if (shared) {
+      setConfirm({
+        title: "Unpin message?",
+        text: "This message is pinned for everyone in this chat. Unpinning it unpins it for everyone.",
+        actions: [{ label: "Unpin for everyone", onSelect: () => forEveryone(false) }],
+      })
+      return
+    }
+    if (pinnedIds.includes(id)) {
+      setOwnPin(id, false)
+      return
+    }
+    setConfirm({
+      title: "Pin message?",
+      text: "Pin for everyone shows it at the top of this chat for everyone in it, and anyone in the chat can unpin it. Pin for me only pins it on this computer.",
+      actions: [
+        { label: "Pin for me", onSelect: async () => setOwnPin(id, true) },
+        { label: "Pin for everyone", onSelect: () => forEveryone(true) },
+      ],
+    })
   }
 
   function onCopy(message: ChatMessage) {
@@ -2141,7 +2263,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 className="composer-extra-close"
                 aria-label="Unpin this message"
                 title="Unpin"
-                onClick={() => togglePin(shownPin.id)}
+                onClick={() => askPin(shownPin.id)}
               >
                 ×
               </button>
@@ -2187,7 +2309,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 // Messages still being sent can't be chosen yet.
                 const choosable = !sendingIds.has(message.id)
                 const chosen = selection.selecting && selection.chosen.has(message.id)
-                const isPinned = pinnedIds.includes(message.id)
+                const pinnedForAll = sharedPinIds.includes(message.id)
+                const isPinned = pinnedForAll || pinnedIds.includes(message.id)
                 // The answered message, when it is among the ones loaded and this person can read it.
                 const reply = message.replyToId ? readable.find((item) => item.id === message.replyToId) : undefined
                 return (
@@ -2286,8 +2409,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                                 className={isPinned ? "bubble-action on" : "bubble-action"}
                                 aria-label={isPinned ? "Unpin" : "Pin"}
                                 aria-pressed={isPinned}
-                                title={isPinned ? "Unpin" : "Pin on this computer"}
-                                onClick={() => togglePin(message.id)}
+                                title={isPinned ? (pinnedForAll ? "Unpin (pinned for everyone)" : "Unpin") : "Pin"}
+                                onClick={() => askPin(message.id)}
                               >
                                 <PinIcon />
                               </button>

@@ -848,6 +848,68 @@ export function subscribeToMessages(handlers: {
   }
 }
 
+// Messages pinned for everyone in a chat. Pins a person makes only for themselves are kept on
+// their computer instead (see chatPins.ts).
+const PREVIEW_SHARED_PINS_KEY = "novaroom.preview.shared-pins"
+
+function previewSharedPins(): Record<string, string[]> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(PREVIEW_SHARED_PINS_KEY) ?? "{}")
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string[]>) : {}
+  } catch {
+    return {}
+  }
+}
+
+/** The ids of the messages pinned for everyone in a chat, oldest pin first. None before the SQL script is run. */
+export async function loadSharedPins(conversationId: string): Promise<string[]> {
+  if (!supabase) return previewSharedPins()[conversationId] ?? []
+  const { data, error } = await supabase
+    .from("pinned_messages")
+    .select("message_id")
+    .eq("conversation_id", conversationId)
+    .order("pinned_at")
+  if (error) return []
+  return (data ?? []).map((row) => row.message_id as string)
+}
+
+/** Pins or unpins a message for everyone in its chat. Anyone in the chat may do either. */
+export async function setSharedPin(session: Session, conversationId: string, messageId: string, pinned: boolean) {
+  if (!supabase) {
+    const all = previewSharedPins()
+    const ids = (all[conversationId] ?? []).filter((id) => id !== messageId)
+    all[conversationId] = pinned ? [...ids, messageId] : ids
+    localStorage.setItem(PREVIEW_SHARED_PINS_KEY, JSON.stringify(all))
+    return
+  }
+  const { error } = pinned
+    ? await supabase
+        .from("pinned_messages")
+        .upsert(
+          { conversation_id: conversationId, message_id: messageId, pinned_by: session.userId },
+          { onConflict: "conversation_id,message_id", ignoreDuplicates: true },
+        )
+    : await supabase.from("pinned_messages").delete().eq("conversation_id", conversationId).eq("message_id", messageId)
+  if (!error) return
+  if (/pinned_messages/.test(error.message) && /(does not exist|schema cache|not find)/i.test(error.message)) {
+    throw new Error("Run the pinned messages SQL script (20261118140000_pinned_messages.sql), then try again.")
+  }
+  throw new Error(error.message)
+}
+
+/** Calls back whenever a message is pinned or unpinned for everyone, in any chat. Returns how to stop. */
+export function subscribeToSharedPins(onChange: () => void): () => void {
+  if (!supabase) return () => {}
+  const client = supabase
+  const channel: RealtimeChannel = client
+    .channel(`novaroom-pins:${crypto.randomUUID()}`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "pinned_messages" }, onChange)
+    .subscribe()
+  return () => {
+    void client.removeChannel(channel)
+  }
+}
+
 /** The display names of the people in a chat, for mentioning them. */
 export async function listMemberNames(conversationId: string): Promise<string[]> {
   if (!supabase) return []
