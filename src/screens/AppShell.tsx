@@ -101,9 +101,11 @@ import {
   SelectCheck,
   ThreadMenu,
   selectableRow,
+  escapeClosesThread,
   useMessageSelection,
   type ConfirmAction,
 } from "./ChatTools"
+import { RailResize } from "./RailResize"
 
 // One person with a plus: start a direct chat.
 function NewChatIcon() {
@@ -1540,6 +1542,22 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
 
   // Choosing messages to delete, and the dialog that confirms clearing or deleting.
   const selection = useMessageSelection(selectedId)
+  // Escape closes the open chat, leaving its list and an empty page. Whatever else is waiting for
+  // Escape (a menu, a dialog, a reply being written, choosing messages) takes it first. A room's
+  // chat is part of the room's page, so it stays.
+  const closeChatRef = useRef<(event: globalThis.KeyboardEvent) => void>(() => {})
+  closeChatRef.current = (event) => {
+    const open = chats.find((chat) => chat.id === selectedId)
+    if (view !== "chats" || !open || open.kind === "room" || selection.selecting) return
+    if (!escapeClosesThread(event, document.querySelector<HTMLElement>('[data-chat-thread="online"]'))) return
+    setSelectedId(null)
+    setMessages([])
+  }
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => closeChatRef.current(event)
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [])
   // Chats whose notifications are off; a mention still shows one.
   const quietChats = useQuietChats(session?.userId ?? null)
   // Everyone in the open chat, who can be mentioned with "@".
@@ -2166,7 +2184,11 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
 
   // The open conversation: the whole main area for a chat, or the panel beside a room's page.
   const renderThread = (inRoom: boolean) => (
-    <section className={inRoom ? "thread room-chat" : "thread"} aria-label={inRoom ? "Room chat" : undefined}>
+    <section
+      className={inRoom ? "thread room-chat" : "thread"}
+      aria-label={inRoom ? "Room chat" : undefined}
+      data-chat-thread="online"
+    >
       <header className="thread-bar">
         {/* Only shown where the room's chat is a panel over its page. */}
         {inRoom && (
@@ -2625,6 +2647,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                       event.preventDefault()
                       event.currentTarget.form?.requestSubmit()
                     }
+                    // Marked as handled, so the same press does not also close the chat.
+                    if (event.key === "Escape" && (editing || replyTo)) event.preventDefault()
                     if (event.key === "Escape" && editing) stopEditing()
                     else if (event.key === "Escape" && replyTo) setReplyTo(null)
                   }}
@@ -2643,8 +2667,8 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
         </>
       ) : (
         <div className="thread-empty">
-          <h2>No conversation selected</h2>
-          <p>Start a direct chat or a group, or pick one from the list.</p>
+          <h2>Select a chat to start messaging</h2>
+          <p>Pick one from the list, or start a direct chat or a group.</p>
         </div>
       )}
     </section>
@@ -2952,6 +2976,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
           </>
         }
       />
+      <RailResize />
       <aside className="rail">
         {view === "local" ? (
           <LocalChatRail local={local} headerAction={chatModeSwitch} />

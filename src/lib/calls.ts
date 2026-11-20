@@ -1,5 +1,6 @@
 import type { RealtimeChannel } from "@supabase/supabase-js"
 import { inTauri } from "./desktop"
+import { LOCAL_ROOM, localPeers } from "./localChat"
 import { supabase } from "./supabase"
 
 // Voice and video calls. The sound and picture go straight between the apps in the call (WebRTC),
@@ -14,7 +15,8 @@ export type CallSignalKind = "ring" | "accept" | "decline" | "busy" | "offer" | 
 export type CallSignal = {
   callId: string
   transport: CallTransport
-  // Online: the chat's id. Local: the other person's account id, as Local chat names direct chats.
+  // Online: the chat's id. Local: the other person's account id, as Local chat names direct chats,
+  // or Local chat's name for Broadcast when the call is for everyone on the network.
   conversationId: string
   senderId: string
   kind: CallSignalKind
@@ -144,20 +146,32 @@ export async function listCallMemberIds(conversationId: string): Promise<string[
   return (data ?? []).map((row) => row.user_id as string)
 }
 
+/** The account ids of everyone on the office network now whose app can take calls. */
+export async function listLocalCallPeerIds(): Promise<string[]> {
+  const peers = await localPeers()
+  return peers.filter((peer) => peer.calls !== false).map((peer) => peer.userId)
+}
+
 const CALL_ID = /^[0-9a-f-]{36}$/i
 const KINDS: CallSignalKind[] = ["ring", "accept", "decline", "busy", "offer", "answer", "ice", "end"]
 
 /** Passes a set-up note to someone on the office network. Refuses if their app cannot be reached. */
 export async function sendLocalCallSignal(
   recipientId: string,
-  signal: { callId: string; kind: CallSignalKind; payload?: unknown },
+  // room: the call is Broadcast's, for everyone on the network, not one between two people.
+  signal: { callId: string; kind: CallSignalKind; payload?: unknown; room?: boolean },
 ) {
   const { invoke } = await import("@tauri-apps/api/core")
   let reached: boolean
   try {
     reached = await invoke<boolean>("local_chat_signal", {
       to: recipientId,
-      data: JSON.stringify({ call: signal.callId, kind: signal.kind, payload: signal.payload ?? null }),
+      data: JSON.stringify({
+        call: signal.callId,
+        kind: signal.kind,
+        payload: signal.payload ?? null,
+        room: signal.room === true,
+      }),
     })
   } catch (caught) {
     throw new Error(typeof caught === "string" ? caught : "Local chat is not running on this computer.")
@@ -173,13 +187,13 @@ export function subscribeToLocalCallSignals(onSignal: (signal: CallSignal) => vo
   void import("@tauri-apps/api/event").then(async ({ listen }) => {
     const unlisten = await listen<{ userId: string; data: string }>("local-chat-signal", (event) => {
       try {
-        const note = JSON.parse(event.payload.data) as { call?: unknown; kind?: unknown; payload?: unknown }
+        const note = JSON.parse(event.payload.data) as { call?: unknown; kind?: unknown; payload?: unknown; room?: unknown }
         if (typeof note.call !== "string" || !CALL_ID.test(note.call)) return
         if (!KINDS.includes(note.kind as CallSignalKind)) return
         onSignal({
           callId: note.call,
           transport: "local",
-          conversationId: event.payload.userId,
+          conversationId: note.room === true ? LOCAL_ROOM : event.payload.userId,
           senderId: event.payload.userId,
           kind: note.kind as CallSignalKind,
           payload: note.payload ?? null,

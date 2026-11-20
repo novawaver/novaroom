@@ -40,7 +40,16 @@ import {
 } from "../lib/localChat"
 import type { Session } from "../types"
 import { DownloadIcon, ImageViewer } from "./ImageViewer"
-import { ConfirmDialog, QuietIcon, SelectCheck, ThreadMenu, selectableRow, useMessageSelection, type ConfirmAction } from "./ChatTools"
+import {
+  ConfirmDialog,
+  QuietIcon,
+  SelectCheck,
+  ThreadMenu,
+  escapeClosesThread,
+  selectableRow,
+  useMessageSelection,
+  type ConfirmAction,
+} from "./ChatTools"
 import { useMentions } from "./Mentions"
 import { ChatText, useTextStyling } from "./ChatText"
 import { plainChatText } from "../lib/chatText"
@@ -71,6 +80,9 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
   const [peers, setPeers] = useState<LocalPeer[]>([])
   const [chats, setChats] = useState<LocalChatSummary[]>([])
   const [selected, setSelected] = useState(LOCAL_ROOM)
+  // Whether the selected chat is showing. Escape closes it; picking any chat shows it again.
+  const [open, setOpen] = useState(true)
+  const close = useCallback(() => setOpen(false), [])
   const [messages, setMessages] = useState<LocalMessage[]>([])
   const [unread, setUnread] = useState<Record<string, number>>({})
   // Whether the Local chat page is on screen; set by the page that shows it.
@@ -307,6 +319,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
 
   const select = useCallback(
     (chat: string) => {
+      setOpen(true)
       setUnread((current) => (current[chat] ? { ...current, [chat]: 0 } : current))
       if (chat === selectedRef.current) {
         // Already selected (say, from a notification), so the load above won't run again. Reload
@@ -434,6 +447,8 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     peers,
     chats,
     selected,
+    open,
+    close,
     messages,
     unread,
     unreadTotal: Object.values(unread).reduce((sum, count) => sum + count, 0),
@@ -525,7 +540,7 @@ export function LocalChatRail({ local, headerAction }: { local: LocalChatState; 
     <button
       key={chat}
       type="button"
-      className={chat === local.selected ? "chat-row active" : "chat-row"}
+      className={chat === local.selected && local.open ? "chat-row active" : "chat-row"}
       onClick={() => local.select(chat)}
     >
       {chat === LOCAL_ROOM ? (
@@ -936,10 +951,24 @@ export function LocalChatThread({
   const shownPin = pinned[pinAt]
   useEffect(() => setPinIndex(0), [selected])
 
+  // A closed chat is not on screen: its new messages count as unread and are not marked read.
   useEffect(() => {
-    setVisible(true)
+    setVisible(local.open)
     return () => setVisible(false)
-  }, [setVisible])
+  }, [setVisible, local.open])
+
+  // Escape closes the chat, unless something else on screen is waiting for it.
+  const threadRef = useRef<HTMLElement>(null)
+  const closeRef = useRef<(event: KeyboardEvent) => void>(() => {})
+  closeRef.current = (event) => {
+    if (!local.open || selection.selecting) return
+    if (escapeClosesThread(event, threadRef.current)) local.close()
+  }
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => closeRef.current(event)
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [])
 
   // Keeps each chat's unsent text, so leaving the chat or the page does not lose it.
   function updateBody(text: string) {
@@ -971,7 +1000,7 @@ export function LocalChatThread({
     setEditing(null)
     setFile(null)
     bodyRef.current?.focus()
-  }, [selected, userId])
+  }, [selected, userId, local.open])
 
   // Who can be mentioned: everyone on the network in the room (one by one, or all at once), or
   // the other person in a direct chat.
@@ -997,7 +1026,7 @@ export function LocalChatThread({
     if (!box) return
     box.style.height = "auto"
     box.style.height = `${box.scrollHeight + box.offsetHeight - box.clientHeight}px`
-  }, [body, selected])
+  }, [body, selected, local.open])
 
   // A small picture of an image about to be sent.
   useEffect(() => {
@@ -1180,10 +1209,22 @@ export function LocalChatThread({
     )
   }
 
+  if (!local.open) {
+    return (
+      <section className="thread" ref={threadRef}>
+        <div className="thread-empty">
+          <h2>Select a chat to start messaging</h2>
+          <p>Pick Broadcast or a person from the list.</p>
+        </div>
+      </section>
+    )
+  }
+
   const typingNow = typingText(local.typists.map((name) => ({ userId: name, name })))
 
   return (
     <section
+      ref={threadRef}
       className={dragging ? "thread local-thread dragging" : "thread local-thread"}
       onDragOver={(event) => {
         if (!local.running || !event.dataTransfer.types.includes("Files")) return
@@ -1217,21 +1258,26 @@ export function LocalChatThread({
           </p>
         </div>
         <div className="thread-actions">
-          {voice && !isRoom && (
+          {voice && (
             <CallButtons
               voice={voice}
               target={{
                 transport: "local",
                 conversationId: selected,
                 title: local.chatName(selected),
-                avatarUrl: local.avatarOf(selected),
-                group: false,
-                otherId: selected,
+                avatarUrl: isRoom ? null : local.avatarOf(selected),
+                // Broadcast: a call everyone on the network can be in.
+                group: isRoom,
+                otherId: isRoom ? null : selected,
               }}
               blockedHint={
                 !local.running
                   ? "Local chat is not running"
-                  : !peer
+                  : isRoom
+                    ? local.peers.some((item) => item.calls !== false)
+                      ? undefined
+                      : "No one else is on the local network right now"
+                    : !peer
                     ? "They are not on the local network right now"
                     : peer.calls === false
                       ? "Their app is too old for calls"
@@ -1551,6 +1597,8 @@ export function LocalChatThread({
                   event.preventDefault()
                   event.currentTarget.form?.requestSubmit()
                 }
+                // Marked as handled, so the same press does not also close the chat.
+                if (event.key === "Escape" && (editing || replyTo)) event.preventDefault()
                 if (event.key === "Escape" && editing) stopEditing()
                 else if (event.key === "Escape" && replyTo) setReplyTo(null)
               }}

@@ -4,6 +4,7 @@ import type { Session } from "../types"
 import { CaptureRail, VaultRail } from "./AppShell"
 import { Capture, type CaptureState, type CaptureTab } from "./Capture"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
+import { RailResize } from "./RailResize"
 import { VoiceCallBar, useVoiceCall } from "./VoiceCall"
 import { Vault, VaultLeaveDialog, useVault } from "./Vault"
 
@@ -82,6 +83,7 @@ export function OfflineShell({
         </button>
       </p>
       <div className="shell offline-shell-body">
+        <RailResize />
         <aside className="rail">
           <div className="offline-tabs" role="tablist" aria-label="Offline tools">
             {tabs.map(({ id, label, hint, count }) => (

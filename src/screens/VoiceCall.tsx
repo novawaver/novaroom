@@ -6,6 +6,7 @@ import {
   clearOldCallSignals,
   iceServers,
   listCallMemberIds,
+  listLocalCallPeerIds,
   localCallsAvailable,
   onlineCallsAvailable,
   sendCallSignal,
@@ -26,7 +27,7 @@ import {
 } from "../lib/callHistory"
 import { sendMessage } from "../lib/chats"
 import { notifyIncoming, windowIsActive } from "../lib/desktop"
-import { localAvatars, localPeers } from "../lib/localChat"
+import { LOCAL_ROOM, localAvatars, localPeers } from "../lib/localChat"
 import { personById } from "../lib/users"
 import type { Session } from "../types"
 
@@ -37,6 +38,8 @@ const CONNECT_MS = 30 * 1000
 const ENDED_SHOWS_MS = 3500
 // How long a group call that rang here is offered to join, when nothing says it is over.
 const ONGOING_MS = 4 * 60 * 60 * 1000
+// How often a Broadcast call looks for people who have just come onto the network.
+const NEWCOMERS_MS = 10 * 1000
 const NO_ROUTE = "The call could not connect. The network between you may not allow calls."
 
 export type VoiceCallPhase = "calling" | "ringing" | "connecting" | "active" | "ended"
@@ -147,7 +150,8 @@ function deviceProblem(caught: unknown, device: "microphone" | "camera") {
   return `Could not use the ${device}.`
 }
 
-type RingPayload = { video?: unknown; group?: unknown; title?: unknown }
+// quiet: only says a call is going on that can be joined, without ringing.
+type RingPayload = { video?: unknown; group?: unknown; title?: unknown; quiet?: unknown }
 
 /**
  * Everything about calls for one signed-in person, kept outside React because a call outlives
@@ -167,6 +171,7 @@ class CallEngine {
   private stopTone: (() => void) | null = null
   private ringTimer = 0
   private clearTimer = 0
+  private newcomersTimer = 0
   // Group calls that rang here and may still be going on, by chat, so they can be joined later.
   private ongoing = new Map<string, { callId: string; video: boolean; at: number }>()
 
@@ -202,7 +207,9 @@ class CallEngine {
   }
 
   private send(call: VoiceCall, recipientId: string, kind: CallSignalKind, payload?: unknown) {
-    if (call.transport === "local") return sendLocalCallSignal(recipientId, { callId: call.id, kind, payload })
+    if (call.transport === "local") {
+      return sendLocalCallSignal(recipientId, { callId: call.id, kind, payload, room: call.group })
+    }
     return sendCallSignal(this.session.userId, {
       callId: call.id,
       conversationId: call.conversationId,
@@ -428,6 +435,7 @@ class CallEngine {
 
   private release() {
     window.clearTimeout(this.ringTimer)
+    window.clearInterval(this.newcomersTimer)
     this.stopTone?.()
     this.stopTone = null
     for (const userId of [...this.connections.keys()]) this.disconnect(userId)
@@ -557,9 +565,37 @@ class CallEngine {
   /** Everyone else in the chat, for a group or room call. Throws when it is too big to call. */
   private async membersOf(target: CallTarget) {
     if (!target.group) return target.otherId ? [target.otherId] : []
+    // Broadcast: everyone on the network now. Whoever arrives later is told by watchNewcomers.
+    if (target.transport === "local") return listLocalCallPeerIds()
     const ids = await listCallMemberIds(target.conversationId)
     if (ids.length > MAX_CALL_PEOPLE) throw new Error(`Calls work in chats of up to ${MAX_CALL_PEOPLE} people.`)
     return ids.filter((id) => id !== this.session.userId)
+  }
+
+  /**
+   * While this person is in a Broadcast call, anyone who comes onto the network is told there is a
+   * call to join. Their app does not ring; it shows "Join call" in Broadcast.
+   */
+  private watchNewcomers(id: string) {
+    const first = this.call
+    if (!first || first.id !== id || first.transport !== "local" || !first.group) return
+    let present = new Set(first.memberIds)
+    window.clearInterval(this.newcomersTimer)
+    this.newcomersTimer = window.setInterval(() => {
+      void listLocalCallPeerIds()
+        .then((ids) => {
+          const call = this.call
+          if (!call || call.id !== id || call.phase === "ended") return
+          const fresh = ids.filter((peer) => !present.has(peer))
+          present = new Set(ids)
+          if (fresh.length === 0) return
+          const unknown = fresh.filter((peer) => !call.memberIds.includes(peer))
+          if (unknown.length > 0) this.patch(id, { memberIds: [...call.memberIds, ...unknown] })
+          const note = { video: call.video, group: true, title: call.title, quiet: true }
+          for (const peer of fresh) void this.send(call, peer, "ring", note).catch(() => undefined)
+        })
+        .catch(() => undefined)
+    }, NEWCOMERS_MS)
   }
 
   /** Calls a person, or everyone in a group or room. */
@@ -591,6 +627,7 @@ class CallEngine {
     }
     if (target.group) this.ongoing.set(target.conversationId, { callId: call.id, video, at: Date.now() })
     this.stopTone = startTone("ringback")
+    this.watchNewcomers(call.id)
     this.ringTimer = window.setTimeout(() => {
       const current = this.call
       if (!current || current.id !== call.id || current.phase !== "calling") return
@@ -646,6 +683,7 @@ class CallEngine {
       this.finish(id, sent.problem || "Could not answer the call.")
       return
     }
+    this.watchNewcomers(id)
     // Nobody connecting back means the call is over, or nothing gets through.
     this.ringTimer = window.setTimeout(() => {
       const current = this.call
@@ -660,10 +698,15 @@ class CallEngine {
   private async onRing(signal: CallSignal) {
     const payload = (signal.payload ?? {}) as RingPayload
     const video = payload.video === true
-    const group = signal.transport === "online" && payload.group === true
+    // Over the office network the only call for several people is Broadcast's.
+    const group = signal.transport === "online" ? payload.group === true : signal.conversationId === LOCAL_ROOM
     // A ring from long ago, such as one that arrived while this computer was asleep.
     if (Date.now() - new Date(signal.createdAt).getTime() > RING_MS) return
     if (group) this.ongoing.set(signal.conversationId, { callId: signal.callId, video, at: Date.now() })
+    if (payload.quiet === true) {
+      this.changed()
+      return
+    }
     if (this.busy) {
       // A group does not need telling; someone calling on their own does.
       if (this.call?.id !== signal.callId && !group) {
@@ -682,7 +725,11 @@ class CallEngine {
     window.clearTimeout(this.clearTimer)
     const [caller, members] = await Promise.all([
       this.describe(signal.transport, signal.senderId),
-      group ? listCallMemberIds(signal.conversationId).catch(() => [signal.senderId]) : Promise.resolve([signal.senderId]),
+      !group
+        ? Promise.resolve([signal.senderId])
+        : (signal.transport === "local" ? listLocalCallPeerIds() : listCallMemberIds(signal.conversationId)).catch(() => [
+            signal.senderId,
+          ]),
     ])
     // Another call may have got through while that was looked up.
     if (this.busy) return
@@ -701,7 +748,7 @@ class CallEngine {
       video,
       direction: "in",
       fromId: signal.senderId,
-      memberIds: members.filter((id) => id !== this.session.userId),
+      memberIds: [...new Set([signal.senderId, ...members])].filter((id) => id !== this.session.userId),
       phase: "ringing",
       muted: false,
       camera: false,
@@ -716,7 +763,10 @@ class CallEngine {
     window.clearTimeout(this.ringTimer)
     this.ringTimer = window.setTimeout(() => this.finish(ringing.id, "Missed call", "missed"), RING_MS)
     if (!(await windowIsActive())) {
-      const target = signal.transport === "local" ? `local:${signal.senderId}` : `chat:${signal.conversationId}`
+      const target =
+        signal.transport === "local"
+          ? `local:${group ? LOCAL_ROOM : signal.senderId}`
+          : `chat:${signal.conversationId}`
       void notifyIncoming(title, video ? "Incoming video call" : "Incoming voice call", target, caller)
     }
   }
@@ -743,6 +793,8 @@ class CallEngine {
       if (signal.kind === "accept") {
         // Whoever is already in the call connects to the one who came in.
         if (!inCall || this.connections.has(from)) return
+        // Someone who was not here when the call started is now told when it ends, too.
+        if (!call.memberIds.includes(from)) this.patch(call.id, { memberIds: [...call.memberIds, from] })
         this.stopTone?.()
         this.stopTone = null
         window.clearTimeout(this.ringTimer)

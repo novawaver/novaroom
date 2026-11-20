@@ -602,7 +602,10 @@ textarea:focus {
   --nav-width: 64px;
   height: 100%;
   display: grid;
-  grid-template-columns: var(--nav-width) 320px 1fr;
+  /* The sidebar's width: dragged by its right edge (--rail-width), never over half the window. */
+  --rail: min(var(--rail-width, 320px), 50vw);
+  position: relative;
+  grid-template-columns: var(--nav-width) var(--rail) 1fr;
   /* One row as tall as the window, so the nav bar, sidebar and page each scroll on their own. */
   grid-template-rows: minmax(0, 1fr);
   background: var(--paper);
@@ -6338,7 +6341,8 @@ code {
 .shell.offline-shell-body {
   flex: 1;
   min-height: 0;
-  grid-template-columns: 320px 1fr;
+  --nav-width: 0px;
+  grid-template-columns: var(--rail) 1fr;
 }
 
 /* Chats: the Online / Local toggle at the right of the sidebar's heading. Icons only: the knob
@@ -8814,7 +8818,7 @@ code {
 
 /* A pinned page: a panel on the right of every other page, resized by dragging its left edge. */
 .shell.has-side-page {
-  grid-template-columns: var(--nav-width) 320px minmax(0, 1fr) min(var(--side-page-width, 400px), 50vw);
+  grid-template-columns: var(--nav-width) var(--rail) minmax(0, 1fr) min(var(--side-page-width, 400px), 50vw);
 }
 
 .side-page {
@@ -8958,7 +8962,7 @@ code {
 /* Too narrow for a panel beside the page: the pinned page waits until the window is wider. */
 @media (max-width: 1000px) {
   .shell.has-side-page {
-    grid-template-columns: var(--nav-width) 320px 1fr;
+    grid-template-columns: var(--nav-width) var(--rail) 1fr;
   }
 
   .side-page {
@@ -9330,8 +9334,31 @@ code {
 }
 
 .vault-notes-preview {
+  justify-self: stretch;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* With "Fit to width" off, a note is one shortened line and its column is as wide as that line
+   (up to 320px). Laid out as plain blocks so the column can never end up narrower than the note. */
+.vault-grid:not(.vault-fit) td:not(.vault-col-sized) .vault-cell-view.vault-notes {
+  display: block;
+}
+
+.vault-grid:not(.vault-fit) td:not(.vault-col-sized) .vault-notes-preview {
+  width: auto;
+}
+
+/* The side panel of a card is as narrow as it is: every value wraps inside it, notes included. */
+.vault-grid.vault-panel-fields .vault-cell-view,
+.vault-grid.vault-panel-fields .vault-link {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.vault-grid.vault-panel-fields .vault-notes-preview {
+  display: -webkit-box;
+  max-width: 100%;
 }
 
 /* In a column sized by hand, a note wraps inside the width and still stops after a few lines. */
@@ -9739,4 +9766,28 @@ code {
   flex: none;
   display: flex;
   gap: 6px;
+}
+
+/* The sidebar's right edge: drag it to make the sidebar wider or narrower. */
+.rail-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--nav-width) + var(--rail) - 4px);
+  width: 7px;
+  z-index: 4;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.rail-resize:hover,
+.rail-resize.dragging,
+.rail-resize:focus-visible {
+  background: color-mix(in srgb, var(--brand-bright) 35%, transparent);
+  outline: none;
+}
+
+/* With a pinned page beside it, the sidebar still leaves room for the page in the middle. */
+.shell.has-side-page {
+  --rail: min(var(--rail-width, 320px), 30vw);
 }

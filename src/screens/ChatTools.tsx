@@ -3,6 +3,25 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react"
 // Tools shared by online chats and Local chat: the chat's options menu, choosing messages to
 // delete, and the dialogs that confirm clearing or deleting, or say something can't be done.
 
+// Things on screen that take Escape for themselves: dialogs, menus, pickers and viewers. The call
+// card is a dialog that Escape does not close, so it does not count.
+const TAKES_ESCAPE =
+  '.desk-backdrop, .image-viewer, .mention-list, [role="menu"], [role="listbox"], [role="dialog"]:not(.voice-call)'
+
+/**
+ * Whether this key press is an Escape that should close the chat shown in `thread`: nothing else
+ * is waiting for it, and the keyboard is in that chat or nowhere in particular (not in another
+ * field, and not in a page pinned beside this one).
+ */
+export function escapeClosesThread(event: globalThis.KeyboardEvent, thread: HTMLElement | null) {
+  if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || !thread) return false
+  if (document.querySelector(TAKES_ESCAPE)) return false
+  const target = event.target instanceof Element ? event.target : null
+  if (!target || thread.contains(target)) return true
+  if (thread.closest(".side-page") || target.closest(".side-page")) return false
+  return !target.closest("input, textarea, select, [contenteditable]")
+}
+
 /** Which messages are chosen while choosing messages to delete. Ends when the chat changes. */
 export function useMessageSelection(chatKey: string | null) {
   const [selecting, setSelecting] = useState(false)
