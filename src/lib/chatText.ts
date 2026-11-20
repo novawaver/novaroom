@@ -8,13 +8,19 @@ export type ChatPart =
   | string
   | { style: "bold" | "italic" | "strike"; parts: ChatPart[] }
   | { style: "code"; text: string; block: boolean }
+  // A link to data shared from someone's Vault, which opens the shared data page.
+  | { style: "share"; id: string }
+
+/** The address of the page that shows data shared from a Vault, as written in a message. */
+export const VAULT_SHARE_ADDRESS = "novaroom://vault-share/"
+const SHARE_ADDRESS = /^novaroom:\/\/vault-share\/([\w-]{1,80})$/
 
 // In order of preference: a block of code, code, a web address (left as it is, so the underscores
 // in one are not read as italic), bold, struck through, *italic*, _italic_. Apart from a block of
 // code, a style does not run past the end of a line, and italic marks only count around whole words.
 // A block of code takes the line break after it, since it is shown on lines of its own.
 const STYLED =
-  /```\n?([\s\S]+?)\n?```\n?|`([^`\n]+)`|(https?:\/\/\S+)|\*\*(?=\S)([^\n]*?\S)\*\*|~~(?=\S)([^\n]*?\S)~~|(?<![\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])|(?<!\w)_(?=[^\s_])([^_\n]*?[^\s_])_(?!\w)/g
+  /```\n?([\s\S]+?)\n?```\n?|`([^`\n]+)`|((?:https?:\/\/|novaroom:\/\/vault-share\/)\S+)|\*\*(?=\S)([^\n]*?\S)\*\*|~~(?=\S)([^\n]*?\S)~~|(?<![\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])|(?<!\w)_(?=[^\s_])([^_\n]*?[^\s_])_(?!\w)/g
 
 /** A message's text cut into plain runs and styled parts, which can hold more of the same. */
 export function parseChatText(text: string): ChatPart[] {
@@ -25,7 +31,10 @@ export function parseChatText(text: string): ChatPart[] {
     if (match.index > last) parts.push(text.slice(last, match.index))
     if (block !== undefined) parts.push({ style: "code", text: block, block: true })
     else if (code !== undefined) parts.push({ style: "code", text: code, block: false })
-    else if (address !== undefined) parts.push(address)
+    else if (address !== undefined) {
+      const share = SHARE_ADDRESS.exec(address)
+      parts.push(share ? { style: "share", id: share[1] } : address)
+    }
     else if (bold !== undefined) parts.push({ style: "bold", parts: parseChatText(bold) })
     else if (strike !== undefined) parts.push({ style: "strike", parts: parseChatText(strike) })
     else parts.push({ style: "italic", parts: parseChatText(starItalic ?? underscoreItalic) })
@@ -36,7 +45,17 @@ export function parseChatText(text: string): ChatPart[] {
 }
 
 function plain(parts: ChatPart[]): string {
-  return parts.map((part) => (typeof part === "string" ? part : part.style === "code" ? part.text : plain(part.parts))).join("")
+  return parts
+    .map((part) =>
+      typeof part === "string"
+        ? part
+        : part.style === "code"
+          ? part.text
+          : part.style === "share"
+            ? "Open shared data"
+            : plain(part.parts),
+    )
+    .join("")
 }
 
 /** A message's text without its styling marks, for a notification or a one-line preview. */

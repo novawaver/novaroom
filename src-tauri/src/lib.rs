@@ -384,6 +384,7 @@ pub fn run() {
             localchat::local_chat_typing,
             localchat::local_chat_signal,
             localchat::local_chat_mark_read,
+            localchat::local_chat_room_reads,
             localchat::local_chat_delete_messages,
             localchat::local_chat_delete_for_everyone,
             localchat::local_chat_pin_for_everyone,

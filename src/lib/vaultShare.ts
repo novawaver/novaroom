@@ -1,4 +1,7 @@
 import type { RealtimeChannel } from "@supabase/supabase-js"
+import type { Session } from "../types"
+import { VAULT_SHARE_ADDRESS } from "./chatText"
+import { listChats, sendMessage, startLeaderChat } from "./chats"
 import { inTauri } from "./desktop"
 import {
   deleteLocalMessages,
@@ -201,8 +204,59 @@ function writePreview(shares: PreviewShare[]) {
   }
 }
 
+// Opening the shared data page from anywhere in the app, such as from a link in a chat.
+const OPEN_SHARE = "novaroom-open-vault-share"
+
+/** Shows the shared data page for this share. The page that holds the Vault listens for it. */
+export function openVaultShare(id: string) {
+  window.dispatchEvent(new CustomEvent(OPEN_SHARE, { detail: id }))
+}
+
+/** Calls back when a link to shared data is opened. Returns how to stop. */
+export function onOpenVaultShare(open: (id: string) => void): () => void {
+  const listener = (event: Event) => {
+    const id = (event as CustomEvent<unknown>).detail
+    if (typeof id === "string" && id) open(id)
+  }
+  window.addEventListener(OPEN_SHARE, listener)
+  return () => window.removeEventListener(OPEN_SHARE, listener)
+}
+
+/** A share that was just made: its id and who it is for. */
+export type MadeShare = { id: string; recipientId: string }
+
+/**
+ * Tells each person about their share with a message in the direct chat with them, holding a link
+ * that opens the shared data page. Only where such a chat exists or may be started; the others
+ * still find the share in their Vault's sidebar. Gives the ids of the people who got the message.
+ */
+export async function sendShareLinks(session: Session, made: MadeShare[], tableName: string, note: string) {
+  const told: string[] = []
+  if (made.length === 0) return told
+  const chats = await listChats(session).catch(() => [])
+  for (const share of made) {
+    try {
+      const chatId =
+        chats.find((chat) => chat.kind === "direct" && chat.otherUserId === share.recipientId)?.id ??
+        (await startLeaderChat(session, share.recipientId))
+      const text = note.trim()
+      const body = `Shared from my Vault: “${tableName}”\n${VAULT_SHARE_ADDRESS}${share.id}${text ? `\n${text}` : ""}`
+      await sendMessage(session, chatId, body.slice(0, 4000))
+      told.push(share.recipientId)
+    } catch {
+      // No chat with them, or messages to them are not allowed: the share itself is still theirs.
+    }
+  }
+  return told
+}
+
 /** Sends a copy of the table to each person. They each get their own copy to add to their Vault. */
-export async function sendShares(senderId: string, recipientIds: string[], table: SharedTable, note: string) {
+export async function sendShares(
+  senderId: string,
+  recipientIds: string[],
+  table: SharedTable,
+  note: string,
+): Promise<MadeShare[]> {
   const people = [...new Set(recipientIds)].filter((id) => id !== senderId)
   if (people.length === 0) throw new Error("Choose at least one person to share with.")
   if (table.columns.length === 0 || table.rows.length === 0) throw new Error("Choose at least one row and one column.")
@@ -213,22 +267,24 @@ export async function sendShares(senderId: string, recipientIds: string[], table
 
   if (!supabase) {
     const createdAt = new Date().toISOString()
-    writePreview([
-      ...readPreview(),
-      ...people.map((recipientId) => ({ id: crypto.randomUUID(), senderId, recipientId, note: text, table, createdAt })),
-    ])
-    return
+    const made = people.map((recipientId) => ({ id: crypto.randomUUID(), senderId, recipientId, note: text, table, createdAt }))
+    writePreview([...readPreview(), ...made])
+    return made.map(({ id, recipientId }) => ({ id, recipientId }))
   }
-  const { error } = await supabase.from("vault_shares").insert(
-    people.map((recipientId) => ({
-      sender_id: senderId,
-      recipient_id: recipientId,
-      table_name: table.name.slice(0, 200),
-      note: text || null,
-      data: table,
-    })),
-  )
+  const { data, error } = await supabase
+    .from("vault_shares")
+    .insert(
+      people.map((recipientId) => ({
+        sender_id: senderId,
+        recipient_id: recipientId,
+        table_name: table.name.slice(0, 200),
+        note: text || null,
+        data: table,
+      })),
+    )
+    .select("id, recipient_id")
   if (error) throw shareError(error)
+  return (data ?? []).map((row) => ({ id: row.id as string, recipientId: row.recipient_id as string }))
 }
 
 /** What other people have shared with this person, newest first. */
@@ -307,8 +363,12 @@ export async function listSentShares(userId: string): Promise<SentShare[]> {
   return sent
 }
 
-// Local shares travel as a Local chat message with a file of this kind attached.
+// Local shares travel inside a Local chat message, as there is no server to keep them: the data is
+// attached to the message, which shows a link to the shared data page in place of a file.
 const LOCAL_SHARE_SUFFIX = ".vaultshare.json"
+
+/** Whether a Local chat message's attachment is shared Vault data, shown as a link, not a file. */
+export const isLocalShareFile = (name: string) => name.endsWith(LOCAL_SHARE_SUFFIX)
 
 function localShareFileName(tableName: string) {
   const base = tableName.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").trim().slice(0, 80) || "Untitled"
@@ -326,7 +386,7 @@ export async function sendLocalShares(recipientIds: string[], table: SharedTable
   const text = note.trim().slice(0, SHARE_NOTE_LIMIT)
   const content = JSON.stringify({ novaroomVaultShare: 1, note: text, table })
   if (content.length > SHARE_LIMIT) throw new Error("That is too much to share at once. Choose fewer rows or columns.")
-  const body = `Shared from my Vault: “${table.name}”. To add it to yours, open Vault and choose “Shared with you”.${text ? `\n${text}` : ""}`
+  const body = `Shared from my Vault: “${table.name}”${text ? `\n${text}` : ""}`
   for (const id of people) {
     // A file of its own each time: the app takes the file in when the message is sent.
     const file = new File([content], localShareFileName(table.name), { type: "application/json" })

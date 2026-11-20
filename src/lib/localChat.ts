@@ -126,8 +126,17 @@ export const saveLocalFile = (id: string) => call<boolean>("local_chat_save_file
 
 export const sendLocalTyping = (chat: string, typing: boolean) => call<void>("local_chat_typing", { chat, typing })
 
-/** Tells the other person in a direct chat that this person has seen it, for their double checks. */
+/**
+ * Tells the others that this person has seen a chat, for their double checks: the other person in
+ * a direct chat, everyone on the network for Broadcast.
+ */
 export const markLocalRead = (chat: string) => call<void>("local_chat_mark_read", { chat })
+
+/** How far someone has read Broadcast: up to the message sent at `upTo`. */
+export type LocalRoomRead = { userId: string; name: string; upTo: number }
+
+/** How far each other person has read Broadcast, as their apps last said. */
+export const localRoomReads = () => call<LocalRoomRead[]>("local_chat_room_reads")
 
 /** Deletes messages from this computer only. Others keep their copies. */
 export const deleteLocalMessages = (ids: string[]) => call<void>("local_chat_delete_messages", { ids })
@@ -220,11 +229,19 @@ export function onLocalChat(handlers: {
   peers: (peers: LocalPeer[]) => void
   typing: (event: { chat: string; userId: string; typing: boolean }) => void
   read: (event: { chat: string; upTo: number }) => void
+  // Someone has read Broadcast further.
+  roomRead: (event: LocalRoomRead) => void
   file: (event: { id: string; state: LocalFile["state"] }) => void
   // Messages auto-deleted from this computer.
   expired: (ids: string[]) => void
+  // Called once everything above is being listened for (or cannot be), so Local chat can be
+  // started without missing what arrives in its first moments.
+  ready?: () => void
 }) {
-  if (!inTauri()) return () => {}
+  if (!inTauri()) {
+    handlers.ready?.()
+    return () => {}
+  }
   let stopped = false
   const unlisten: Unlisten[] = []
   void import("@tauri-apps/api/event").then(async ({ listen }) => {
@@ -238,10 +255,14 @@ export function onLocalChat(handlers: {
       listen<{ chat: string; upTo: number }>("local-chat-read", (event) => handlers.read(event.payload)),
       listen<{ id: string; state: LocalFile["state"] }>("local-chat-file", (event) => handlers.file(event.payload)),
       listen<string[]>("local-chat-expired", (event) => handlers.expired(event.payload)),
+      listen<LocalRoomRead>("local-chat-room-read", (event) => handlers.roomRead(event.payload)),
     ])
     if (stopped) stops.forEach((stop) => stop())
     else unlisten.push(...stops)
   })
+    // Even if listening failed, Local chat still starts.
+    .catch(() => undefined)
+    .then(() => handlers.ready?.())
   return () => {
     stopped = true
     unlisten.forEach((stop) => stop())

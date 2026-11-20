@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { onNotificationClick, setUnreadBadge } from "../lib/desktop"
+import { onOpenVaultShare } from "../lib/vaultShare"
 import type { Session } from "../types"
 import { CaptureRail, VaultRail } from "./AppShell"
 import { Capture, type CaptureState, type CaptureTab } from "./Capture"
@@ -51,6 +52,17 @@ export function OfflineShell({
         if (target.startsWith("local:")) openChatRef.current(target.slice("local:".length))
       }),
     [],
+  )
+
+  // A link to shared data in a chat opens the Vault's page for it.
+  const { openShared } = vault
+  useEffect(
+    () =>
+      onOpenVaultShare((id) => {
+        openShared(id)
+        setView("vault")
+      }),
+    [openShared],
   )
 
   // Only Local chat can have unread messages offline.

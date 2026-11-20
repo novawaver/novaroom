@@ -23,6 +23,7 @@ import {
   localMessageLabel,
   localMessages,
   localPeers,
+  localRoomReads,
   markLocalRead,
   onLocalChat,
   saveLocalFile,
@@ -38,11 +39,13 @@ import {
   type LocalMessage,
   type LocalPeer,
 } from "../lib/localChat"
+import { isLocalShareFile, openVaultShare } from "../lib/vaultShare"
 import type { Session } from "../types"
 import { DownloadIcon, ImageViewer } from "./ImageViewer"
 import {
   ConfirmDialog,
   QuietIcon,
+  ReadMark,
   SelectCheck,
   ThreadMenu,
   escapeClosesThread,
@@ -85,6 +88,9 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
   const close = useCallback(() => setOpen(false), [])
   const [messages, setMessages] = useState<LocalMessage[]>([])
   const [unread, setUnread] = useState<Record<string, number>>({})
+  // How far each other person has read Broadcast: the time of the newest message they have seen,
+  // and their name for when they are off the network.
+  const [roomReads, setRoomReads] = useState<Record<string, { name: string; upTo: number }>>({})
   // Whether the Local chat page is on screen; set by the page that shows it.
   const [visible, setVisible] = useState(false)
   const selectedRef = useRef(selected)
@@ -115,16 +121,33 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
       .catch(() => {})
   }, [])
 
+  // Resolves once the window is listening for Local chat's events. Local chat connects to the
+  // others on the network the moment it starts, and they send what was missed straight away, so it
+  // is only started after this: otherwise those first messages were saved but never shown.
+  const listeningRef = useRef<Promise<void>>(Promise.resolve())
+
   // Start for this account; stop on signing out or switching accounts.
   useEffect(() => {
     if (!available || !userId) return
     let active = true
     setError("")
-    void startLocalChat(userId, name)
+    // A tick later, so the effect below has set up the listening this waits for.
+    void Promise.resolve()
+      .then(() => listeningRef.current)
+      .then(() => (active ? startLocalChat(userId, name) : null))
       .then((key) => {
-        if (!active) return
+        if (!active || key === null) return
         setPublicKey(key)
         void localPeers().then(setPeers).catch(() => {})
+        void localRoomReads()
+          .then((reads) =>
+            // Whatever arrived meanwhile is newer than what was saved.
+            setRoomReads((current) => ({
+              ...Object.fromEntries(reads.map((read) => [read.userId, { name: read.name, upTo: read.upTo }])),
+              ...current,
+            })),
+          )
+          .catch(() => {})
         reloadChats()
         reloadAvatars()
       })
@@ -138,6 +161,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
       setChats([])
       setMessages([])
       setUnread({})
+      setRoomReads({})
       setAvatars({})
       setAutoDeleteHours(null)
       void stopLocalChat().catch(() => {})
@@ -206,11 +230,22 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
   }, [visible, selected])
 
   useEffect(() => {
-    if (!publicKey) return
+    if (!available || !userId) return
+    let ready: () => void = () => {}
+    listeningRef.current = new Promise<void>((resolve) => {
+      ready = resolve
+    })
     return onLocalChat({
+      ready,
       message(message) {
         if (message.chat === selectedRef.current) {
-          setMessages((current) => (current.some((item) => item.id === message.id) ? current : [...current, message]))
+          // In order of when they were sent: one that waited for its sender to be on the network
+          // goes where it belongs, not under newer ones.
+          setMessages((current) =>
+            current.some((item) => item.id === message.id)
+              ? current
+              : [...current, message].sort((a, b) => a.sentAt - b.sentAt),
+          )
         }
         reloadChats()
         if (message.senderId === userId) return
@@ -265,6 +300,11 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
           ),
         )
       },
+      roomRead({ userId: reader, name: readerName, upTo }) {
+        setRoomReads((current) =>
+          (current[reader]?.upTo ?? 0) >= upTo ? current : { ...current, [reader]: { name: readerName, upTo } },
+        )
+      },
       file({ id, state }) {
         setMessages((current) =>
           current.map((item) => (item.id === id && item.file ? { ...item, file: { ...item.file, state } } : item)),
@@ -276,7 +316,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
         reloadChats()
       },
     })
-  }, [publicKey, userId, reloadChats])
+  }, [available, userId, reloadChats])
 
   // A message from someone ends their typing, as does time without a "still typing".
   useEffect(() => {
@@ -305,10 +345,11 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     })
   }, [messages])
 
-  // While a direct chat is on screen in the focused window, tell the other person it has been read.
+  // While a chat is on screen in the focused window, tell the others it has been read: the other
+  // person in a direct chat, everyone on the network in Broadcast.
   const newestTheirs = [...messages].reverse().find((item) => item.senderId !== userId)?.sentAt
   useEffect(() => {
-    if (!publicKey || !visible || selected === LOCAL_ROOM || newestTheirs === undefined) return
+    if (!publicKey || !visible || newestTheirs === undefined) return
     const mark = () => {
       if (document.hasFocus()) void markLocalRead(selected).catch(() => {})
     }
@@ -449,6 +490,7 @@ export function useLocalChat(session: Session | null, name: string, offline: boo
     selected,
     open,
     close,
+    roomReads,
     messages,
     unread,
     unreadTotal: Object.values(unread).reduce((sum, count) => sum + count, 0),
@@ -773,8 +815,12 @@ function AutoDeleteMenu({
   )
 }
 
-/** One check when sent or delivered, two when the other person has seen it. */
-function LocalStatus({ message, isRoom }: { message: LocalMessage; isRoom: boolean }) {
+/**
+ * One check when sent or delivered, two when it has been seen: by the other person in a direct
+ * chat, or in Broadcast by the people named in `readers` (shown on hover and listed on a click).
+ */
+function LocalStatus({ message, isRoom, readers }: { message: LocalMessage; isRoom: boolean; readers: string[] }) {
+  if (isRoom) return <ReadMark readers={readers} />
   if (!isRoom && !message.delivered) {
     return (
       <span
@@ -863,6 +909,23 @@ function LocalFileView({ message, onOpenImage }: { message: LocalMessage; onOpen
   const [error, setError] = useState("")
   const file = message.file
   if (!file) return null
+  // Data shared from a Vault: a link to the page that shows it, not a file to save.
+  if (isLocalShareFile(file.name)) {
+    return file.state === "ready" ? (
+      <button
+        type="button"
+        className="chat-share-link"
+        title="Open the shared data in your Vault"
+        onClick={() => openVaultShare(message.id)}
+      >
+        Open shared data
+      </button>
+    ) : (
+      <span className="chat-share-wait">
+        {file.state === "waiting" ? "The shared data arrives when they are on the network" : "The shared data is no longer available"}
+      </span>
+    )
+  }
   if (file.state === "ready" && isImage(file.mime)) {
     return (
       <>
@@ -1410,7 +1473,23 @@ export function LocalChatThread({
                         </span>
                       )}
                       {!sameMinute && <time dateTime={new Date(message.sentAt).toISOString()}>{formatTime(message.sentAt)}</time>}
-                      {mine && <LocalStatus message={message} isRoom={isRoom} />}
+                      {mine && (
+                        <LocalStatus
+                          message={message}
+                          isRoom={isRoom}
+                          readers={
+                            isRoom
+                              ? Object.entries(local.roomReads)
+                                  .filter(([reader, read]) => reader !== userId && read.upTo >= message.sentAt)
+                                  .map(
+                                    ([reader, read]) =>
+                                      local.peers.find((item) => item.userId === reader)?.name || read.name || "Someone",
+                                  )
+                                  .sort((a, b) => a.localeCompare(b))
+                              : []
+                          }
+                        />
+                      )}
                     </span>
                     {/* Shown along the bottom of the bubble on hover. New actions go in this row. */}
                     {local.running && (

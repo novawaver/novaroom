@@ -14,6 +14,7 @@ import { LOCAL_ROOM } from "../lib/localChat"
 import { useAuth } from "../auth"
 import { accentFor } from "../lib/accent"
 import { notifyIncoming, onNotificationClick, openExternal, setUnreadBadge, windowIsActive } from "../lib/desktop"
+import { onOpenVaultShare } from "../lib/vaultShare"
 import { useReconnectEpoch } from "../lib/network"
 import { readUnread, unreadTotal, writeUnread } from "../lib/unread"
 import { loadDraft, saveDraft } from "../lib/drafts"
@@ -63,7 +64,7 @@ import { EventCountdowns, Toasts, useEventAlerts } from "./EventAlerts"
 import { TIMER_RANGES, Timer, rangeTotals, useTimer, useTimerHistory, type TimerRange } from "./Timer"
 import { formatDuration } from "../lib/timer"
 import { isTimeZone, localTimeZone } from "../lib/timezone"
-import { listUsers, readIsAdmin, type RegisteredUser } from "../lib/users"
+import { listUsers, personById, readIsAdmin, type RegisteredUser } from "../lib/users"
 import { CallButtons, VoiceCallBar, useVoiceCall } from "./VoiceCall"
 import { MAX_CALL_PEOPLE } from "../lib/calls"
 import { PRESENCE_LABELS, usePresence } from "../lib/presence"
@@ -101,6 +102,7 @@ import {
   SelectCheck,
   ThreadMenu,
   selectableRow,
+  ReadMark,
   escapeClosesThread,
   useMessageSelection,
   type ConfirmAction,
@@ -696,23 +698,50 @@ export function VaultRail({ vault }: { vault: VaultState }) {
     }
   }
 
+  // Shared data is listed under the tables: what others shared with this person, each with a page
+  // of its own, and one page for what this person shared.
+  const SHARED_GROUP = "Shared data"
+  const sharedItems = [
+    ...vault.shares.map((share) => ({
+      id: `share:${share.id}`,
+      label: share.table.name || "Untitled",
+      hint: `From ${share.senderName} · ${share.table.rows.length === 1 ? "1 row" : `${share.table.rows.length} rows`}`,
+      icon: VaultTableIcon,
+      group: SHARED_GROUP,
+    })),
+    ...(vault.sent.length > 0
+      ? [
+          {
+            id: "share:sent",
+            label: "Shared by you",
+            hint: vault.sent.length === 1 ? "1 share you can cancel" : `${vault.sent.length} shares you can cancel`,
+            icon: VaultTableIcon,
+            group: SHARED_GROUP,
+          },
+        ]
+      : []),
+  ]
+
   return (
     <SideMenu
       label="Vault tables"
       plain
       collapsed={collapsed}
       onToggleGroup={toggleCategory}
-      items={groupTables(vault.data?.tables ?? []).flatMap(({ category, tables }) =>
-        tables.map((table) => ({
-          id: table.id,
-          label: table.name || "Untitled",
-          hint: table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`,
-          icon: VaultTableIcon,
-          group: category,
-        })),
-      )}
-      active={vault.table?.id ?? ""}
-      onSelect={vault.selectTable}
+      items={[
+        ...groupTables(vault.data?.tables ?? []).flatMap(({ category, tables }) =>
+          tables.map((table) => ({
+            id: table.id,
+            label: table.name || "Untitled",
+            hint: table.rows.length === 1 ? "1 row" : `${table.rows.length} rows`,
+            icon: VaultTableIcon,
+            group: category,
+          })),
+        ),
+        ...sharedItems,
+      ]}
+      active={vault.sharedPage ? `share:${vault.sharedPage}` : (vault.table?.id ?? "")}
+      onSelect={(id) => (id.startsWith("share:") ? vault.openShared(id.slice("share:".length)) : vault.selectTable(id))}
       // The file, then New table once a file is open (adding a table switches to editing it).
       header={
         <>
@@ -975,6 +1004,10 @@ function initials(name: string) {
 /** The minute a moment falls in, for telling whether two messages share a shown time. */
 function minuteOf(value: string) {
   return Math.floor(new Date(value).getTime() / 60_000)
+}
+
+function formatDay(value: string) {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(value))
 }
 
 function formatTime(value: string) {
@@ -1536,6 +1569,17 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
 
   useEffect(() => onNotificationClick((target) => notificationClickRef.current(target)), [])
 
+  // A link to shared data in a chat opens the Vault's page for it.
+  const { openShared } = vault
+  useEffect(
+    () =>
+      onOpenVaultShare((id) => {
+        openShared(id)
+        setView("vault")
+      }),
+    [openShared],
+  )
+
   // Who else is typing in the open chat. People this person blocked are never shown.
   const typing = useTyping(selectedId, session?.userId ?? null, profile?.displayName ?? "")
   const typingNow = typingText(typing.typists.filter((typist) => !blockedIds.includes(typist.userId)))
@@ -1630,6 +1674,39 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
       stop()
     }
   }, [selectedId])
+
+  // The names of the people in the open chat, by account id, for saying who has read a message.
+  const [readerNames, setReaderNames] = useState<Record<string, string>>({})
+  const readerIds = Object.keys(readStates).sort().join(",")
+  useEffect(() => {
+    let active = true
+    const ids = readerIds ? readerIds.split(",") : []
+    void Promise.all(ids.map(async (id) => [id, (await personById(id).catch(() => null))?.name || "Someone"] as const)).then(
+      (pairs) => {
+        if (active) setReaderNames(Object.fromEntries(pairs))
+      },
+    )
+    return () => {
+      active = false
+    }
+  }, [readerIds])
+
+  /** Who has read one of this person's messages, and who has not yet, by name. */
+  function readersOf(createdAt: string) {
+    const sent = Date.parse(createdAt)
+    const readers: string[] = []
+    const waiting: string[] = []
+    for (const [id, at] of Object.entries(readStates)) {
+      if (id === session?.userId) continue
+      const name = readerNames[id] ?? "Someone"
+      if (at !== null && Date.parse(at) >= sent) readers.push(name)
+      else waiting.push(name)
+    }
+    readers.sort((a, b) => a.localeCompare(b))
+    waiting.sort((a, b) => a.localeCompare(b))
+    // In a room people come and go, so one reader is enough for the mark, as before.
+    return shownChat?.kind === "room" ? { readers, waiting: readers.length > 0 ? [] : waiting } : { readers, waiting }
+  }
 
   // While a chat is on screen in the focused window, tell the others how far this person has read.
   const newestSeenAt = [...messages].reverse().find((message) => !sendingIds.has(message.id))?.createdAt
@@ -2341,8 +2418,11 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
             ) : (
               visible.map((message, index) => {
                 const mine = message.senderId === session.userId
-                // The time shows once for a run of messages from one person within the same minute.
                 const previous = visible[index - 1]
+                // The date goes above the first message of each day, as in Local chat.
+                const day = formatDay(message.createdAt)
+                const newDay = !previous || formatDay(previous.createdAt) !== day
+                // The time shows once for a run of messages from one person within the same minute.
                 const sameMinute =
                   previous?.senderId === message.senderId &&
                   minuteOf(previous.createdAt) === minuteOf(message.createdAt)
@@ -2363,6 +2443,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                 const reply = message.replyToId ? readable.find((item) => item.id === message.replyToId) : undefined
                 return (
                   <Fragment key={message.id}>
+                    {newDay && <p className="message-system-note">{day}</p>}
                     <div
                       className={`message-row ${mine ? "mine" : "theirs"}${selection.selecting && choosable ? " selectable" : ""}${chosen ? " chosen" : ""}`}
                       data-message-id={message.id}
@@ -2411,7 +2492,7 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                             </span>
                           )}
                           {message.editedAt && !message.deleted && (
-                            <span className="bubble-edited" title={`Edited ${formatTime(message.editedAt)}`}>
+                            <span className="bubble-edited" title={`Edited ${formatDay(message.editedAt)}, ${formatTime(message.editedAt)}`}>
                               edited
                             </span>
                           )}
@@ -2419,6 +2500,9 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                           {message.senderId === session.userId &&
                             (sendingIds.has(message.id) ? (
                               <span className="bubble-status sending" role="img" aria-label="Sending" />
+                            ) : selected.kind !== "direct" ? (
+                              // With several people: who has read it, on hover and on a click.
+                              <ReadMark {...readersOf(message.createdAt)} />
                             ) : isMessageRead(readStates, session.userId, selected.kind, message.createdAt) ? (
                               <svg className="bubble-status double read" viewBox="0 0 20 16" role="img" aria-label="Read">
                                 <title>Read</title>

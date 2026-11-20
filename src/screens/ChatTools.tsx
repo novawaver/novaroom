@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react"
+import { createPortal } from "react-dom"
 
 // Tools shared by online chats and Local chat: the chat's options menu, choosing messages to
 // delete, and the dialogs that confirm clearing or deleting, or say something can't be done.
@@ -314,5 +315,96 @@ export function AlertDialog({ title, text, onClose }: { title: string; text: str
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * The mark on one of this person's messages in a chat with several people: one check when sent, two
+ * once someone has read it, coloured when everyone has. Hovering names who has read it; clicking
+ * lists them, with whoever has not yet.
+ */
+export function ReadMark({
+  readers,
+  waiting,
+  sentLabel = "Sent",
+}: {
+  // Names of the people who have read the message, and of those who have not (if that is known).
+  readers: string[]
+  waiting?: string[]
+  sentLabel?: string
+}) {
+  const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    // Caught first and stopped, so Escape only closes the list and not the chat behind it.
+    function onKey(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return
+      event.stopPropagation()
+      setOpen(false)
+    }
+    document.addEventListener("keydown", onKey, true)
+    return () => document.removeEventListener("keydown", onKey, true)
+  }, [open])
+
+  if (readers.length === 0) {
+    return (
+      <svg className="bubble-status" viewBox="0 0 16 16" role="img" aria-label={sentLabel}>
+        <title>{sentLabel}</title>
+        <path d="M3 8.5l3 3 7-7" />
+      </svg>
+    )
+  }
+  const everyone = waiting !== undefined && waiting.length === 0
+  const summary = `Read by ${readers.join(", ")}`
+  return (
+    <>
+      <button
+        type="button"
+        className="read-mark"
+        aria-label={`${summary}. Show the list.`}
+        title={summary}
+        onClick={(event) => {
+          // Not also a click on the message, which chooses it while choosing messages.
+          event.stopPropagation()
+          setOpen(true)
+        }}
+      >
+        <svg className={everyone ? "bubble-status double read" : "bubble-status double"} viewBox="0 0 20 16" aria-hidden="true">
+          <path d="M1.5 8.5l3 3 7-7" />
+          <path d="M8.5 11.5l7-7" />
+        </svg>
+        {!everyone && <span className="read-mark-count">{readers.length}</span>}
+      </button>
+      {open &&
+        createPortal(
+          <div className="desk-backdrop" onPointerDown={(event) => event.target === event.currentTarget && setOpen(false)}>
+            <div className="desk-modal chat-confirm read-list" role="dialog" aria-label="Who has read this message">
+              <h2>Read by {readers.length}</h2>
+              <ul>
+                {readers.map((name, index) => (
+                  <li key={`${name}-${index}`}>{name}</li>
+                ))}
+              </ul>
+              {waiting !== undefined && waiting.length > 0 && (
+                <>
+                  <h3>Not yet</h3>
+                  <ul className="read-list-waiting">
+                    {waiting.map((name, index) => (
+                      <li key={`${name}-${index}`}>{name}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              <div className="form-actions">
+                <button type="button" className="button secondary" onClick={() => setOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
   )
 }

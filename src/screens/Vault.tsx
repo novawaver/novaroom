@@ -72,6 +72,7 @@ import {
 } from "../lib/vault"
 import { setExitGuard } from "../lib/unsaved"
 import { listUsers } from "../lib/users"
+import { useAuth } from "../auth"
 import { localAvatars, localPeers } from "../lib/localChat"
 import {
   SHARE_NOTE_LIMIT,
@@ -83,6 +84,7 @@ import {
   removeLocalShare,
   removeShare,
   sendLocalShares,
+  sendShareLinks,
   sendShares,
   sharedAs,
   sharedTable,
@@ -531,6 +533,10 @@ export function useVault(userId: string | null, active: boolean) {
   const [shares, setShares] = useState<VaultShare[]>([])
   // What this person has shared and can still cancel.
   const [sent, setSent] = useState<SentShare[]>([])
+  // The shared data page on screen in place of a table: a share's id, or "sent" for the list of
+  // what this person shared.
+  const [sharedPage, setSharedPage] = useState<string | null>(null)
+  const openShared = useCallback((id: string) => setSharedPage(id), [])
   const refreshShares = useCallback(async () => {
     if (!userId) return
     // The two ways of sharing are read apart, so one being unreachable does not hide the other.
@@ -750,12 +756,15 @@ export function useVault(userId: string | null, active: boolean) {
     const created = tableFromShare(share, data.tables, "Shared with me")
     update((current) => ({ tables: [...current.tables, created] }))
     setTableId(created.id)
+    // On to the new table, where it can be changed like any other.
+    setSharedPage(null)
   }
 
   /** Takes a share off the list. A table already added from it stays. */
   async function dropShare(share: VaultShare) {
     await (share.via === "local" ? removeLocalShare(share.id) : removeShare(share.id))
     setShares((current) => current.filter((item) => item.id !== share.id))
+    setSharedPage((current) => (current === share.id ? null : current))
   }
 
   /** Cancels something this person shared: the other person no longer has it to add. */
@@ -827,7 +836,11 @@ export function useVault(userId: string | null, active: boolean) {
     pending,
     setPending,
     // Choosing a table shows it in the first pane.
-    selectTable: (id: string | null) => (id && panes.length > 0 ? showInPane(0, id) : setTableId(id)),
+    selectTable: (id: string | null) => {
+      setSharedPage(null)
+      if (id && panes.length > 0) showInPane(0, id)
+      else setTableId(id)
+    },
     panes,
     stacked,
     setStacked,
@@ -855,6 +868,9 @@ export function useVault(userId: string | null, active: boolean) {
     userId,
     shares,
     sent,
+    sharedPage,
+    openShared,
+    closeShared: () => setSharedPage(null),
     refreshShares,
     addShared,
     dropShare,
@@ -2525,6 +2541,9 @@ function ShareDialog({
   const [sending, setSending] = useState(false)
   const [error, setError] = useState("")
   const [sentTo, setSentTo] = useState<string[] | null>(null)
+  // How many of them also got a chat message with a link to the shared data.
+  const [linked, setLinked] = useState(0)
+  const { session } = useAuth()
   const { userId } = vault
 
   useEffect(() => {
@@ -2590,8 +2609,14 @@ function ShareDialog({
     setError("")
     try {
       const part = pickShared(copy, columnIds, rowIds)
-      if (via === "local") await sendLocalShares([...picked], part, note)
-      else await sendShares(userId, [...picked], part, note)
+      if (via === "local") {
+        await sendLocalShares([...picked], part, note)
+        setLinked(picked.size)
+      } else {
+        const made = await sendShares(userId, [...picked], part, note)
+        const told = session ? await sendShareLinks(session, made, part.name, note).catch(() => []) : []
+        setLinked(told.length)
+      }
       setSentTo((people ?? []).filter((person) => picked.has(person.userId)).map((person) => person.name))
       void vault.refreshShares().catch(() => undefined)
     } catch (caught) {
@@ -2607,8 +2632,13 @@ function ShareDialog({
         <p className="vault-share-done" role="status">
           {counted(rowIds.size, "row")} and {counted(columnIds.size, "column")} of “{copy.name}” shared with{" "}
           {sentTo.join(", ")}
-          {via === "local" ? " over the local network" : ""}. They will find it under “Shared with you” in their
-          Vault. You can cancel it there too, under “Shared by you”.
+          {via === "local" ? " over the local network" : ""}.{" "}
+          {linked >= sentTo.length
+            ? "They got a message with a link that opens the shared data."
+            : linked > 0
+              ? `${linked} of them got a message with a link that opens the shared data; you have no chat with the others.`
+              : "You have no chat with them, so no message was sent."}{" "}
+          It is also under “Shared data” in their Vault’s sidebar. You can cancel it under “Shared by you” in yours.
         </p>
         <div className="form-actions">
           <button type="button" className="button vault-small" onClick={onClose}>
@@ -2823,38 +2853,145 @@ function ShareDialog({
   )
 }
 
-/** What other people have shared with this person, each to look at, add to the Vault, or remove. */
-function SharedWithYouDialog({ vault, onClose }: { vault: VaultState; onClose: () => void }) {
-  const [openId, setOpenId] = useState<string | null>(null)
-  const [added, setAdded] = useState<Set<string>>(() => new Set())
+/**
+ * The shared data page, shown in place of a table: one share from someone else as a read-only
+ * table, to add to the Vault or remove, or the list of what this person shared, to cancel.
+ */
+function SharedPage({ vault }: { vault: VaultState }) {
   const [error, setError] = useState("")
-  const [tab, setTab] = useState<"in" | "out">("in")
-  const { refreshShares } = vault
+  // False until the shares have been read once, so a link to one is not called gone too soon.
+  const [loaded, setLoaded] = useState(false)
+  const { refreshShares, sharedPage } = vault
+  const share = vault.shares.find((item) => item.id === sharedPage)
+  // A link this person follows to their own share shows the list they can cancel it from.
+  const showSent = sharedPage === "sent" || (!share && vault.sent.some((item) => item.id === sharedPage))
+  const missing = !share && !showSent
 
   useEffect(() => {
-    refreshShares().catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load what was shared."))
-  }, [refreshShares])
+    let stale = false
+    refreshShares()
+      .catch((caught) => {
+        if (!stale) setError(caught instanceof Error ? caught.message : "Could not load what was shared.")
+      })
+      .finally(() => {
+        if (!stale) setLoaded(true)
+      })
+    return () => {
+      stale = true
+    }
+  }, [refreshShares, missing])
+
+  const problem = error && (
+    <p className="form-error vault-note" role="alert">
+      {error}
+    </p>
+  )
+
+  if (share) {
+    return (
+      <div className="vault-shared-page">
+        <div className="vault-shared-top">
+          <div className="vault-shared-about">
+            <p className="hint">
+              Shared by {share.senderName} · {new Date(share.createdAt).toLocaleString()} ·{" "}
+              {share.via === "local" ? "Local network · " : ""}
+              {counted(share.table.rows.length, "row")}, {counted(share.table.columns.length, "column")} · Read only
+            </p>
+            {share.note && <p className="vault-shared-note">{share.note}</p>}
+          </div>
+          <div className="vault-shared-actions">
+            <button
+              type="button"
+              className="button vault-small"
+              disabled={!vault.data}
+              title={
+                vault.data
+                  ? "Add this as a new table in your Vault, where you can change it"
+                  : "Open or create a Vault file first"
+              }
+              onClick={() => vault.addShared(share)}
+            >
+              Add to my Vault
+            </button>
+            <button
+              type="button"
+              className="button danger vault-small vault-icon-button"
+              aria-label={`Remove ${share.table.name} from your shared data`}
+              title="Remove from your shared data. A table you already added stays in your Vault."
+              onClick={() => {
+                setError("")
+                vault.dropShare(share).catch((caught) => setError(caught instanceof Error ? caught.message : "Could not remove that."))
+              }}
+            >
+              <TrashIcon />
+            </button>
+          </div>
+        </div>
+        {problem}
+        <div className="vault-grid-wrap">
+          <table className="vault-grid vault-viewing">
+            <thead>
+              <tr>
+                <th scope="col" className="vault-no">
+                  No
+                </th>
+                {share.table.columns.map((column) => (
+                  <th key={column.id} scope="col">
+                    <span className="vault-col-name">{column.name || "Untitled"}</span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {share.table.rows.length === 0 ? (
+                <tr>
+                  <td className="vault-empty" colSpan={share.table.columns.length + 1}>
+                    No rows were shared.
+                  </td>
+                </tr>
+              ) : (
+                share.table.rows.map((row, index) => (
+                  <tr key={row.id}>
+                    <td className="vault-no">{index + 1}</td>
+                    {share.table.columns.map((column) => (
+                      <td key={column.id}>
+                        <CopyableCell column={column} value={row.cells[column.id] ?? null} />
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    )
+  }
+
+  if (!showSent) {
+    return (
+      <div className="vault-shared-page">
+        {problem}
+        {loaded ? (
+          <div className="settings-panel">
+            <h2>This shared data is no longer available</h2>
+            <p className="hint">It was cancelled by the person who shared it, or removed from your shared data.</p>
+          </div>
+        ) : (
+          <div className="page-loading" role="status" aria-label="Loading the shared data">
+            <span className="loading-spinner" aria-hidden="true" />
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
-    <VaultModal title="Sharing" wide onClose={onClose}>
-      <div className="desk-segmented vault-share-via" role="group" aria-label="Which shares to list">
-        <button type="button" aria-pressed={tab === "in"} onClick={() => setTab("in")}>
-          Shared with you
-          {vault.shares.length > 0 && <span className="vault-filter-count">{vault.shares.length}</span>}
-        </button>
-        <button type="button" aria-pressed={tab === "out"} onClick={() => setTab("out")}>
-          Shared by you
-          {vault.sent.length > 0 && <span className="vault-filter-count">{vault.sent.length}</span>}
-        </button>
-      </div>
-      {error && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-      {tab === "out" && vault.sent.length === 0 && <p className="hint">Nothing you shared is waiting.</p>}
-      {tab === "out" &&
-        vault.sent.map((share) => (
+    <div className="vault-shared-page">
+      {problem}
+      <div className="vault-shared-list">
+      {vault.sent.length === 0 && <p className="hint">Nothing you shared is waiting.</p>}
+      {vault.sent.map((share) => (
           <div key={share.id} className="vault-shared-item">
             <div className="vault-shared-head">
               <div>
@@ -2871,7 +3008,7 @@ function SharedWithYouDialog({ vault, onClose }: { vault: VaultState; onClose: (
                   title={
                     share.via === "local"
                       ? "Delete it from their computer too. If they are away, it goes when they are back on the network."
-                      : "Take it off their list."
+                      : "Take it out of their shared data."
                   }
                   onClick={() => {
                     setError("")
@@ -2886,66 +3023,14 @@ function SharedWithYouDialog({ vault, onClose }: { vault: VaultState; onClose: (
             </div>
           </div>
         ))}
-      {tab === "out" && vault.sent.length > 0 && (
-        <p className="hint">
-          Cancelling takes the share away from the other person. A table they already added to their Vault stays there.
-        </p>
-      )}
-      {tab === "in" && vault.shares.length === 0 && !error && <p className="hint">Nothing has been shared with you.</p>}
-      {(tab === "in" ? vault.shares : []).map((share) => (
-        <div key={share.id} className="vault-shared-item">
-          <div className="vault-shared-head">
-            <div>
-              <strong>{share.table.name}</strong>
-              <p className="hint">
-                From {share.senderName} · {new Date(share.createdAt).toLocaleString()} ·{" "}
-                {share.via === "local" ? "Local network · " : ""}
-                {counted(share.table.rows.length, "row")}, {counted(share.table.columns.length, "column")}
-              </p>
-            </div>
-            <div className="vault-shared-actions">
-              <button
-                type="button"
-                className="button secondary vault-small"
-                aria-expanded={openId === share.id}
-                onClick={() => setOpenId(openId === share.id ? null : share.id)}
-              >
-                {openId === share.id ? "Hide" : "Look"}
-              </button>
-              <button
-                type="button"
-                className="button vault-small"
-                disabled={added.has(share.id)}
-                title="Add this as a new table in your Vault"
-                onClick={() => {
-                  vault.addShared(share)
-                  setAdded(new Set(added).add(share.id))
-                }}
-              >
-                {added.has(share.id) ? "Added" : "Add to my Vault"}
-              </button>
-              <button
-                type="button"
-                className="button danger vault-small vault-icon-button"
-                aria-label={`Remove ${share.table.name} from this list`}
-                title="Remove from this list. A table you already added stays in your Vault."
-                onClick={() => {
-                  setError("")
-                  vault.dropShare(share).catch((caught) => setError(caught instanceof Error ? caught.message : "Could not remove that."))
-                }}
-              >
-                <TrashIcon />
-              </button>
-            </div>
-          </div>
-          {share.note && <p className="vault-shared-note">{share.note}</p>}
-          {openId === share.id && <SharedPreview table={share.table} limit={50} />}
-        </div>
-      ))}
-      {tab === "in" && added.size > 0 && (
-        <p className="hint">Added tables are under “Shared with me” in the sidebar. Save your Vault to keep them.</p>
-      )}
-    </VaultModal>
+        {vault.sent.length > 0 && (
+          <p className="hint">
+            Cancelling takes the share away from the other person, and the link they were sent stops working. A table
+            they already added to their Vault stays there.
+          </p>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -4202,7 +4287,6 @@ function VaultSearchDialog({ vault, onClose }: { vault: VaultState; onClose: () 
 export function Vault({ vault }: { vault: VaultState }) {
   const { save, dirty } = vault
   const [searching, setSearching] = useState(false)
-  const [showShared, setShowShared] = useState(false)
   const hasFile = Boolean(vault.file && vault.data)
 
   // Shift + mouse wheel scrolls a table sideways: the one under the pointer (a Sub-table's own
@@ -4260,17 +4344,34 @@ export function Vault({ vault }: { vault: VaultState }) {
   }
 
   const opened = vault.file && vault.data
+  // Shared data takes the page in place of a table, with or without a Vault file open.
+  const sharedOpen = vault.sharedPage !== null
+  const sharedTitle = sharedOpen
+    ? (vault.shares.find((share) => share.id === vault.sharedPage)?.table.name ??
+      (vault.sharedPage === "sent" || vault.sent.some((share) => share.id === vault.sharedPage) ? "Shared by you" : "Shared data"))
+    : null
 
   return (
     <AttachmentsContext.Provider value={{ file: vault.file, table: vault.table?.name ?? "", report: vault.reportError }}>
       <section className="settings vault">
         <header className="thread-bar profile-bar">
           <div className="vault-title">
-            <h1>{opened && vault.panes.length < 2 ? vault.table?.name || "Vault" : "Vault"}</h1>
+            <h1>{sharedTitle ?? (opened && vault.panes.length < 2 ? vault.table?.name || "Vault" : "Vault")}</h1>
             {/* The file itself, with Open and New, is at the top of the sidebar. */}
-            {opened && vault.dirty && <p className="thread-email vault-unsaved">Unsaved changes</p>}
+            {sharedOpen ? (
+              <p className="thread-email">Shared data</p>
+            ) : (
+              opened && vault.dirty && <p className="thread-email vault-unsaved">Unsaved changes</p>
+            )}
           </div>
-          {opened && (
+          {sharedOpen && (
+            <div className="profile-bar-actions">
+              <button type="button" className="button secondary vault-small" onClick={vault.closeShared}>
+                {opened && vault.table ? `Back to ${vault.table.name || "your table"}` : "Close"}
+              </button>
+            </div>
+          )}
+          {opened && !sharedOpen && (
             <div className="profile-bar-actions">
               {vault.panes.length > 1 && (
                 <button
@@ -4309,13 +4410,13 @@ export function Vault({ vault }: { vault: VaultState }) {
               <button
                 type="button"
                 className="bar-icon vault-save"
-                aria-label="Sharing: shared with you and shared by you"
+                aria-label="Shared data: shared with you and shared by you"
                 title={
                   vault.shares.length > 0
                     ? `Shared with you: ${vault.shares.length === 1 ? "1 table" : `${vault.shares.length} tables`}`
                     : "Shared with you, and what you shared"
                 }
-                onClick={() => setShowShared(true)}
+                onClick={() => vault.openShared(vault.shares[0]?.id ?? "sent")}
               >
                 <InboxIcon />
                 {vault.shares.length > 0 && <span className="vault-dot" aria-hidden="true" />}
@@ -4380,6 +4481,8 @@ export function Vault({ vault }: { vault: VaultState }) {
           <div className="page-loading" role="status" aria-label="Opening your Vault">
             <span className="loading-spinner" aria-hidden="true" />
           </div>
+        ) : sharedOpen ? (
+          <SharedPage vault={vault} />
         ) : !opened ? (
           <div className="settings-panel vault-welcome">
             <h2>Keep important data on your computer</h2>
@@ -4458,7 +4561,7 @@ export function Vault({ vault }: { vault: VaultState }) {
           </div>
         )}
         {searching && hasFile && <VaultSearchDialog vault={vault} onClose={() => setSearching(false)} />}
-        {showShared && hasFile && <SharedWithYouDialog vault={vault} onClose={() => setShowShared(false)} />}
+
       </section>
     </AttachmentsContext.Provider>
   )

@@ -60,8 +60,17 @@ const FEATURE_DELETE: &str = "delete";
 const FEATURE_PIN: &str = "pin";
 /// Understands Signal frames: the short notes two apps swap to set up a voice or video call.
 const FEATURE_CALLS: &str = "calls";
-const FEATURES: &[&str] =
-    &[FEATURE_TYPING, FEATURE_READ, FEATURE_FILES, FEATURE_DELETE, FEATURE_PIN, FEATURE_CALLS];
+/// Understands a Read frame that is about the room, and keeps who has read the room how far.
+const FEATURE_ROOM_READ: &str = "roomread";
+const FEATURES: &[&str] = &[
+    FEATURE_TYPING,
+    FEATURE_READ,
+    FEATURE_FILES,
+    FEATURE_DELETE,
+    FEATURE_PIN,
+    FEATURE_CALLS,
+    FEATURE_ROOM_READ,
+];
 /// The longest call set-up note, in bytes. It has to fit one packet with room to spare.
 const MAX_SIGNAL: usize = 30_000;
 /// The longest Noise message, which is also the most one length-prefixed packet can hold.
@@ -108,6 +117,12 @@ CREATE TABLE IF NOT EXISTS reads (
 );
 -- Messages this person deleted from this computer, so a copy sent again when an app reconnects is
 -- not kept again.
+-- How far each other person has read the room, as their app last said, so this person's room
+-- messages can show who has read them.
+CREATE TABLE IF NOT EXISTS room_reads (
+  user_id TEXT PRIMARY KEY,
+  up_to INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS removed (
   id TEXT PRIMARY KEY
 );
@@ -375,9 +390,15 @@ enum Frame {
     Status { idle: bool },
     /// The sender started or stopped typing in the room (no `to`) or to `to`. Needs "typing".
     Typing { to: Option<String>, typing: bool },
-    /// The sender has seen my direct messages to them up to this sent_at. Needs "read".
+    /// The sender has seen my direct messages to them up to this sent_at. Needs "read". With
+    /// `room`, it is the room they have read that far instead; that is only sent to apps with
+    /// "roomread", since an older app would take it to be about the direct chat.
     #[serde(rename_all = "camelCase")]
-    Read { up_to: i64 },
+    Read {
+        up_to: i64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        room: bool,
+    },
     /// Asks the sender of a message for its file, which comes back as FileChunks. Needs "files".
     FileRequest { id: String },
     FileChunk { id: String, offset: u64, data: String },
@@ -566,6 +587,13 @@ impl Session {
         .ok()
     }
 
+    /// The name the directory has for an account, or nothing if it is not in it.
+    fn directory_name(&self, user_id: &str) -> String {
+        let db = self.db.lock().unwrap();
+        db.query_row("SELECT name FROM directory WHERE user_id = ?1 LIMIT 1", params![user_id], |row| row.get(0))
+            .unwrap_or_default()
+    }
+
     /// Everyone connected, once each, without this person's own other computers. Someone on
     /// several computers is idle only if all of them are.
     fn peer_list(&self) -> Vec<LocalPeer> {
@@ -721,7 +749,13 @@ impl Session {
                 let up_to: Option<i64> = db
                     .query_row("SELECT up_to FROM reads WHERE chat = ?1", params![peer_user_id], |row| row.get(0))
                     .ok();
-                frames.extend(up_to.map(|up_to| Frame::Read { up_to }));
+                frames.extend(up_to.map(|up_to| Frame::Read { up_to, room: false }));
+            }
+            if features.contains(FEATURE_ROOM_READ) {
+                let db = self.db.lock().unwrap();
+                let up_to: Option<i64> =
+                    db.query_row("SELECT up_to FROM reads WHERE chat = ?1", params![ROOM], |row| row.get(0)).ok();
+                frames.extend(up_to.map(|up_to| Frame::Read { up_to, room: true }));
             }
         }
         if features.contains(FEATURE_FILES) {
@@ -1041,6 +1075,16 @@ struct ReadEvent {
     up_to: i64,
 }
 
+/// How far someone has read the room.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomRead {
+    user_id: String,
+    /// Their name in the directory, for when they are not on the network to ask.
+    name: String,
+    up_to: i64,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct FileEvent {
@@ -1196,7 +1240,26 @@ fn receive(session: &Session, from: &str, outbox: &mpsc::UnboundedSender<Frame>,
                 let _ = session.app.emit("local-chat-signal", SignalEvent { user_id: from.to_string(), data });
             }
         }
-        Frame::Read { up_to } => {
+        Frame::Read { up_to, room: true } => {
+            if from == session.user_id {
+                return;
+            }
+            // Only ever forwards: an older note arriving late does not take a read back.
+            let changed = {
+                let db = session.db.lock().unwrap();
+                db.execute(
+                    "INSERT INTO room_reads (user_id, up_to) VALUES (?1, ?2)
+                     ON CONFLICT (user_id) DO UPDATE SET up_to = excluded.up_to WHERE excluded.up_to > room_reads.up_to",
+                    params![from, up_to],
+                )
+                .unwrap_or(0)
+            };
+            if changed > 0 {
+                let event = RoomRead { user_id: from.to_string(), name: session.directory_name(from), up_to };
+                let _ = session.app.emit("local-chat-room-read", event);
+            }
+        }
+        Frame::Read { up_to, room: false } => {
             if from == session.user_id {
                 return;
             }
@@ -1957,23 +2020,51 @@ pub fn local_chat_signal(state: tauri::State<'_, LocalChat>, to: String, data: S
     Ok(reachable)
 }
 
-/// Records that this person has seen a direct chat up to its newest message from the other
-/// person, and tells them so their double checks show.
+/// How far each other person has read the room, as their apps last said.
+#[tauri::command]
+pub fn local_chat_room_reads(state: tauri::State<'_, LocalChat>) -> Result<Vec<RoomRead>, String> {
+    let session = running(&state)?;
+    let rows: Vec<(String, i64)> = {
+        let db = session.db.lock().unwrap();
+        let mut statement = db.prepare("SELECT user_id, up_to FROM room_reads").map_err(message)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(message)?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(user_id, up_to)| RoomRead { name: session.directory_name(&user_id), user_id, up_to })
+        .collect())
+}
+
+/// Records that this person has seen a chat up to its newest message from someone else, and tells
+/// them so their double checks show: the other person for a direct chat, everyone for the room.
 #[tauri::command]
 pub fn local_chat_mark_read(state: tauri::State<'_, LocalChat>, chat: String) -> Result<(), String> {
     let session = running(&state)?;
-    if chat == ROOM || !valid_user_id(&chat) {
+    let room = chat == ROOM;
+    if !room && !valid_user_id(&chat) {
         return Ok(());
     }
     let up_to = {
         let db = session.db.lock().unwrap();
-        let newest: Option<i64> = db
-            .query_row(
+        let newest: Option<i64> = if room {
+            db.query_row(
+                "SELECT MAX(sent_at) FROM messages WHERE chat = ?1 AND sender_id <> ?2",
+                params![chat, session.user_id],
+                |row| row.get(0),
+            )
+        } else {
+            db.query_row(
                 "SELECT MAX(sent_at) FROM messages WHERE chat = ?1 AND sender_id = ?1",
                 params![chat],
                 |row| row.get(0),
             )
-            .map_err(message)?;
+        }
+        .map_err(message)?;
         let Some(newest) = newest else { return Ok(()) };
         let before: Option<i64> = db
             .query_row("SELECT up_to FROM reads WHERE chat = ?1", params![chat], |row| row.get(0))
@@ -1988,9 +2079,16 @@ pub fn local_chat_mark_read(state: tauri::State<'_, LocalChat>, chat: String) ->
         .map_err(message)?;
         newest
     };
-    session.send_to(Some(&chat), |peer| {
-        peer.features.contains(FEATURE_READ).then_some(Frame::Read { up_to })
-    });
+    if room {
+        session.send_to(None, |peer| {
+            (peer.user_id != session.user_id && peer.features.contains(FEATURE_ROOM_READ))
+                .then_some(Frame::Read { up_to, room: true })
+        });
+    } else {
+        session.send_to(Some(&chat), |peer| {
+            peer.features.contains(FEATURE_READ).then_some(Frame::Read { up_to, room: false })
+        });
+    }
     Ok(())
 }
 

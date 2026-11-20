@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react"
 import { parseChatText, toggleStyle, type ChatPart, type ChatStyle } from "../lib/chatText"
+import { openVaultShare } from "../lib/vaultShare"
 import { MentionText } from "./Mentions"
 
 function renderParts(parts: ChatPart[], names: string[], me: string): ReactNode[] {
@@ -10,6 +11,19 @@ function renderParts(parts: ChatPart[], names: string[], me: string): ReactNode[
         <code key={index} className={part.block ? "chat-code block" : "chat-code"}>
           {part.text}
         </code>
+      )
+    }
+    if (part.style === "share") {
+      return (
+        <button
+          key={index}
+          type="button"
+          className="chat-share-link"
+          title="Open the shared data in your Vault"
+          onClick={() => openVaultShare(part.id)}
+        >
+          Open shared data
+        </button>
       )
     }
     const Tag = part.style === "bold" ? "strong" : part.style === "italic" ? "em" : "s"
