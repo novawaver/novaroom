@@ -6341,8 +6341,6 @@ code {
 .shell.offline-shell-body {
   flex: 1;
   min-height: 0;
-  --nav-width: 0px;
-  grid-template-columns: var(--rail) 1fr;
 }
 
 /* Chats: the Online / Local toggle at the right of the sidebar's heading. Icons only: the knob
@@ -6425,18 +6423,6 @@ code {
   line-height: 1;
 }
 
-/* Without internet: the tabs for the tools that still work, at the top of the sidebar. */
-.offline-tabs {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 1fr;
-  gap: 4px;
-  margin-bottom: 14px;
-  padding: 4px;
-  border: 1px solid var(--side-line);
-  border-radius: 12px;
-  background: var(--side-soft);
-}
 
 .chat-mode-tab {
   display: inline-flex;
@@ -9118,7 +9104,7 @@ code {
 
 /* Vault: the pin in a column's header, shown while the pointer is over the header or the column is fixed. */
 .vault-fix:not([aria-pressed="true"]) {
-  opacity: 0;
+  opacity: 0.55;
 }
 
 .vault-grid th:hover .vault-fix,
@@ -9903,4 +9889,117 @@ code {
 
 .read-list-waiting {
   color: var(--muted);
+}
+/* Vault: small header buttons, so the column's name keeps the room. */
+.vault-grid .vault-col-head {
+  gap: 0;
+}
+
+.vault-col-head .vault-sort,
+.vault-col-head .vault-remove {
+  width: 20px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.vault-col-head .vault-sort svg {
+  width: 13px;
+  height: 13px;
+}
+
+.vault-col-head .vault-remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+.vault-col-head .vault-col-grip {
+  width: 16px;
+  margin-right: 0;
+}
+
+.vault-col-head .vault-col-name {
+  padding: 6px 2px 6px 6px;
+}
+
+.vault-grid .vault-col-head input:not([type="checkbox"]) {
+  padding: 6px 4px 6px 6px;
+}
+
+/* The pin: tilted outline until the column is pinned, then upright and filled. */
+.vault-sort svg.vault-fix-off {
+  transform: rotate(40deg);
+}
+
+.vault-sort svg.vault-fix-on {
+  fill: currentColor;
+}
+
+/* Vault: a picked cell, row or column. */
+.vault-grid th[data-column],
+.vault-grid tbody td.vault-no {
+  cursor: pointer;
+}
+
+.vault-grid tbody td.vault-picked {
+  --vault-cell-tint: color-mix(in srgb, var(--brand-bright) 18%, transparent);
+  background-color: var(--vault-cell-tint);
+}
+
+.vault-grid tbody td.vault-picked-cell {
+  outline: 2px solid var(--brand-bright);
+  outline-offset: -2px;
+}
+
+.vault-grid tbody td.vault-no.vault-picked {
+  color: var(--brand-ink);
+  font-weight: 700;
+}
+
+.vault-grid th.vault-picked {
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--brand-bright) 22%, transparent),
+      color-mix(in srgb, var(--brand-bright) 22%, transparent)
+    ),
+    var(--side-soft);
+}
+
+/* What is picked, with Copy, at the bottom right of the table. It takes no room of its own. */
+.vault-pick-bar {
+  position: sticky;
+  left: 0;
+  bottom: 0;
+  z-index: 4;
+  height: 0;
+}
+
+.vault-pick-bar > div {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 24px);
+  padding: 4px 6px 4px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: 0 6px 20px rgba(28, 25, 21, 0.18);
+  font-size: 13px;
+}
+
+.vault-pick-bar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* Offline: a page that needs the server. */
+.offline-only-rail {
+  margin: 4px 0 0;
+  color: var(--side-muted);
+  font-size: 14px;
 }

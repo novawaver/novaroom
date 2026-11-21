@@ -792,7 +792,7 @@ export function VaultRail({ vault }: { vault: VaultState }) {
   )
 }
 
-type NavItem = "chats" | "rooms" | "people" | "leaddesk" | "timer" | "vault" | "capture" | "settings"
+export type NavItem = "chats" | "rooms" | "people" | "leaddesk" | "timer" | "vault" | "capture" | "settings"
 
 // Pages that can be pinned. A pinned page stays open in a panel on the right of every other page,
 // so it can be used without leaving the page that is open. One page is pinned at a time, and the
@@ -841,7 +841,7 @@ function OpenAsPageIcon() {
   )
 }
 
-const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
+export const NAV_ITEMS: Array<{ id: NavItem; label: string; icon: ComponentType }> = [
   { id: "chats", label: "Chats", icon: ChatsNavIcon },
   { id: "rooms", label: "Rooms", icon: RoomsNavIcon },
   { id: "people", label: "People", icon: PeopleNavIcon },
@@ -924,9 +924,9 @@ function MenuIcon() {
 }
 
 // Whether the nav bar shows labels next to its icons, remembered on this computer.
-const NAV_EXPANDED_KEY = "novaroom.nav-expanded"
+export const NAV_EXPANDED_KEY = "novaroom.nav-expanded"
 
-function readNavExpanded() {
+export function readNavExpanded() {
   try {
     return localStorage.getItem(NAV_EXPANDED_KEY) === "true"
   } catch {
@@ -934,7 +934,8 @@ function readNavExpanded() {
   }
 }
 
-function NavBar({
+/** The bar of sections down the left edge. Also used by the offline app. */
+export function NavBar({
   active,
   showLeadDesk,
   badges,

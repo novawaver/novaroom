@@ -363,10 +363,10 @@ function readSplit(file: string): { ids: string[]; stacked: boolean } {
   }
 }
 
-/** A pin: the column stays in place while the table scrolls sideways. */
-function FixIcon() {
+/** A pin: the column stays in place while the table scrolls sideways. Filled and upright once pinned. */
+function FixIcon({ pinned }: { pinned: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={pinned ? "vault-fix-on" : "vault-fix-off"}>
       <path d="M9 4.5h6l-1 5.5 3 3.5H7l3-3.5-1-5.5zM12 13.5V20" />
     </svg>
   )
@@ -3321,6 +3321,80 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
     setFocusGrip(null)
   }, [focusGrip])
 
+  // What is picked in the grid: one cell, a whole row (no column) or a whole column (no row).
+  const [picked, setPicked] = useState<{ rowId: string | null; columnId: string | null } | null>(null)
+  const [pickCopied, setPickCopied] = useState(false)
+  useEffect(() => setPicked(null), [table.id, cards])
+  useEffect(() => setPickCopied(false), [picked])
+  /** Picks a cell, a row or a column. Clicking a picked row or column again lets go of it. */
+  const pick = (rowId: string | null, columnId: string | null) =>
+    setPicked((current) =>
+      current && current.rowId === rowId && current.columnId === columnId
+        ? rowId && columnId
+          ? current
+          : null
+        : { rowId, columnId },
+    )
+  const isPicked = (rowId: string, columnId: string) =>
+    picked !== null && (picked.rowId ?? rowId) === rowId && (picked.columnId ?? columnId) === columnId
+  const pickedRowAt = picked?.rowId ? shown.findIndex((row) => row.id === picked.rowId) : -1
+  const pickedColumn = picked?.columnId ? (table.columns.find((column) => column.id === picked.columnId) ?? null) : null
+  // Nothing to show or copy once the picked row is filtered out or the picked column is deleted.
+  const pickedLabel = !picked
+    ? null
+    : (picked.rowId && pickedRowAt === -1) || (picked.columnId && !pickedColumn)
+      ? null
+      : picked.rowId && pickedColumn
+        ? `${pickedColumn.name || "Untitled"}, row ${pickedRowAt + 1}`
+        : picked.rowId
+          ? `Row ${pickedRowAt + 1}`
+          : `Column ${pickedColumn?.name || "Untitled"}`
+  /** The picked values as text: tabs between a row's values, one line for each row of a column. */
+  function pickedText() {
+    if (!picked || !pickedLabel) return ""
+    const text = (row: VaultRow, column: VaultColumn) => {
+      const value = row.cells[column.id] ?? null
+      return column.kind === "subtable"
+        ? subTableText(value, column.columns ?? [])
+        : copyText(column, value, links.get(column.id))
+    }
+    const oneLine = (value: string) => value.replace(/\s*\r?\n\s*/g, ", ").replace(/\t/g, " ")
+    const row = pickedRowAt === -1 ? null : shown[pickedRowAt]
+    if (row && pickedColumn) return text(row, pickedColumn)
+    // A whole row leaves its passwords out, so one does not get pasted somewhere by accident.
+    if (row) return table.columns.map((column) => (column.kind === "password" ? "" : oneLine(text(row, column)))).join("\t")
+    if (pickedColumn) return shown.map((item) => oneLine(text(item, pickedColumn))).join("\n")
+    return ""
+  }
+  function copyPicked() {
+    navigator.clipboard.writeText(pickedText()).then(
+      () => setPickCopied(true),
+      () => {
+        // The clipboard was not available.
+      },
+    )
+  }
+  const copyPickedRef = useRef(copyPicked)
+  copyPickedRef.current = copyPicked
+  // Ctrl+C copies what is picked, unless something is being typed or text is selected. Escape lets go.
+  useEffect(() => {
+    if (!picked) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPicked(null)
+        return
+      }
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "c") return
+      const target = event.target instanceof HTMLElement ? event.target : null
+      if (target?.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")) return
+      if (window.getSelection()?.toString()) return
+      event.preventDefault()
+      copyPickedRef.current()
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [picked])
+
   function sortBy(column: VaultColumn) {
     const direction: SortDirection =
       sorted?.columnId === column.id && sorted.direction === "asc" ? "desc" : "asc"
@@ -3870,8 +3944,23 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                     scope="col"
                     data-column
                     data-fixed={isFixed(column.id) ? column.id : undefined}
-                    className={columnClass(column, columnIndex)}
+                    className={
+                      [
+                        columnClass(column, columnIndex),
+                        picked && picked.rowId === null && picked.columnId === column.id && "vault-picked",
+                      ]
+                        .filter(Boolean)
+                        .join(" ") || undefined
+                    }
                     style={{ ...widthStyle(column.id), ...fixedStyle(column.id) }}
+                    aria-selected={picked ? picked.rowId === null && picked.columnId === column.id : undefined}
+                    onClick={(event) => {
+                      // Not the buttons and fields in the header, nor a dialog one of them opened.
+                      const target = event.target as HTMLElement
+                      if (!event.currentTarget.contains(target)) return
+                      if (target.closest("button, input, select, textarea, label, [role='separator']")) return
+                      pick(null, column.id)
+                    }}
                   >
                     <div className="vault-col-head">
                       {editing && table.columns.length > 1 && (
@@ -3941,7 +4030,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         }
                         onClick={() => toggleFixed(column.id)}
                       >
-                        <FixIcon />
+                        <FixIcon pinned={fixedIds.includes(column.id)} />
                       </button>
                       {editing && (
                         <button
@@ -4119,18 +4208,40 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         )}
                       </td>
                     )}
-                    <td className={isFixed("no") ? "vault-no vault-fixed" : "vault-no"} style={fixedStyle("no")}>
+                    <td
+                      className={[
+                        "vault-no",
+                        isFixed("no") && "vault-fixed",
+                        picked && picked.rowId === row.id && picked.columnId === null && "vault-picked",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      style={fixedStyle("no")}
+                      title="Select this row"
+                      onClick={() => pick(row.id, null)}
+                    >
                       {index + 1}
                     </td>
                     {table.columns.map((column, columnIndex) => (
                       <td
                         key={column.id}
                         className={
-                          [columnClass(column, columnIndex), repeated.get(column.id)?.has(row.id) && "vault-cell-repeated"]
+                          [
+                            columnClass(column, columnIndex),
+                            repeated.get(column.id)?.has(row.id) && "vault-cell-repeated",
+                            isPicked(row.id, column.id) && "vault-picked",
+                            picked?.rowId === row.id && picked.columnId === column.id && "vault-picked-cell",
+                          ]
                             .filter(Boolean)
                             .join(" ") || undefined
                         }
                         style={{ ...widthStyle(column.id), ...fixedStyle(column.id) }}
+                        onClick={(event) => {
+                          // Not a button or link in the cell, nor a dialog opened from it.
+                          const target = event.target as HTMLElement
+                          if (!event.currentTarget.contains(target) || target.closest("button, a")) return
+                          pick(row.id, column.id)
+                        }}
                       >
                         {editing ? (
                           <CellEditor
@@ -4189,6 +4300,25 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               </tfoot>
             )}
           </table>
+          {pickedLabel && (
+            <div className="vault-pick-bar">
+              <div>
+                <span>{pickedLabel}</span>
+                <button type="button" className="text-button" title="Copy (Ctrl+C)" onClick={copyPicked}>
+                  {pickCopied ? "Copied" : "Copy"}
+                </button>
+                <button
+                  type="button"
+                  className="vault-remove"
+                  aria-label="Clear selection"
+                  title="Clear selection (Esc)"
+                  onClick={() => setPicked(null)}
+                >
+                  <RemoveIcon />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

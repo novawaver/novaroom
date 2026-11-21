@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from "react"
 import { onNotificationClick, setUnreadBadge } from "../lib/desktop"
 import { onOpenVaultShare } from "../lib/vaultShare"
 import type { Session } from "../types"
-import { CaptureRail, VaultRail } from "./AppShell"
+import { CaptureRail, NAV_EXPANDED_KEY, NAV_ITEMS, NavBar, VaultRail, readNavExpanded } from "./AppShell"
 import { Capture, type CaptureState, type CaptureTab } from "./Capture"
 import { LocalChatRail, LocalChatThread, type LocalChatState } from "./LocalChat"
 import { RailResize } from "./RailResize"
 import { VoiceCallBar, useVoiceCall } from "./VoiceCall"
 import { Vault, VaultLeaveDialog, useVault } from "./Vault"
 
-type OfflineView = "local" | "vault" | "capture"
+// The last four need the server: their page only says so.
+type OfflineView = "local" | "vault" | "capture" | "rooms" | "people" | "timer" | "settings"
 
 /**
  * The whole app without the server: Local chat, Vault and Capture, which all keep everything on
@@ -31,6 +32,8 @@ export function OfflineShell({
 }) {
   const [view, setView] = useState<OfflineView>("local")
   const [captureTab, setCaptureTab] = useState<CaptureTab>("record")
+  // The same nav bar as online, with the same remembered width.
+  const [navExpanded, setNavExpanded] = useState(readNavExpanded)
   const vault = useVault(session.userId, view === "vault")
   // Without internet, calls still work with people on the same network.
   const voice = useVoiceCall(session, true)
@@ -71,11 +74,7 @@ export function OfflineShell({
   }, [local.unreadTotal])
   useEffect(() => () => void setUnreadBadge(0), [])
 
-  const tabs: Array<{ id: OfflineView; label: string; hint: string; count: number }> = [
-    { id: "local", label: "Local chat", hint: "Chats with people on this network", count: local.unreadTotal },
-    { id: "vault", label: "Vault", hint: "Your tables, kept on this computer", count: 0 },
-    { id: "capture", label: "Capture", hint: "Record your screen, microphone and speaker", count: 0 },
-  ]
+  const pageName = NAV_ITEMS.find(({ id }) => id === view)?.label ?? "This page"
 
   return (
     <div className="offline-shell">
@@ -94,43 +93,63 @@ export function OfflineShell({
           {chosen ? "Sign in" : "Sign out"}
         </button>
       </p>
-      <div className="shell offline-shell-body">
+      <div className={navExpanded ? "shell offline-shell-body nav-open" : "shell offline-shell-body"}>
+        <NavBar
+          expanded={navExpanded}
+          onToggle={() => {
+            const next = !navExpanded
+            setNavExpanded(next)
+            try {
+              localStorage.setItem(NAV_EXPANDED_KEY, String(next))
+            } catch {
+              // Not remembered; the bar still opens and closes.
+            }
+          }}
+          active={view === "local" ? "chats" : view}
+          showLeadDesk={false}
+          badges={{ chats: local.unreadTotal }}
+          live={capture.live ? { capture: "Recording" } : undefined}
+          onSelect={(item) => {
+            if (item === "leaddesk") return
+            const next: OfflineView = item === "chats" ? "local" : item
+            if (next === "vault" && view === "vault") vault.selectTable(vault.data?.tables[0]?.id ?? null)
+            else if (next !== view) leaveTo(() => setView(next))
+          }}
+        />
         <RailResize />
         <aside className="rail">
-          <div className="offline-tabs" role="tablist" aria-label="Offline tools">
-            {tabs.map(({ id, label, hint, count }) => (
-              <button
-                key={id}
-                type="button"
-                role="tab"
-                className="chat-mode-tab"
-                aria-selected={view === id}
-                title={hint}
-                onClick={() => {
-                  if (id === "vault" && view === "vault") vault.selectTable(vault.data?.tables[0]?.id ?? null)
-                  else if (id !== view) leaveTo(() => setView(id))
-                }}
-              >
-                {label}
-                {id === "capture" && capture.live && <span className="nav-live inline" aria-label="Recording" />}
-                {count > 0 && view !== id && <span className="chat-mode-count">{count > 9 ? "9+" : count}</span>}
-              </button>
-            ))}
-          </div>
           {view === "local" ? (
             <LocalChatRail local={local} />
           ) : view === "capture" ? (
             <CaptureRail capture={capture} tab={captureTab} onSelect={setCaptureTab} />
-          ) : (
+          ) : view === "vault" ? (
             <VaultRail vault={vault} />
+          ) : (
+            <>
+              <div className="rail-head">
+                <p className="list-label">{pageName}</p>
+              </div>
+              <p className="offline-only-rail">Available when you are online.</p>
+            </>
           )}
         </aside>
         {view === "local" ? (
           <LocalChatThread local={local} userId={session.userId} voice={voice} />
         ) : view === "capture" ? (
           <Capture tab={captureTab} capture={capture} />
-        ) : (
+        ) : view === "vault" ? (
           <Vault vault={vault} />
+        ) : (
+          <section className="thread">
+            <div className="thread-empty" role="status">
+              <h2>{pageName} is only available online</h2>
+              <p>
+                {chosen
+                  ? "This page needs the Novaroom server. Sign in to use it."
+                  : "This page needs the Novaroom server. It comes back once Novaroom is connected again."}
+              </p>
+            </div>
+          </section>
         )}
       </div>
       <VaultLeaveDialog vault={vault} />
