@@ -37,6 +37,7 @@ import {
   setSharedPin,
   subscribeToSharedPins,
   listChats,
+  listMemberIds,
   listMemberNames,
   loadMessages,
   messageLabel,
@@ -102,6 +103,7 @@ import {
   SelectCheck,
   ThreadMenu,
   selectableRow,
+  MembersButton,
   ReadMark,
   escapeClosesThread,
   useMessageSelection,
@@ -2323,6 +2325,33 @@ export function AppShell({ local, capture }: { local: LocalChatState; capture: C
                       ? "Nobody else is in this chat"
                       : undefined
                 }
+              />
+            )}
+            {selected.kind !== "direct" && (
+              <MembersButton
+                key={selected.id}
+                title="Members"
+                load={async () => {
+                  const ids = await listMemberIds(selected.id)
+                  const people = await Promise.all(
+                    ids.map(async (id) => {
+                      const person = await personById(id).catch(() => null)
+                      const presence = presenceOf(id)
+                      return {
+                        id,
+                        name: person?.name || "Someone",
+                        avatarUrl: person?.avatarUrl ?? null,
+                        presence,
+                        note: id === session.userId ? "You" : PRESENCE_LABELS[presence],
+                      }
+                    }),
+                  )
+                  // You first, then by name.
+                  return people.sort(
+                    (a, b) =>
+                      Number(b.id === session.userId) - Number(a.id === session.userId) || a.name.localeCompare(b.name),
+                  )
+                }}
               />
             )}
             {selected.kind === "direct" && selected.otherUserId && (

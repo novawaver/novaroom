@@ -1,12 +1,15 @@
 import {
   createContext,
+  memo,
   useCallback,
   useContext,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type PointerEvent,
   type ReactNode,
 } from "react"
@@ -521,10 +524,7 @@ export function useVault(userId: string | null, active: boolean) {
   // Each table's filter rules, kept while the file is open. They only change what is shown.
   const [filters, setFilters] = useState<Record<string, VaultFilter[]>>({})
 
-  const dirty = useMemo(
-    () => data !== null && saved !== null && JSON.stringify(data) !== JSON.stringify(saved),
-    [data, saved],
-  )
+  const dirty = useMemo(() => data !== null && saved !== null && !sameVaultData(data, saved), [data, saved])
   const table = data?.tables.find((item) => item.id === tableId) ?? data?.tables[0] ?? null
   // Tables shown beside the open one, each in its own pane, and whether the panes are stacked.
   const [split, setSplit] = useState<string[]>([])
@@ -1311,6 +1311,22 @@ function formatDate(value: string) {
   const [year, month, day] = value.split("-").map(Number)
   const date = new Date(year, month - 1, day)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { dateStyle: "medium" })
+}
+
+/**
+ * Whether two versions of the Vault hold the same thing. Tables and rows an edit left alone are
+ * still the same objects, so only what changed is compared in full; this runs on every keystroke.
+ */
+function sameVaultData(a: VaultData, b: VaultData) {
+  if (a === b) return true
+  if (a.tables.length !== b.tables.length) return false
+  return a.tables.every((table, index) => {
+    const other = b.tables[index]
+    if (table === other) return true
+    if (table.rows.length !== other.rows.length) return false
+    if (JSON.stringify({ ...table, rows: null }) !== JSON.stringify({ ...other, rows: null })) return false
+    return table.rows.every((row, at) => row === other.rows[at] || JSON.stringify(row) === JSON.stringify(other.rows[at]))
+  })
 }
 
 /**
@@ -3034,6 +3050,167 @@ function SharedPage({ vault }: { vault: VaultState }) {
   )
 }
 
+// How many rows a table draws to begin with, and how many more each time the end comes near.
+const ROW_BATCH = 150
+
+/** What a grid row needs to know about one column. */
+type GridColumn = {
+  column: VaultColumn
+  link: LinkTarget | undefined
+  className: string | undefined
+  style: CSSProperties
+}
+
+/** What a grid row can do. One object for as long as the table is open. */
+type GridRowActions = {
+  setCell: (rowId: string, columnId: string, value: VaultCell) => void
+  pick: (rowId: string | null, columnId: string | null) => void
+  removeRow: (rowId: string) => void
+  showRepeated: (columnId: string) => void
+  gripDown: (rowId: string, index: number) => void
+  gripMove: (event: PointerEvent<HTMLButtonElement>) => void
+  gripUp: () => void
+  gripCancel: () => void
+  gripKey: (rowId: string, index: number, key: "ArrowUp" | "ArrowDown") => void
+}
+
+/**
+ * One row of the grid. Remembered, so a row is only drawn again when something about that row
+ * changed: with a thousand rows, typing in one cell must not redraw the other 999.
+ */
+const GridRow = memo(function GridRow({
+  row,
+  index,
+  columns,
+  editing,
+  canMove,
+  className,
+  sideFixed,
+  gripLeft,
+  noLeft,
+  repeats,
+  picked,
+  pickedCell,
+  actions,
+}: {
+  row: VaultRow
+  index: number
+  columns: GridColumn[]
+  editing: boolean
+  canMove: boolean
+  className: string | undefined
+  // Whether the row handle and number stay in place when scrolling sideways, and where.
+  sideFixed: boolean
+  gripLeft: number | undefined
+  noLeft: number | undefined
+  // For each column, how many other rows share this row's value there: "0,2,0". Empty for none.
+  repeats: string
+  // The picked column's id in this row, or "*" for the whole row.
+  picked: string | undefined
+  // Whether that is one cell, not a whole row or column.
+  pickedCell: boolean
+  actions: GridRowActions
+}) {
+  const others = repeats ? repeats.split(",").map(Number) : null
+  return (
+    <tr data-row data-row-id={row.id} className={className}>
+      {editing && (
+        <td
+          className={sideFixed ? "vault-grip-cell vault-fixed" : "vault-grip-cell"}
+          style={gripLeft === undefined ? undefined : { left: gripLeft }}
+        >
+          {canMove && (
+            <button
+              type="button"
+              className="vault-grip"
+              data-grip={row.id}
+              aria-label="Move row. Use the up and down arrow keys."
+              title="Drag to move, or use the arrow keys"
+              onPointerDown={(event) => {
+                if (event.button !== 0) return
+                event.preventDefault()
+                event.currentTarget.setPointerCapture(event.pointerId)
+                actions.gripDown(row.id, index)
+              }}
+              onPointerMove={actions.gripMove}
+              onPointerUp={actions.gripUp}
+              onPointerCancel={actions.gripCancel}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return
+                event.preventDefault()
+                actions.gripKey(row.id, index, event.key)
+              }}
+            >
+              <GripIcon />
+            </button>
+          )}
+        </td>
+      )}
+      <td
+        className={["vault-no", sideFixed && "vault-fixed", picked === "*" && "vault-picked"].filter(Boolean).join(" ")}
+        style={noLeft === undefined ? undefined : { left: noLeft }}
+        title="Select this row"
+        onClick={() => actions.pick(row.id, null)}
+      >
+        {index + 1}
+      </td>
+      {columns.map(({ column, link, className: columnClass, style }, at) => {
+        const shared = others?.[at] ?? 0
+        const isPicked = picked === "*" || picked === column.id
+        return (
+          <td
+            key={column.id}
+            className={
+              [
+                columnClass,
+                shared > 0 && "vault-cell-repeated",
+                isPicked && "vault-picked",
+                isPicked && pickedCell && "vault-picked-cell",
+              ]
+                .filter(Boolean)
+                .join(" ") || undefined
+            }
+            style={style}
+            onClick={(event) => {
+              // Not a button or link in the cell, nor a dialog opened from it.
+              const target = event.target as HTMLElement
+              if (!event.currentTarget.contains(target) || target.closest("button, a")) return
+              actions.pick(row.id, column.id)
+            }}
+          >
+            {editing ? (
+              <CellEditor
+                column={column}
+                value={row.cells[column.id] ?? null}
+                onChange={(value) => actions.setCell(row.id, column.id, value)}
+                link={link}
+              />
+            ) : (
+              <CopyableCell column={column} value={row.cells[column.id] ?? null} link={link} />
+            )}
+            {shared > 0 && (
+              <RepeatedMark others={shared} column={column} onShow={() => actions.showRepeated(column.id)} />
+            )}
+          </td>
+        )
+      })}
+      {editing && (
+        <td className="vault-row-actions">
+          <button
+            type="button"
+            className="vault-remove"
+            aria-label="Delete row"
+            title="Delete row"
+            onClick={() => actions.removeRow(row.id)}
+          >
+            <RemoveIcon />
+          </button>
+        </td>
+      )}
+    </tr>
+  )
+})
+
 function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable }) {
   const change = (next: (current: VaultTable) => VaultTable) => vault.updateTable(table.id, next)
   const { editing } = vault
@@ -3204,20 +3381,46 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
   const fixedStyle = (key: string) => (isFixed(key) && key in lefts ? { left: lefts[key] } : undefined)
 
   const tables = vault.data?.tables ?? []
-  /** Where a Link column points, for showing, searching, and following its cells. */
-  function linkFor(column: VaultColumn): LinkTarget | undefined {
-    if (!linksRows(column.kind)) return undefined
-    const target = tables.find((item) => item.id === column.target) ?? null
-    return {
-      table: target,
-      label: (rowId) => (target ? rowLabel(target, rowId) : null),
-      open: (rowId) => target && vault.openRow(target.id, rowId),
-    }
+  const vaultRef = useRef(vault)
+  vaultRef.current = vault
+  // The table each Link column points at. Kept as the same list until one of those tables changes,
+  // so typing in this table does not draw every row again.
+  const targetsNow = table.columns.map((column) =>
+    linksRows(column.kind) ? (tables.find((item) => item.id === column.target) ?? null) : null,
+  )
+  const targetsRef = useRef(targetsNow)
+  if (
+    targetsNow.length !== targetsRef.current.length ||
+    targetsNow.some((target, index) => target !== targetsRef.current[index])
+  ) {
+    targetsRef.current = targetsNow
   }
-  const links = new Map(table.columns.map((column) => [column.id, linkFor(column)]))
+  const targets = targetsRef.current
+  /** Where each Link column points, for showing, searching, and following its cells. */
+  const links = useMemo(
+    () =>
+      new Map<string, LinkTarget | undefined>(
+        table.columns.map((column, index) => {
+          if (!linksRows(column.kind)) return [column.id, undefined]
+          const target = targets[index] ?? null
+          return [
+            column.id,
+            {
+              table: target,
+              label: (rowId: string) => (target ? rowLabel(target, rowId) : null),
+              open: (rowId: string) => {
+                if (target) vaultRef.current.openRow(target.id, rowId)
+              },
+            },
+          ]
+        }),
+      ),
+    [table.columns, targets],
+  )
   const labelIn = (column: VaultColumn) => (rowId: string) => links.get(column.id)?.label(rowId) ?? ""
 
-  const search = query.trim().toLowerCase()
+  // Typing in the search box stays quick: the rows catch up a moment later.
+  const search = useDeferredValue(query).trim().toLowerCase()
   const columnById = new Map(table.columns.map((column) => [column.id, column]))
   // Duplicates are found across the whole table, then search and filters narrow what is shown.
   const duplicateColumns = (duplicateColumnIds ?? [])
@@ -3314,6 +3517,41 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
     return () => window.clearTimeout(timer)
   }, [highlight, cards])
 
+  // A big table is drawn a batch of rows at a time; more are added as the end comes near.
+  const [limit, setLimit] = useState(ROW_BATCH)
+  const highlightAt = highlight ? shown.findIndex((row) => row.id === highlight) : -1
+  // A row being scrolled to is drawn even when it is further down.
+  const drawnCount = Math.min(shown.length, Math.max(limit, highlightAt === -1 ? 0 : highlightAt + 20))
+  const drawn = drawnCount < shown.length ? shown.slice(0, drawnCount) : shown
+  const moreRef = useRef<HTMLDivElement>(null)
+  const hasMore = drawnCount < shown.length
+  useEffect(() => {
+    const node = moreRef.current
+    if (!node || !hasMore) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setLimit(drawnCount + ROW_BATCH)
+      },
+      { root: node.parentElement, rootMargin: "900px 0px" },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [hasMore, drawnCount, cards])
+  // Going in or out of Edit draws every row again in its other form, so only the rows down to
+  // the ones on screen are kept; the rest come back on scrolling.
+  const [limitFor, setLimitFor] = useState(editing)
+  if (limitFor !== editing) {
+    setLimitFor(editing)
+    const wrap = wrapRef.current
+    const rows = bodyRef.current?.rows
+    if (wrap && rows && !cards) {
+      const bottom = wrap.scrollTop + wrap.clientHeight
+      let count = 0
+      while (count < rows.length && rows[count].offsetTop <= bottom) count += 1
+      setLimit(Math.max(ROW_BATCH, count + 30))
+    }
+  }
+
   // Keep focus on a row's or column's handle after moving it with the keyboard.
   useEffect(() => {
     if (!focusGrip) return
@@ -3335,8 +3573,6 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
           : null
         : { rowId, columnId },
     )
-  const isPicked = (rowId: string, columnId: string) =>
-    picked !== null && (picked.rowId ?? rowId) === rowId && (picked.columnId ?? columnId) === columnId
   const pickedRowAt = picked?.rowId ? shown.findIndex((row) => row.id === picked.rowId) : -1
   const pickedColumn = picked?.columnId ? (table.columns.find((column) => column.id === picked.columnId) ?? null) : null
   // Nothing to show or copy once the picked row is filtered out or the picked column is deleted.
@@ -3580,6 +3816,8 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
     setSorted(null)
     const row = newRow()
     change((current) => ({ ...current, rows: atStart ? [row, ...current.rows] : [...current.rows, row] }))
+    // A row added at the bottom has to be drawn to be filled in.
+    if (!atStart) setLimit(table.rows.length + ROW_BATCH)
     // In Cards, open the new row to fill in.
     if (cards) setSelected(row.id)
     // Show the new row, at the top or the bottom.
@@ -3608,6 +3846,72 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
       ),
     }))
   }
+
+  // What every row needs to know about each column. The same list until a column, a width, a pin
+  // or a column drag changes, so rows are not drawn again for anything else.
+  const gridColumns = useMemo<GridColumn[]>(
+    () =>
+      table.columns.map((column, index) => {
+        const pinned = hasFixed && fixed.includes(column.id)
+        const width = widths[column.id]
+        return {
+          column,
+          link: links.get(column.id),
+          className:
+            [
+              width && "vault-col-sized",
+              pinned && "vault-fixed",
+              lastFixed === column.id && "vault-fixed-last",
+              columnDrag?.id === column.id && "vault-col-dragged",
+              columnDropAt === index && "vault-col-drop-before",
+              columnDropAt === table.columns.length && index === table.columns.length - 1 && "vault-col-drop-after",
+            ]
+              .filter(Boolean)
+              .join(" ") || undefined,
+          style: {
+            ...(width ? { width, minWidth: width, maxWidth: width } : undefined),
+            ...(pinned && column.id in lefts ? { left: lefts[column.id] } : undefined),
+          },
+        }
+      }),
+    [table.columns, links, widths, hasFixed, fixed, lefts, lastFixed, columnDrag?.id, columnDropAt],
+  )
+  // The rows call these through one object that never changes, which always reaches the newest
+  // version of each action.
+  const liveActions = useRef<GridRowActions | null>(null)
+  liveActions.current = {
+    setCell,
+    pick,
+    removeRow: (rowId) => change((current) => ({ ...current, rows: current.rows.filter((item) => item.id !== rowId) })),
+    showRepeated: (columnId) => setDuplicateColumnIds([columnId]),
+    gripDown: (rowId, index) => setDrag({ id: rowId, target: index }),
+    gripMove: onGripMove,
+    gripUp: () => {
+      if (drag) moveRow(drag.id, drag.target)
+      setDrag(null)
+    },
+    gripCancel: () => setDrag(null),
+    gripKey: (rowId, index, key) => {
+      const to = key === "ArrowUp" ? index - 1 : index + 2
+      if (to < 0 || to > shown.length) return
+      moveRow(rowId, to)
+      setFocusGrip(rowId)
+    },
+  }
+  const rowActions = useMemo<GridRowActions>(
+    () => ({
+      setCell: (...args) => liveActions.current?.setCell(...args),
+      pick: (...args) => liveActions.current?.pick(...args),
+      removeRow: (...args) => liveActions.current?.removeRow(...args),
+      showRepeated: (...args) => liveActions.current?.showRepeated(...args),
+      gripDown: (...args) => liveActions.current?.gripDown(...args),
+      gripMove: (...args) => liveActions.current?.gripMove(...args),
+      gripUp: () => liveActions.current?.gripUp(),
+      gripCancel: () => liveActions.current?.gripCancel(),
+      gripKey: (...args) => liveActions.current?.gripKey(...args),
+    }),
+    [],
+  )
 
   return (
     <SubTablesInlineContext.Provider value={subInline}>
@@ -3838,7 +4142,7 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
             {shown.length === 0 && !editing ? (
               <p className="hint vault-cards-empty">{emptyMessage}</p>
             ) : (
-              shown.map((row, index) => (
+              drawn.map((row, index) => (
                 <RowCard
                   key={row.id}
                   table={table}
@@ -3858,6 +4162,11 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                   onOpen={() => setSelected(selected === row.id ? null : row.id)}
                 />
               ))
+            )}
+            {hasMore && (
+              <div className="vault-more" ref={moreRef}>
+                {shown.length - drawnCount} more rows show as you scroll.
+              </div>
             )}
             {editing && (
               <button type="button" className="vault-card vault-card-add" onClick={() => addRow()}>
@@ -4151,11 +4460,14 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                   </td>
                 </tr>
               ) : (
-                shown.map((row, index) => (
-                  <tr
+                drawn.map((row, index) => (
+                  <GridRow
                     key={row.id}
-                    data-row
-                    data-row-id={row.id}
+                    row={row}
+                    index={index}
+                    columns={gridColumns}
+                    editing={editing}
+                    canMove={canMove}
                     className={
                       [
                         highlight === row.id && "vault-highlight",
@@ -4172,112 +4484,26 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
                         .filter(Boolean)
                         .join(" ") || undefined
                     }
-                  >
-                    {editing && (
-                      <td className={isFixed("grip") ? "vault-grip-cell vault-fixed" : "vault-grip-cell"} style={fixedStyle("grip")}>
-                        {canMove && (
-                          <button
-                            type="button"
-                            className="vault-grip"
-                            data-grip={row.id}
-                            aria-label="Move row. Use the up and down arrow keys."
-                            title="Drag to move, or use the arrow keys"
-                            onPointerDown={(event) => {
-                              if (event.button !== 0) return
-                              event.preventDefault()
-                              event.currentTarget.setPointerCapture(event.pointerId)
-                              setDrag({ id: row.id, target: index })
-                            }}
-                            onPointerMove={onGripMove}
-                            onPointerUp={() => {
-                              if (drag) moveRow(drag.id, drag.target)
-                              setDrag(null)
-                            }}
-                            onPointerCancel={() => setDrag(null)}
-                            onKeyDown={(event) => {
-                              if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return
-                              event.preventDefault()
-                              const to = event.key === "ArrowUp" ? index - 1 : index + 2
-                              if (to < 0 || to > shown.length) return
-                              moveRow(row.id, to)
-                              setFocusGrip(row.id)
-                            }}
-                          >
-                            <GripIcon />
-                          </button>
-                        )}
-                      </td>
-                    )}
-                    <td
-                      className={[
-                        "vault-no",
-                        isFixed("no") && "vault-fixed",
-                        picked && picked.rowId === row.id && picked.columnId === null && "vault-picked",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      style={fixedStyle("no")}
-                      title="Select this row"
-                      onClick={() => pick(row.id, null)}
-                    >
-                      {index + 1}
-                    </td>
-                    {table.columns.map((column, columnIndex) => (
-                      <td
-                        key={column.id}
-                        className={
-                          [
-                            columnClass(column, columnIndex),
-                            repeated.get(column.id)?.has(row.id) && "vault-cell-repeated",
-                            isPicked(row.id, column.id) && "vault-picked",
-                            picked?.rowId === row.id && picked.columnId === column.id && "vault-picked-cell",
-                          ]
-                            .filter(Boolean)
-                            .join(" ") || undefined
-                        }
-                        style={{ ...widthStyle(column.id), ...fixedStyle(column.id) }}
-                        onClick={(event) => {
-                          // Not a button or link in the cell, nor a dialog opened from it.
-                          const target = event.target as HTMLElement
-                          if (!event.currentTarget.contains(target) || target.closest("button, a")) return
-                          pick(row.id, column.id)
-                        }}
-                      >
-                        {editing ? (
-                          <CellEditor
-                            column={column}
-                            value={row.cells[column.id] ?? null}
-                            onChange={(value) => setCell(row.id, column.id, value)}
-                            link={links.get(column.id)}
-                          />
-                        ) : (
-                          <CopyableCell column={column} value={row.cells[column.id] ?? null} link={links.get(column.id)} />
-                        )}
-                        {repeated.get(column.id)?.has(row.id) && (
-                          <RepeatedMark
-                            others={repeated.get(column.id)!.get(row.id)!}
-                            column={column}
-                            onShow={() => setDuplicateColumnIds([column.id])}
-                          />
-                        )}
-                      </td>
-                    ))}
-                    {editing && (
-                      <td className="vault-row-actions">
-                        <button
-                          type="button"
-                          className="vault-remove"
-                          aria-label="Delete row"
-                          title="Delete row"
-                          onClick={() =>
-                            change((current) => ({ ...current, rows: current.rows.filter((item) => item.id !== row.id) }))
-                          }
-                        >
-                          <RemoveIcon />
-                        </button>
-                      </td>
-                    )}
-                  </tr>
+                    sideFixed={hasFixed}
+                    gripLeft={hasFixed ? lefts.grip : undefined}
+                    noLeft={hasFixed ? lefts.no : undefined}
+                    repeats={
+                      repeated.size === 0
+                        ? ""
+                        : table.columns.map((column) => repeated.get(column.id)?.get(row.id) ?? 0).join(",")
+                    }
+                    picked={
+                      !picked
+                        ? undefined
+                        : picked.rowId === null
+                          ? (picked.columnId ?? undefined)
+                          : picked.rowId === row.id
+                            ? (picked.columnId ?? "*")
+                            : undefined
+                    }
+                    pickedCell={picked?.rowId === row.id && picked.columnId !== null}
+                    actions={rowActions}
+                  />
                 ))
               )}
             </tbody>
@@ -4300,6 +4526,11 @@ function TableEditor({ vault, table }: { vault: VaultState; table: VaultTable })
               </tfoot>
             )}
           </table>
+          {hasMore && (
+            <div className="vault-more" ref={moreRef}>
+              {shown.length - drawnCount} more rows show as you scroll.
+            </div>
+          )}
           {pickedLabel && (
             <div className="vault-pick-bar">
               <div>

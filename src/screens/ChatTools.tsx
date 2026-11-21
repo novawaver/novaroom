@@ -408,3 +408,133 @@ export function ReadMark({
     </>
   )
 }
+/** One person in the list a chat's Members button opens. */
+export type ShownMember = {
+  id: string
+  name: string
+  avatarUrl: string | null
+  // "online", "idle" or "offline", for the dot; left out when it is not known.
+  presence?: string
+  // Shown after the name: "You", "Away" and the like.
+  note?: string
+}
+
+function memberInitials(name: string) {
+  const parts = name.split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
+  return name.slice(0, 2).toUpperCase()
+}
+
+/**
+ * The button in a chat's header that lists who is in it. `load` is asked each time the list is
+ * opened, so it shows the members as they are then.
+ */
+export function MembersButton({
+  title,
+  hint = "Show members",
+  empty = "Nobody is in this chat.",
+  load,
+}: {
+  title: string
+  hint?: string
+  empty?: string
+  load: () => Promise<ShownMember[]>
+}) {
+  const [open, setOpen] = useState(false)
+  const [members, setMembers] = useState<ShownMember[] | null>(null)
+  const [error, setError] = useState("")
+  const [query, setQuery] = useState("")
+  const loadRef = useRef(load)
+  loadRef.current = load
+
+  useEffect(() => {
+    if (!open) return
+    let current = true
+    setMembers(null)
+    setError("")
+    setQuery("")
+    loadRef.current().then(
+      (found) => current && setMembers(found),
+      (caught) => current && setError(caught instanceof Error ? caught.message : "Could not load the members."),
+    )
+    // Caught first and stopped, so Escape only closes the list and not the chat behind it.
+    function onKey(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return
+      event.stopPropagation()
+      setOpen(false)
+    }
+    document.addEventListener("keydown", onKey, true)
+    return () => {
+      current = false
+      document.removeEventListener("keydown", onKey, true)
+    }
+  }, [open])
+
+  const wanted = query.trim().toLowerCase()
+  const shown = members && wanted ? members.filter((member) => member.name.toLowerCase().includes(wanted)) : members
+  return (
+    <>
+      <button
+        type="button"
+        className="icon-button thread-call"
+        aria-label={hint}
+        title={hint}
+        onClick={() => setOpen(true)}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="9" cy="8.5" r="3.2" />
+          <path d="M3 19c.6-3.2 3-5 6-5s5.400 1.800 6 5M15.500 5.600a3.200 3.200 0 010 5.800M17.500 14.500c1.900.700 3.100 2.200 3.500 4.500" />
+        </svg>
+      </button>
+      {open &&
+        createPortal(
+          <div className="desk-backdrop" onPointerDown={(event) => event.target === event.currentTarget && setOpen(false)}>
+            <div className="desk-modal chat-confirm read-list member-list" role="dialog" aria-label={title}>
+              <h2>
+                {title}
+                {members ? ` (${members.length})` : ""}
+              </h2>
+              {members && members.length > 8 && (
+                <input
+                  className="search"
+                  value={query}
+                  placeholder="Search members"
+                  aria-label="Search members"
+                  autoFocus
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              )}
+              {error ? (
+                <p className="form-error">{error}</p>
+              ) : !shown ? (
+                <p className="hint">Loading...</p>
+              ) : shown.length === 0 ? (
+                <p className="hint">{wanted ? "No member has that name." : empty}</p>
+              ) : (
+                <ul>
+                  {shown.map((member) => (
+                    <li key={member.id}>
+                      <span className="member-list-photo">
+                        <span className="avatar">
+                          {member.avatarUrl ? <img src={member.avatarUrl} alt="" /> : <span>{memberInitials(member.name)}</span>}
+                        </span>
+                        {member.presence && <span className={`presence-dot member-list-dot ${member.presence}`} />}
+                      </span>
+                      <span className="member-list-name">{member.name}</span>
+                      {member.note && <span className="member-list-note">{member.note}</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="form-actions">
+                <button type="button" className="button secondary" onClick={() => setOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
+  )
+}

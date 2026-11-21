@@ -10003,3 +10003,64 @@ code {
   color: var(--side-muted);
   font-size: 14px;
 }
+/* Vault: a note under a big table's rows, where the next batch of rows is drawn from. */
+.vault-more {
+  position: sticky;
+  left: 0;
+  padding: 10px 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.vault-cards .vault-more {
+  grid-column: 1 / -1;
+}
+
+/* Chats: the list of who is in a group, a room or Broadcast. */
+.member-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 3px 0;
+}
+
+.member-list-photo {
+  position: relative;
+  flex: none;
+}
+
+.member-list .avatar {
+  width: 32px;
+  height: 32px;
+  font-size: 12px;
+}
+
+.member-list .avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.presence-dot.member-list-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--card);
+}
+
+.member-list-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-list-note {
+  flex: none;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+}

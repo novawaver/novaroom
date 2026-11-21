@@ -45,6 +45,7 @@ import { DownloadIcon, ImageViewer } from "./ImageViewer"
 import {
   ConfirmDialog,
   QuietIcon,
+  MembersButton,
   ReadMark,
   SelectCheck,
   ThreadMenu,
@@ -1346,6 +1347,24 @@ export function LocalChatThread({
                       ? "Their app is too old for calls"
                       : undefined
               }
+            />
+          )}
+          {isRoom && (
+            <MembersButton
+              title="On this network"
+              hint="Show who is on this network"
+              load={async () => [
+                { id: userId, name: "You", avatarUrl: local.avatarOf(userId), presence: "online" },
+                ...[...local.peers]
+                  .sort((a, b) => a.name.localeCompare(b.name))
+                  .map((item) => ({
+                    id: item.userId,
+                    name: item.name || "Someone",
+                    avatarUrl: local.avatarOf(item.userId),
+                    presence: item.idle ? "idle" : "online",
+                    note: item.idle ? "Away" : undefined,
+                  })),
+              ]}
             />
           )}
           <AutoDeleteMenu

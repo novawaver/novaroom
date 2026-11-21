@@ -1029,3 +1029,15 @@ export function subscribeToProfileChanges(onChange: (change: ProfileChange) => v
     void client.removeChannel(channel)
   }
 }
+
+/** The ids of everyone in a group chat or room. */
+export async function listMemberIds(conversationId: string): Promise<string[]> {
+  if (!supabase) return readDb().conversations.find((conversation) => conversation.id === conversationId)?.memberIds ?? []
+  const { data, error } = await supabase
+    .from("conversation_members")
+    .select("user_id")
+    .eq("conversation_id", conversationId)
+    .limit(1000)
+  if (error) throw new Error(error.message)
+  return (data ?? []).map((row) => row.user_id as string)
+}

@@ -965,7 +965,9 @@ export function findDuplicates(rows: VaultRow[], columns: VaultColumn[]): Map<st
     const blank = columns.every((column, index) => values[index] === "" || (column.kind === "checkbox" && values[index] === "no"))
     if (blank) continue
     const key = JSON.stringify(values)
-    byKey.set(key, [...(byKey.get(key) ?? []), row.id])
+    const sharing = byKey.get(key)
+      if (sharing) sharing.push(row.id)
+      else byKey.set(key, [row.id])
   }
   const groups = new Map<string, number>()
   let group = 0
@@ -990,7 +992,9 @@ export function duplicateCells(rows: VaultRow[], columns: VaultColumn[]): Map<st
     for (const row of rows) {
       const key = duplicateKey(row.cells[column.id], column)
       if (key === "") continue
-      byKey.set(key, [...(byKey.get(key) ?? []), row.id])
+      const sharing = byKey.get(key)
+      if (sharing) sharing.push(row.id)
+      else byKey.set(key, [row.id])
     }
     const marked = new Map<string, number>()
     for (const ids of byKey.values()) {
